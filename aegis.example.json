@@ -1,0 +1,90 @@
+{
+  "server": {
+    "address": ":8080",
+    "read_timeout": "30s",
+    "write_timeout": "120s",
+    "shutdown_timeout": "15s",
+    "tls": {
+      "enabled": false,
+      "cert_file": "/etc/aegis/tls/server.crt",
+      "key_file": "/etc/aegis/tls/server.key",
+      "ca_file": "/etc/aegis/tls/ca.crt",
+      "min_version": "1.3"
+    }
+  },
+  "kms": {
+    "mode": "local",
+    "local": {
+      "master_key_env": "AEGIS_MASTER_KEY"
+    },
+    "vault": {
+      "address": "https://vault.internal:8200",
+      "path": "secret/data/aegis/keys",
+      "token_env": "VAULT_TOKEN"
+    }
+  },
+  "providers": [
+    {
+      "id": "openai-primary",
+      "name": "OpenAI Primary",
+      "type": "openai",
+      "base_url": "https://api.openai.com",
+      "api_key_id": "openai-key-1",
+      "models": ["gpt-4o", "gpt-4o-mini", "gpt-4.1"],
+      "weight": 10,
+      "max_rpm": 500,
+      "max_tpm": 800000,
+      "enabled": true,
+      "priority": 1
+    },
+    {
+      "id": "anthropic-primary",
+      "name": "Anthropic Primary",
+      "type": "anthropic",
+      "base_url": "https://api.anthropic.com",
+      "api_key_id": "anthropic-key-1",
+      "models": ["claude-sonnet-4-20250514", "claude-haiku-3-5"],
+      "weight": 10,
+      "max_rpm": 300,
+      "max_tpm": 400000,
+      "enabled": true,
+      "priority": 1
+    },
+    {
+      "id": "deepseek-primary",
+      "name": "DeepSeek Primary",
+      "type": "deepseek",
+      "base_url": "https://api.deepseek.com",
+      "api_key_id": "deepseek-key-1",
+      "models": ["deepseek-v3", "deepseek-r1"],
+      "weight": 5,
+      "max_rpm": 200,
+      "max_tpm": 500000,
+      "enabled": true,
+      "priority": 2
+    }
+  ],
+  "auth": {
+    "jwt_signing_key_env": "AEGIS_JWT_KEY",
+    "token_expiry": "720h",
+    "issuer": "aegis"
+  },
+  "rate_limit": {
+    "enabled": true,
+    "backend": "memory",
+    "redis_url": "redis://localhost:6379/0",
+    "default_rpm": 60,
+    "default_tpm": 100000,
+    "default_max_concurrency": 10
+  },
+  "quota": {
+    "enabled": true,
+    "backend": "sqlite",
+    "dsn": "aegis.db",
+    "default_budget": 100.0
+  },
+  "store": {
+    "type": "sqlite",
+    "dsn": "aegis.db"
+  }
+}

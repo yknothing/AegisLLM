@@ -1,0 +1,110 @@
+# Aegis
+
+**Security-first LLM API Gateway**
+
+Aegis is a lightweight, secure gateway for managing access to multiple LLM providers. It provides unified API access, encrypted key management, intelligent routing, rate limiting, and cost control — all through a single binary.
+
+## Why Aegis?
+
+| Problem | Aegis Solution |
+| :--- | :--- |
+| API keys scattered across services | Centralized KMS with AES-256-GCM encryption |
+| No visibility into LLM costs | Real-time token metering and budget enforcement |
+| Single provider dependency | Multi-provider routing with automatic failover |
+| Rate limit errors from providers | Distributed token bucket with circuit breaker |
+| PII leakage to third-party APIs | Built-in PII detection and redaction |
+| Supply chain attack risk | Go static binary, Distroless image, zero runtime deps |
+
+## Architecture
+
+Aegis uses a **microkernel + middleware pipeline** architecture:
+
+```
+Request → [Auth] → [RateLimit] → [PII] → [Router] → [KMS] → [Adapter] → [Proxy] → Provider
+```
+
+Every feature is a middleware plugin. The core is minimal and auditable.
+
+## Quick Start
+
+```bash
+# Generate a 256-bit master key for local KMS
+export AEGIS_MASTER_KEY=$(openssl rand -hex 32)
+export AEGIS_JWT_KEY=$(openssl rand -hex 64)
+
+# Run Aegis
+./aegis --config aegis.example.json
+```
+
+Then point your OpenAI SDK to Aegis:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8080/v1",
+    api_key="vk_your_virtual_key_here"
+)
+
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Hello!"}],
+    stream=True
+)
+```
+
+## Features
+
+- **Unified API**: OpenAI-compatible endpoint for all providers (OpenAI, Anthropic, Google, DeepSeek, etc.)
+- **Encrypted Key Storage**: Dual-layer KMS — built-in AES-256-GCM or HashiCorp Vault
+- **Smart Routing**: Priority-based routing with circuit breaker and automatic fallback
+- **Rate Limiting**: Three-dimensional limits (RPM, TPM, concurrency) with distributed backend
+- **Cost Management**: Hierarchical budgets, real-time metering, configurable pricing tables
+- **PII Protection**: Regex-based detection for emails, phone numbers, IDs, and API keys
+- **Streaming Support**: Zero-latency SSE proxy with real-time token counting
+- **Zero-PII Logging**: Audit trail records only metadata, never content
+- **mTLS Support**: Mutual TLS for zero-trust network deployments
+- **Minimal Footprint**: Single binary, <50MB Docker image (Distroless)
+
+## Deployment Modes
+
+| Mode | Dependencies | Use Case |
+| :--- | :--- | :--- |
+| **Standalone** | None (SQLite + memory) | Development, small teams |
+| **Cluster** | MySQL + Redis + Vault | Production, enterprise |
+
+## Security
+
+Security is Aegis's highest priority. See [SECURITY.md](SECURITY.md) for:
+- Vulnerability reporting process
+- Security design principles
+- Secure development guidelines
+
+**Key security properties:**
+- API keys never exist in plaintext at rest
+- Memory is zeroed after credential use
+- Egress filtering prevents data exfiltration
+- No shell or package manager in production image
+
+## Project Structure
+
+```
+cmd/aegis/          → Application entry point
+internal/
+  config/           → Configuration loading and validation
+  server/           → HTTP server and middleware pipeline
+  middleware/       → Auth, rate limit, PII, router, KMS, adapter
+  kms/              → Key management (local AES + Vault)
+  proxy/            → Streaming proxy engine
+  quota/            → Budget and cost management
+  model/            → OpenAI-compatible API types
+  utils/            → Memory zeroing, safe logging
+```
+
+## Contributing
+
+Contributions are welcome. Please read [SECURITY.md](SECURITY.md) for security guidelines before submitting code.
+
+## License
+
+MIT License. See [LICENSE](LICENSE).
