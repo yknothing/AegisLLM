@@ -6,6 +6,11 @@
 //   - The key MUST be zeroed after the proxy completes (handled by pipeline)
 //   - Keys are never logged, cached, or written to disk
 //   - If KMS is unreachable, the request fails gracefully (no fallback to plaintext)
+//
+// KEY SOURCE RESOLUTION (ADR-003):
+//   - If the Virtual Key has key_source="pool", resolve from the pool mapping
+//   - If the Virtual Key has key_source="byok", use the byok_key_id from JWT claims
+//   - This enables the hybrid model where both developer and user keys coexist
 package middleware
 
 import (
@@ -18,9 +23,9 @@ import (
 // KMSMiddlewareConfig configures the KMS key injection middleware.
 type KMSMiddlewareConfig struct {
 	Provider kms.Provider
-	// KeyMapping maps provider IDs to their KMS key IDs.
-	// This allows multiple providers to use different stored keys.
-	KeyMapping map[string]string
+	// PoolKeyMapping maps provider IDs to their KMS key IDs for pool mode.
+	// Used when key_source="pool" (server-hosted keys).
+	PoolKeyMapping map[string]string
 }
 
 // KMSInjector creates the KMS middleware that injects provider API keys.
@@ -28,22 +33,25 @@ type KMSMiddlewareConfig struct {
 // Position in pipeline: AFTER Router (needs ProviderID), BEFORE Proxy.
 //
 // SECURITY INVARIANTS:
-//   1. Key is fetched on-demand, never pre-cached
-//   2. Key is stored only in RequestContext (zeroed after request)
-//   3. KMS failure = request failure (no insecure fallback)
-//   4. Key retrieval is logged as metadata only (key ID, not key value)
+//  1. Key is fetched on-demand, never pre-cached
+//  2. Key is stored only in RequestContext (zeroed after request)
+//  3. KMS failure = request failure (no insecure fallback)
+//  4. Key retrieval is logged as metadata only (key ID, not key value)
+//
+// KEY SOURCE RESOLUTION:
+//   - Pool mode: keyID = PoolKeyMapping[providerID]
+//   - BYOK mode: keyID = claims.BYOKKeyID (from JWT)
 func KMSInjector(cfg KMSMiddlewareConfig) server.Middleware {
 	return func(ctx *server.RequestContext, next func()) {
 		if ctx.ProviderID == "" {
-			// Router middleware should have set this
 			ctx.Abort(http.StatusInternalServerError, []byte(`{"error":{"message":"internal routing error","type":"server_error"}}`))
 			return
 		}
 
-		// Resolve the KMS key ID for this provider
-		keyID, ok := cfg.KeyMapping[ctx.ProviderID]
-		if !ok {
-			ctx.Abort(http.StatusInternalServerError, []byte(`{"error":{"message":"provider key not configured","type":"server_error"}}`))
+		// Resolve the KMS key ID based on key source
+		keyID := resolveKeyID(ctx, cfg.PoolKeyMapping)
+		if keyID == "" {
+			ctx.Abort(http.StatusInternalServerError, []byte(`{"error":{"message":"unable to resolve provider key","type":"server_error"}}`))
 			return
 		}
 
@@ -65,4 +73,24 @@ func KMSInjector(cfg KMSMiddlewareConfig) server.Middleware {
 		secureKey.Close()
 		ctx.ProviderAPIKey = nil
 	}
+}
+
+// resolveKeyID determines which KMS key to fetch based on the Virtual Key's source.
+//
+// For "pool" mode: Uses the server's pool mapping (developer-owned keys).
+// For "byok" mode: Uses the key ID embedded in the JWT claims (user-owned keys).
+func resolveKeyID(ctx *server.RequestContext, poolMapping map[string]string) string {
+	// Check if this is a BYOK request
+	// The key source and BYOK key ID are set by the auth middleware
+	// from the JWT claims (KeySource and BYOKKeyID fields)
+	if ctx.KeySource == "byok" && ctx.BYOKKeyID != "" {
+		return ctx.BYOKKeyID
+	}
+
+	// Default: pool mode — look up from the server's key mapping
+	keyID, ok := poolMapping[ctx.ProviderID]
+	if !ok {
+		return ""
+	}
+	return keyID
 }

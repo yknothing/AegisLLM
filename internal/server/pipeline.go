@@ -34,6 +34,8 @@ type RequestContext struct {
 	VirtualKeyID string
 	Permissions  []string
 	Budget       float64
+	KeySource    string // "pool" or "byok" (from JWT claims)
+	BYOKKeyID    string // KMS key ID for BYOK users (from JWT claims)
 
 	// Routing decision (populated by router middleware)
 	ProviderID string

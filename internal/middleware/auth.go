@@ -38,11 +38,14 @@ type RevocationStore interface {
 // VirtualKeyClaims represents the JWT payload for an Aegis virtual key.
 type VirtualKeyClaims struct {
 	KeyID       string   `json:"kid"`
-	Subject     string   `json:"sub"`     // Owner identifier
-	Models      []string `json:"models"`  // Allowed models
-	MaxRPM      int      `json:"rpm"`     // Per-key rate limit
-	MaxTPM      int      `json:"tpm"`     // Per-key token limit
-	BudgetUSD   float64  `json:"budget"`  // Monthly budget in USD
+	Subject     string   `json:"sub"`        // Owner identifier
+	Models      []string `json:"models"`     // Allowed models
+	MaxRPM      int      `json:"rpm"`        // Per-key rate limit (0 = unlimited)
+	MaxTPM      int      `json:"tpm"`        // Per-key token limit (0 = unlimited)
+	BudgetUSD   float64  `json:"budget"`     // Monthly budget in USD (0 = unlimited)
+	KeySource   string   `json:"key_source"` // "pool" or "byok"
+	BYOKKeyID   string   `json:"byok_key_id,omitempty"` // KMS key ID for BYOK users
+	PoolGroup   string   `json:"pool_group,omitempty"`  // Pool group for server-hosted keys
 	IssuedAt    int64    `json:"iat"`
 	ExpiresAt   int64    `json:"exp"`
 	Issuer      string   `json:"iss"`
@@ -91,6 +94,8 @@ func Auth(cfg AuthConfig) server.Middleware {
 		ctx.VirtualKeyID = claims.KeyID
 		ctx.Permissions = claims.Models
 		ctx.Budget = claims.BudgetUSD
+		ctx.KeySource = claims.KeySource
+		ctx.BYOKKeyID = claims.BYOKKeyID
 
 		next()
 	}
