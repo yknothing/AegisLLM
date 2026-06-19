@@ -12,6 +12,7 @@ All notable changes to AegisLLM are documented here.
 - Tightened proxy egress validation to require HTTPS and expanded filtering for sensitive client forwarding headers.
 - Removed the unused `MemZeroString` API because mutating Go string backing memory is unsafe.
 - Removed key identifiers from reserved Vault backend error messages.
+- Hardened audit log redaction so sensitive top-level fields, nested `slog.Group` fields, resolved `slog.LogValuer` groups, and `WithAttrs` context values are redacted before output while preserving structural token-count metadata.
 
 ### Runtime and packaging
 

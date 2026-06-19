@@ -33,6 +33,34 @@ var SensitiveFields = map[string]bool{
 	"cookie":        true,
 }
 
+var safeStructuralFields = map[string]bool{
+	"cached_tokens":     true,
+	"completion_tokens": true,
+	"input_tokens":      true,
+	"output_tokens":     true,
+	"prompt_tokens":     true,
+	"reasoning_tokens":  true,
+	"total_tokens":      true,
+}
+
+var sensitiveKeyFragments = []string{
+	"api_key",
+	"apikey",
+	"authorization",
+	"body",
+	"completion",
+	"content",
+	"cookie",
+	"credential",
+	"jwt",
+	"messages",
+	"password",
+	"private_key",
+	"prompt",
+	"secret",
+	"token",
+}
+
 // SafeHandler wraps a slog.Handler and strips any sensitive fields.
 // This is a defense-in-depth measure: even if code accidentally logs
 // sensitive data, this handler will redact it.
@@ -55,12 +83,7 @@ func (h *SafeHandler) Handle(ctx context.Context, r slog.Record) error {
 	// Create a new record with filtered attributes
 	filtered := slog.NewRecord(r.Time, r.Level, r.Message, r.PC)
 	r.Attrs(func(a slog.Attr) bool {
-		if !isSensitiveKey(a.Key) {
-			filtered.AddAttrs(a)
-		} else {
-			// Replace with redaction marker
-			filtered.AddAttrs(slog.String(a.Key, "[REDACTED]"))
-		}
+		filtered.AddAttrs(sanitizeAttr(a))
 		return true
 	})
 	return h.inner.Handle(ctx, filtered)
@@ -71,11 +94,7 @@ func (h *SafeHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	// Filter sensitive attrs before passing to inner handler
 	safe := make([]slog.Attr, 0, len(attrs))
 	for _, a := range attrs {
-		if isSensitiveKey(a.Key) {
-			safe = append(safe, slog.String(a.Key, "[REDACTED]"))
-		} else {
-			safe = append(safe, a)
-		}
+		safe = append(safe, sanitizeAttr(a))
 	}
 	return &SafeHandler{inner: h.inner.WithAttrs(safe)}
 }
@@ -87,8 +106,41 @@ func (h *SafeHandler) WithGroup(name string) slog.Handler {
 
 // isSensitiveKey checks if a log field name matches known sensitive patterns.
 func isSensitiveKey(key string) bool {
-	lower := strings.ToLower(key)
-	return SensitiveFields[lower]
+	normalized := normalizeLogKey(key)
+	if safeStructuralFields[normalized] {
+		return false
+	}
+	if SensitiveFields[normalized] {
+		return true
+	}
+	for _, fragment := range sensitiveKeyFragments {
+		if strings.Contains(normalized, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func sanitizeAttr(a slog.Attr) slog.Attr {
+	if isSensitiveKey(a.Key) {
+		return slog.String(a.Key, "[REDACTED]")
+	}
+	resolved := a.Value.Resolve()
+	if resolved.Kind() == slog.KindGroup {
+		group := resolved.Group()
+		safe := make([]slog.Attr, 0, len(group))
+		for _, child := range group {
+			safe = append(safe, sanitizeAttr(child))
+		}
+		return slog.Attr{Key: a.Key, Value: slog.GroupValue(safe...)}
+	}
+	return slog.Attr{Key: a.Key, Value: resolved}
+}
+
+func normalizeLogKey(key string) string {
+	lower := strings.ToLower(strings.TrimSpace(key))
+	replacer := strings.NewReplacer("-", "_", ".", "_", " ", "_")
+	return replacer.Replace(lower)
 }
 
 // NewAuditLogger creates a structured logger suitable for audit trails.

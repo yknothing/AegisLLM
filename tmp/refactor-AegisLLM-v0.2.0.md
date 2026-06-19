@@ -386,3 +386,36 @@ After each significant step:
   - Restore an approved GitHub write credential path.
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
+### Step 12 - Recursive Audit Log Redaction
+
+- Security finding:
+  - `internal/utils.SafeHandler` redacted only top-level field names.
+  - Sensitive values nested inside `slog.Group`, `WithAttrs`, or a resolved `slog.LogValuer` group could bypass the defense-in-depth audit logger and be emitted by the wrapped JSON handler.
+- Fix:
+  - Added normalized sensitive-key matching for common secret/content variants such as `X-Api-Key`, `client_secret`, `private_key`, `messages`, `prompt`, `completion`, and `body`.
+  - Added recursive `sanitizeAttr` handling for nested `slog.Group` values.
+  - Resolved `slog.LogValuer` values before group recursion so deferred groups are redacted before the wrapped handler outputs them.
+  - Preserved exact structural token-count metadata fields such as `prompt_tokens`, `completion_tokens`, and `total_tokens` to keep the `SECURITY.md` audit-log contract usable for cost/usage metadata without allowing prompt or completion bodies.
+  - Added regression coverage in `internal/utils/logger_test.go` for top-level redaction, safe structural token counts, nested group redaction, `WithAttrs`, and resolved `LogValuer` groups.
+  - Updated `CHANGELOG.md` under `v0.2.0 - Release Candidate`.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test ./internal/utils` passed.
+  - `git diff --check` passed.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=bb051b8-logger-redaction BUILD_DATE=2026-06-20T00:00:00Z PORT=18088` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `248.67kB`.
+    - Image `sha256:5171d1c8da75192abd4ed12a65332cb5f885205a14159f9e2114f502b8f2d230`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: bb051b8-logger-redaction, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Autoreview:
+  - Security review found the original top-level-only redaction was too narrow for nested `slog` structures.
+  - Review also found the initial fragment-based redaction would have over-redacted allowed structural token-count metadata, contradicting the `SECURITY.md` audit-log contract; the exact token-count allowlist was added before commit.
+- Remaining gates before release-complete claim:
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
