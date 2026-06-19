@@ -202,3 +202,34 @@ After each significant step:
 - Remaining gates before release-complete claim:
   - Push the branch and verify GitHub CI green on the remote runner.
   - Tag `v0.2.0` only after remote CI is green and release artifacts are confirmed clean.
+
+### Step 6 - Remote CI Gate Diagnosis
+
+- Push status:
+  - Local branch: `codex/aegis-architecture-refactor`.
+  - Local HEAD: `b50f32a refactor: harden v0.2.0 release gates`.
+  - Remote branch remained at `8a279e0 Align docs and defaults with runtime truth`.
+  - `git push origin codex/aegis-architecture-refactor` was interrupted after no output for several minutes.
+  - `GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false git push origin codex/aegis-architecture-refactor` also hung until interrupted.
+  - Process inspection showed the push blocked under `git credential-osxkeychain get`.
+  - Direct `printf 'protocol=https\nhost=github.com\n\n' | git credential-osxkeychain get` also hung until interrupted.
+  - Disabling the helper with `git -c credential.helper= -c core.askPass=/usr/bin/false push origin codex/aegis-architecture-refactor` made the failure explicit: `fatal: could not read Username for 'https://github.com': Device not configured`.
+  - `gh` is not installed.
+  - `ssh -o BatchMode=yes -T git@github.com` returned `Permission denied (publickey)`.
+- GitHub connector assessment with currently exposed connector tools:
+  - The connector can read status/files and update refs to commits that already exist in GitHub.
+  - It cannot upload the local `b50f32a` git commit object directly.
+  - Replaying the 29-file diff through the contents API would create a different sequence of commits and diverge from the clean local batch, so it was not used.
+- Go 1.22 Linux/amd64 compatibility smoke evidence:
+  - On `ssh ceo`, ran a Linux/amd64 Go 1.22 container using the pinned builder image digest:
+    - `golang:1.22-alpine@sha256:1699c10032ca2582ec89a24a1312d986a3f094aed3d5c1147b19880afe40e052`
+    - Container reported `go version go1.22.12 linux/amd64`.
+    - `go test ./...` passed.
+    - `go vet ./...` passed with no output and exit 0.
+  - Remote temp directory `/tmp/aegis-go122-ci.h3S1Ii` was removed.
+- Documentation truth-surface fix:
+  - `docs/app-integration-strategy.md` now distinguishes virtual-key `rpm` claims from reserved provider-level `max_rpm`.
+- Remaining gates before release-complete claim:
+  - Fix local GitHub push credential path or provide another approved push route.
+  - Push branch and verify GitHub Actions CI green on the remote runner.
+  - Tag `v0.2.0` only after remote CI is green and release artifacts are confirmed clean.

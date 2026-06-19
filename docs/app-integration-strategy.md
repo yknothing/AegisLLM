@@ -92,7 +92,7 @@ For BYOK users, the claims differ:
 }
 ```
 
-Current runtime accepts non-zero `rpm`. `tpm` and `budget` are reserved and must be `0` until TPM and quota enforcement are implemented.
+Current runtime accepts non-zero virtual-key `rpm` claims for per-key request limiting. Provider config `max_rpm` and `max_tpm` values are reserved and must be `0` until provider-level throttle and TPM enforcement are implemented. Virtual-key `tpm` and `budget` claims are also reserved and must be `0` until TPM and quota enforcement are implemented.
 
 ## BYOK Workflow
 
@@ -107,7 +107,7 @@ Current runtime accepts non-zero `rpm`. `tpm` and `budget` are reserved and must
 
 - User's real key is encrypted at rest (AES-256-GCM) in Aegis KMS
 - Key is decrypted only in memory, only for the duration of a single request
-- Key is zeroed from memory immediately after the upstream request is sent
+- Key bytes are zeroed after the upstream transport returns response headers; Go header strings cannot be explicitly zeroed
 - User can revoke their BYOK key at any time via `DELETE /admin/keys/byok/{id}`
 - Aegis never logs or exposes the real key in any API response
 
