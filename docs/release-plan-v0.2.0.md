@@ -1,0 +1,89 @@
+# AegisLLM v0.2.0 Release Plan
+
+## Status
+
+Current decision: **No-Go for a supported release**.
+
+`v0.2.0` may remain a local release candidate until all release gates below are
+complete. Do not create the `v0.2.0` tag, publish release notes as supported, or
+tag Docker images as `aegis:latest` before the go/no-go criteria are satisfied.
+
+## Scope
+
+Included in `v0.2.0`:
+
+- Runtime architecture baseline for the microkernel + middleware pipeline.
+- HS256 virtual-key validation with fail-closed model permission checks.
+- In-memory request/concurrency rate limiting.
+- Local encrypted file-backed KMS for standalone validation.
+- OpenAI-compatible provider path for `openai` and `deepseek`.
+- HTTPS egress allowlist validation.
+- PII redaction baseline.
+- Distroless non-root Docker image with read-only runtime smoke coverage.
+- Reproducible release gate scripts and GitHub Actions workflow.
+
+Explicitly excluded:
+
+- Production Admin API key issuance, revocation, and storage flows.
+- Vault KMS runtime backend.
+- Redis/distributed rate limiting.
+- Quota, budget, and TPM enforcement.
+- RS256/JWKS virtual-key validation.
+- Anthropic/Gemini protocol adapters.
+- Production support commitment for `v0.2.0` before tag and remote CI green.
+
+## Release Gates
+
+All gates are required before tag creation:
+
+1. Local worktree is clean on `codex/aegis-architecture-refactor`.
+2. `make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passes.
+3. `make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=<sha> BUILD_DATE=<utc-rfc3339> PORT=<free-port>` passes on `ssh ceo`.
+4. Branch is pushed to GitHub without rewriting the local clean commit sequence.
+5. GitHub Actions CI is green for the exact commit that will be tagged.
+6. `SECURITY.md` still says no stable version is supported before the tag.
+7. `CHANGELOG.md` and README describe the release candidate truthfully.
+8. Release owner, verifier, and approver are assigned by name before the tag.
+
+## Owners and Communication
+
+- Release owner: the maintainer with GitHub write access for `yknothing/AegisLLM`; assign a named person before tag creation.
+- Verification owner: the engineer running local release gates, `ceo` Docker smoke, and GitHub Actions status checks; assign a named person before tag creation.
+- Approver: repository maintainer or tech lead with authority to accept the excluded capabilities above.
+
+Communication moments:
+
+- Before tag: post the candidate SHA, local gate output summary, `ceo` Docker smoke summary, and GitHub Actions run URL.
+- At tag: publish release notes from `CHANGELOG.md` and state that unsupported capabilities remain planned work.
+- After tag: record final SHA, tag URL, GitHub Actions run URL, and Docker image tag policy result.
+
+## Abort Conditions
+
+Abort or pause release if any condition occurs:
+
+- Remote branch cannot be pushed with approved credentials.
+- GitHub Actions fails on the exact candidate SHA.
+- Local release preflight or `ceo` Docker smoke fails after the final code change.
+- A security finding shows request/response body logging, plaintext key storage, missing credential zeroing, unsafe egress, or unsupported capability fail-open behavior.
+- Documentation implies stable support before the tag exists.
+- Release owner, verifier, or approver is not assigned.
+
+## Rollback
+
+Before tag creation, rollback is simply "do not release"; keep `v0.2.0` marked
+unsupported. If a tag is created accidentally before gates pass, delete the
+remote tag and publish a correction that no supported release exists. Do not
+move `aegis:latest` unless a supported release has passed all gates.
+
+After tag creation, fixes must land as a new patch release candidate rather than
+rewriting the signed release history.
+
+## Success Criteria
+
+The release can be called complete only when:
+
+- The final tagged commit is present on GitHub.
+- GitHub Actions is green for that exact commit.
+- The `v0.2.0` tag exists and points to that commit.
+- Release notes, security support status, and Docker tag policy are consistent.
+- The final release evidence is appended to `tmp/refactor-AegisLLM-v0.2.0.md`.

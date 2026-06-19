@@ -347,3 +347,42 @@ After each significant step:
   - Restore an approved GitHub write credential path.
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
+### Step 11 - Release Plan and Go/No-Go Runbook
+
+- Added `docs/release-plan-v0.2.0.md` as the public release-management artifact for `v0.2.0`.
+- The release plan records the current decision as **No-Go for a supported release** until:
+  - local release preflight passes,
+  - `ceo` Docker smoke passes,
+  - the branch is pushed without rewriting the clean local commit sequence,
+  - GitHub Actions is green for the exact commit to tag,
+  - release owner, verifier, and approver are assigned by name,
+  - `v0.2.0` tag is created only after the above gates.
+- The plan explicitly lists included scope and excluded capabilities: Admin issuance/revocation, Vault, Redis, quota/budget/TPM enforcement, RS256/JWKS, and Anthropic/Gemini adapters remain out of the supported release scope.
+- Added rollback/abort guidance:
+  - before tag, rollback means do not release and keep `v0.2.0` unsupported;
+  - if a tag is accidentally created before gates pass, delete the remote tag and publish a correction;
+  - after tag, fixes must land as a new patch release candidate instead of rewriting release history.
+- Linked the release plan from `docs/README.md`, `README.md`, and `SECURITY.md`.
+- Remote release gate recheck at step start:
+  - Local branch was clean and ahead of `origin/codex/aegis-architecture-refactor` by 6 commits.
+  - Local HEAD was `40768df5c889167d8f17fb10be7cb213c25b3388`.
+  - Remote branch still pointed at `8a279e0547a6fb770b8f15620f26dbf37b5ea024`.
+- Verification:
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=40768df-release-plan BUILD_DATE=2026-06-20T00:00:00Z PORT=18088` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `243.44kB`.
+    - Image `sha256:98e984ea7595f44cde7a38d26199dce6f2c301142835065097153833a92c6934`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: 40768df-release-plan, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Autoreview:
+  - Release-boundary self-review found no blocking findings.
+  - Fixed review precision issues before commit: changed ambiguous `Go criteria` wording to `go/no-go criteria` and made owner, verifier, and approver naming requirements consistent.
+- Remaining gates before release-complete claim:
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.

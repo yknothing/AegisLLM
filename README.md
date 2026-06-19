@@ -146,6 +146,11 @@ Contributions are welcome. Please read [SECURITY.md](SECURITY.md) for security g
 
 See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
+## Release Plan
+
+See [docs/release-plan-v0.2.0.md](docs/release-plan-v0.2.0.md) for the current
+`v0.2.0` go/no-go gates and release ownership checklist.
+
 ## License
 
 MIT License. See [LICENSE](LICENSE).

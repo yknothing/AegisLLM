@@ -57,6 +57,8 @@ Contributors MUST follow these rules:
 No stable version is supported yet. The current release candidate is `v0.2.0`,
 but it must not be treated as a supported release until the release branch has
 been pushed, GitHub Actions are green, and the `v0.2.0` tag has been created.
+The detailed release gates are tracked in
+[docs/release-plan-v0.2.0.md](docs/release-plan-v0.2.0.md).
 
 | Version | Supported |
 | :--- | :---: |
