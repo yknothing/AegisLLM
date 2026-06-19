@@ -3,6 +3,9 @@
 ## Status
 Accepted
 
+## Implementation Status
+Current runtime implements HS256 validation, model permissions, RPM claims, and a process-local in-memory revocation store. Non-zero TPM and budget claims fail closed until enforcement exists. RS256, Redis-backed revocation, and admin-driven revocation are accepted target capabilities, not current runtime capabilities.
+
 ## Context
 Aegis needs a mechanism to authenticate clients, enforce rate limits, track budgets, and authorize model access. Passing real provider API keys (like OpenAI keys) directly from clients is insecure and makes quota management impossible. We need an abstraction layer.
 
@@ -10,9 +13,9 @@ Aegis needs a mechanism to authenticate clients, enforce rate limits, track budg
 We will use **Virtual Keys** implemented as signed JSON Web Tokens (JWT).
 
 1. All client requests must include an `Authorization: Bearer <virtual_key>` header.
-2. The Virtual Key encapsulates the client's identity (`sub`), permissions (`models`), and limits (`rpm`, `tpm`, `budget`).
+2. The Virtual Key encapsulates the client's identity (`sub`), permissions (`models`), and limits. Current runtime enforces `rpm`; `tpm` and `budget` are reserved claims that must be zero until enforcement exists.
 3. Aegis validates the signature cryptographically without needing a database lookup for every request.
-4. Revocation is handled via a fast in-memory or Redis-backed bloom filter checking the key ID (`kid`).
+4. Revocation is handled via a revocation store checking the key ID (`kid`). The current runtime store is process-local memory; Redis-backed shared revocation is reserved for cluster mode.
 
 ## Consequences
 
@@ -27,4 +30,4 @@ We will use **Virtual Keys** implemented as signed JSON Web Tokens (JWT).
 
 ## Implementation Details
 
-The JWT uses RS256 or HS256. The signing key is held in memory by Aegis and explicitly zeroed on shutdown.
+The current JWT implementation uses HS256. The signing key is held in memory by Aegis and explicitly zeroed on shutdown. RS256 requires a reviewed key-loading and rotation boundary before it is enabled.

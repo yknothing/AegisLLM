@@ -52,9 +52,22 @@ flowchart LR
 | `internal/proxy` | Upstream HTTP/SSE forwarding | outbound transport, egress validation, response forwarding | model authorization or key resolution |
 | `internal/quota` | Budget accounting | usage and cost data | auth or request routing |
 
+## Capability Truth Table
+
+| Capability | Current Runtime Behavior | Guardrail |
+| --- | --- | --- |
+| Virtual key auth | HS256 validation, issuer/expiry checks, process-local revocation store | RS256 and admin-driven/shared revocation are reserved |
+| Rate limiting | In-memory RPM and concurrency | Redis and non-zero TPM fail fast until implemented |
+| Quota / budget | Package scaffold only, not in request pipeline | `quota.enabled=true` is rejected during config validation |
+| KMS | Local AES-256-GCM memory/file backends | Vault mode fails fast until the client and tests exist |
+| Admin / BYOK | Handler scaffold exists but main gateway does not mount it | Mutating/query endpoints return `501` if invoked in tests |
+| Provider adapters | OpenAI-compatible `openai` and `deepseek` request path | Anthropic/Gemini are rejected by runtime until adapters are implemented |
+
 ## Deployment Topology
 
 MVP topology is one Aegis process behind a trusted ingress or localhost development binding. Production topology should place `/v1/*` behind TLS or mTLS and keep any future admin API on a separate listener or internal-only network. The local KMS runtime supports an in-memory backend for smoke tests and an encrypted file backend for standalone validation; Vault remains a separate production hardening track.
+
+Container deployments must provide `AEGIS_MASTER_KEY`, `AEGIS_JWT_KEY`, and a writable key-store volume at `/var/lib/aegis` when using the file-backed local KMS. Production deployments should mount an explicit config at `/etc/aegis/aegis.json`; the bundled config is for smoke validation only.
 
 ## Hard Decisions and Exit Cost
 

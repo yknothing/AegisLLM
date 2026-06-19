@@ -34,7 +34,8 @@ type AuthConfig struct {
 }
 
 // RevocationStore checks if a virtual key has been revoked.
-// Implementations: in-memory set, Redis-backed bloom filter.
+// Current runtime uses an in-memory set; Redis-backed shared revocation is a
+// reserved cluster-mode target.
 type RevocationStore interface {
 	IsRevoked(keyID string) bool
 }
@@ -177,6 +178,12 @@ func validateToken(token string, signingKey []byte, expectedIssuer string) (*Vir
 	}
 	if claims.KeySource == "byok" && claims.BYOKKeyID == "" {
 		return nil, fmt.Errorf("missing BYOK key id")
+	}
+	if claims.BudgetUSD > 0 {
+		return nil, fmt.Errorf("budget enforcement is not implemented")
+	}
+	if claims.MaxTPM > 0 {
+		return nil, fmt.Errorf("TPM enforcement is not implemented")
 	}
 
 	return &claims, nil

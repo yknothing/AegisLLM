@@ -35,7 +35,7 @@
       "models": ["gpt-4o", "gpt-4o-mini", "gpt-4.1"],
       "weight": 10,
       "max_rpm": 500,
-      "max_tpm": 800000,
+      "max_tpm": 0,
       "enabled": true,
       "priority": 1
     },
@@ -48,7 +48,7 @@
       "models": ["claude-sonnet-4-20250514", "claude-haiku-3-5"],
       "weight": 10,
       "max_rpm": 300,
-      "max_tpm": 400000,
+      "max_tpm": 0,
       "enabled": false,
       "priority": 1
     },
@@ -61,7 +61,7 @@
       "models": ["deepseek-v3", "deepseek-r1"],
       "weight": 5,
       "max_rpm": 200,
-      "max_tpm": 500000,
+      "max_tpm": 0,
       "enabled": true,
       "priority": 2
     }
@@ -76,11 +76,11 @@
     "backend": "memory",
     "redis_url": "redis://localhost:6379/0",
     "default_rpm": 60,
-    "default_tpm": 100000,
+    "default_tpm": 0,
     "default_max_concurrency": 10
   },
   "quota": {
-    "enabled": true,
+    "enabled": false,
     "backend": "sqlite",
     "dsn": "aegis.db",
     "default_budget": 100.0

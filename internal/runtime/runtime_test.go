@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/yknothing/AegisLLM/internal/config"
@@ -134,5 +135,91 @@ func TestNewKMSProviderUsesFileBackend(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Fatalf("file count = %d, want 1", len(entries))
+	}
+}
+
+func TestNewServerRejectsUnsupportedRuntimeControls(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*config.Config)
+		wantErr string
+	}{
+		{
+			name: "quota",
+			mutate: func(cfg *config.Config) {
+				cfg.Quota.Enabled = true
+			},
+			wantErr: "quota enforcement is not implemented",
+		},
+		{
+			name: "unknown rate limit backend",
+			mutate: func(cfg *config.Config) {
+				cfg.RateLimit.Enabled = true
+				cfg.RateLimit.Backend = "memcached"
+			},
+			wantErr: `unsupported rate_limit backend: "memcached"`,
+		},
+		{
+			name: "default TPM",
+			mutate: func(cfg *config.Config) {
+				cfg.RateLimit.Enabled = true
+				cfg.RateLimit.Backend = "memory"
+				cfg.RateLimit.DefaultTPM = 1000
+			},
+			wantErr: "TPM enforcement is not implemented",
+		},
+		{
+			name: "provider TPM",
+			mutate: func(cfg *config.Config) {
+				cfg.Providers[0].MaxTPM = 1000
+			},
+			wantErr: "TPM enforcement is not implemented",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := minimalRuntimeConfig()
+			tt.mutate(cfg)
+
+			_, err := NewServer(cfg, nil)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("NewServer error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func minimalRuntimeConfig() *config.Config {
+	return &config.Config{
+		KMS: config.KMSConfig{
+			Mode: "local",
+			Local: config.LocalKMS{
+				MasterKeyEnv: "TEST_AEGIS_RUNTIME_MASTER_KEY",
+			},
+		},
+		Providers: []config.Provider{
+			{
+				ID:       "openai-primary",
+				Name:     "OpenAI Primary",
+				Type:     "openai",
+				BaseURL:  "https://api.openai.com",
+				APIKeyID: "openai-key-1",
+				Models:   []string{"gpt-4o-mini"},
+				Enabled:  true,
+			},
+		},
+		RateLimit: config.RateLimitConfig{
+			Enabled:               true,
+			Backend:               "memory",
+			DefaultRPM:            60,
+			DefaultMaxConcurrency: 10,
+		},
+		Quota: config.QuotaConfig{
+			Enabled: false,
+		},
+		Egress: config.EgressConfig{
+			AllowedDomains: []string{"api.openai.com"},
+		},
 	}
 }

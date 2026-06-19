@@ -60,6 +60,43 @@ func TestValidateTokenRejectsExpired(t *testing.T) {
 	}
 }
 
+func TestValidateTokenRejectsReservedBudgetAndTPMClaims(t *testing.T) {
+	tests := []struct {
+		name   string
+		claims VirtualKeyClaims
+	}{
+		{
+			name: "budget",
+			claims: VirtualKeyClaims{
+				BudgetUSD: 10,
+			},
+		},
+		{
+			name: "tpm",
+			claims: VirtualKeyClaims{
+				MaxTPM: 1000,
+			},
+		},
+	}
+
+	key := []byte("test-signing-key")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			claims := tt.claims
+			claims.KeyID = "vk_test"
+			claims.KeySource = "pool"
+			claims.IssuedAt = time.Now().Add(-time.Minute).Unix()
+			claims.ExpiresAt = time.Now().Add(time.Hour).Unix()
+			claims.Issuer = "aegis"
+
+			token := signTestToken(t, key, claims)
+			if _, err := validateToken(token, key, "aegis"); err == nil {
+				t.Fatalf("validateToken accepted reserved %s claim", tt.name)
+			}
+		})
+	}
+}
+
 func signTestToken(t *testing.T, key []byte, claims VirtualKeyClaims) string {
 	t.Helper()
 

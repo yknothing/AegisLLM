@@ -10,7 +10,8 @@
 # ============================================================
 # Stage 1: Build
 # ============================================================
-FROM golang:1.22-alpine AS builder
+ARG BUILDPLATFORM=linux/amd64
+FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS builder
 
 # Security: Pin dependencies and verify checksums
 RUN apk add --no-cache ca-certificates git
@@ -25,6 +26,12 @@ RUN go mod download && go mod verify
 # Copy source and build
 COPY . .
 
+# Provide a non-secret default config and writable state directory for smoke
+# runs. Production deployments should mount their own config and data volume.
+RUN mkdir -p /build/etc/aegis /build/var/lib/aegis \
+    && cp aegis.example.json /build/etc/aegis/aegis.json \
+    && sed -i 's#"key_store_path": "aegis.keys"#"key_store_path": "/var/lib/aegis/keys"#' /build/etc/aegis/aegis.json
+
 # Build with security hardening flags:
 #   -trimpath: Remove file system paths from binary
 #   -ldflags: Strip debug info, set version
@@ -32,8 +39,10 @@ COPY . .
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
+ARG TARGETOS
+ARG TARGETARCH
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build \
     -trimpath \
     -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}" \
     -o /build/aegis \
@@ -47,6 +56,8 @@ FROM gcr.io/distroless/static-debian12:nonroot
 # Copy only the binary and CA certificates
 COPY --from=builder /build/aegis /aegis
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder --chown=nonroot:nonroot /build/etc/aegis /etc/aegis
+COPY --from=builder --chown=nonroot:nonroot /build/var/lib/aegis /var/lib/aegis
 
 # Run as non-root user (UID 65534)
 USER nonroot:nonroot

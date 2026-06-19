@@ -10,7 +10,7 @@
 // THREAT MODEL:
 //   - Protects against: database theft, config file exposure, log leakage
 //   - Does NOT protect against: root access to running process memory
-//   - For stronger guarantees, use the Vault backend instead
+//   - For stronger guarantees, implement and wire the reserved Vault backend
 package local
 
 import (
@@ -38,7 +38,8 @@ type Store struct {
 }
 
 // Backend defines the storage interface for encrypted key blobs.
-// This allows the local KMS to work with SQLite, files, or in-memory stores.
+// Current runtime uses file and in-memory stores; other durable stores are
+// reserved future backends.
 type Backend interface {
 	Get(keyID string) (ciphertext []byte, err error)
 	Put(keyID string, ciphertext []byte) error

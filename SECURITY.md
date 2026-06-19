@@ -16,7 +16,7 @@ Aegis is built with security as the highest priority. The following invariants a
 
 ### 1. No Plaintext Secrets at Rest
 
-Provider API keys are **never** stored in plaintext — not in configuration files, not in databases, not in environment variables (except the master encryption key). All keys are encrypted via the KMS layer (AES-256-GCM or HashiCorp Vault).
+Provider API keys are **never** stored in plaintext — not in configuration files, not in databases, not in environment variables (except the master encryption key). Current runtime encrypts keys through the local AES-256-GCM KMS. HashiCorp Vault support is reserved and fails fast until implemented.
 
 ### 2. Zero PII in Logs
 

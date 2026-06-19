@@ -4,7 +4,7 @@
 //   - All provider API keys are stored encrypted at rest
 //   - Keys are decrypted only in memory, only when needed
 //   - After use, callers MUST call SecureBytes.Close() to zero memory
-//   - The KMS interface abstracts over local encryption and external vaults
+//   - The current runtime uses local encryption; external vaults are reserved
 //
 // This package is the single source of truth for credential access.
 // No other package should ever directly read API keys from config or env.
@@ -26,7 +26,8 @@ var (
 )
 
 // Provider defines the interface for key management backends.
-// Implementations include local AES-256-GCM and HashiCorp Vault.
+// The current runtime implementation is local AES-256-GCM; HashiCorp Vault is
+// reserved and fails fast until wired.
 type Provider interface {
 	// GetKey retrieves a decrypted API key by its ID.
 	// The returned SecureBytes MUST be closed by the caller after use.

@@ -1,13 +1,13 @@
-// Package middleware - ratelimit.go implements the distributed rate limiter.
+// Package middleware - ratelimit.go implements the request rate limiter.
 //
 // DESIGN: Three-dimensional rate limiting:
 //  1. RPM (Requests Per Minute) - prevents request flooding
-//  2. TPM (Tokens Per Minute) - prevents token budget exhaustion
+//  2. TPM (Tokens Per Minute) - reserved, fails closed until implemented
 //  3. Concurrency - prevents connection pool exhaustion
 //
 // Backends:
 //   - "memory": In-process sliding window (standalone mode)
-//   - "redis": Distributed token bucket via Lua scripts (cluster mode)
+//   - "redis": Reserved distributed token bucket backend (cluster mode)
 //
 // SECURITY: Rate limiting is the second middleware in the pipeline,
 // applied AFTER authentication but BEFORE any expensive operations.
@@ -35,17 +35,34 @@ type RateLimitConfig struct {
 // RateLimiter creates the rate limiting middleware.
 func RateLimiter(cfg RateLimitConfig) server.Middleware {
 	var limiter Limiter
+	var initErr error
 	switch cfg.Backend {
 	case "redis":
-		limiter = newRedisLimiter(cfg.RedisURL)
-	default:
+		initErr = errors.New("redis rate limiter backend is not implemented")
+	case "memory", "":
 		limiter = newMemoryLimiter()
+	default:
+		initErr = errors.New("unsupported rate limiter backend: " + cfg.Backend)
 	}
 
 	return func(ctx *server.RequestContext, next func()) {
+		if initErr != nil {
+			ctx.Abort(http.StatusServiceUnavailable, rateLimitUnavailableJSON(initErr.Error()))
+			return
+		}
+
 		key := ctx.VirtualKeyID
 		if key == "" {
 			key = ctx.Request.RemoteAddr
+		}
+
+		tpmLimit := cfg.DefaultTPM
+		if ctx.MaxTPM > 0 {
+			tpmLimit = ctx.MaxTPM
+		}
+		if tpmLimit > 0 {
+			ctx.Abort(http.StatusServiceUnavailable, rateLimitUnavailableJSON("token rate limiting is not implemented"))
+			return
 		}
 
 		rpmLimit := cfg.DefaultRPM
@@ -74,7 +91,7 @@ func RateLimiter(cfg RateLimitConfig) server.Middleware {
 
 		next()
 
-		// After request: record token usage for TPM tracking
+		// Reserved hook for future TPM reconciliation.
 		totalTokens := ctx.InputTokens + ctx.OutputTokens
 		if totalTokens > 0 {
 			_ = limiter.RecordTokens(key, totalTokens, time.Minute)
@@ -91,7 +108,7 @@ type Limiter interface {
 	// Returns true and a release function if successful.
 	AcquireConcurrency(key string, maxConc int) (acquired bool, release func())
 
-	// RecordTokens records token consumption for TPM tracking.
+	// RecordTokens is reserved for future TPM tracking.
 	RecordTokens(key string, tokens int, window time.Duration) error
 }
 
@@ -247,4 +264,8 @@ func (r *redisLimiter) RecordTokens(key string, tokens int, window time.Duration
 // rateLimitErrorJSON creates a rate limit error response.
 func rateLimitErrorJSON(msg string) []byte {
 	return []byte(`{"error":{"message":"` + msg + `","type":"rate_limit_error"}}`)
+}
+
+func rateLimitUnavailableJSON(msg string) []byte {
+	return []byte(`{"error":{"message":"` + msg + `","type":"server_error"}}`)
 }

@@ -1,14 +1,17 @@
-// Package quota implements budget management and cost tracking for Aegis.
+// Package quota scaffolds budget management and cost tracking for Aegis.
 //
 // DESIGN:
 //   - Hierarchical budget model: Organization → Team → Virtual Key
 //   - Real-time cost calculation based on provider pricing tables
-//   - Pre-request budget check (reject if insufficient) and post-request deduction
-//   - Supports both hard limits (reject) and soft limits (alert)
+//   - Planned pre-request budget check and post-request deduction
+//   - Planned hard limits and soft limits
 //
 // SECURITY:
-//   - Budget exhaustion prevents runaway costs from compromised keys
+//   - Budget exhaustion controls will prevent runaway costs from compromised keys
 //   - Cost data is non-sensitive metadata (safe to log and store)
+//
+// Current runtime does not wire this package into request processing;
+// quota.enabled=true fails fast until enforcement exists.
 package quota
 
 import (

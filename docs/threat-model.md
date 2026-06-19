@@ -39,6 +39,8 @@ flowchart LR
 - Local in-memory KMS backend is an MVP/development storage backend. A persistent encrypted backend or Vault integration is required before production use.
 - HS256 JWT validation is the minimal no-dependency baseline. RS256 requires a separate reviewed key loading and rotation design.
 - Provider-specific protocol adapters are framework-level only until each adapter has contract tests against real provider formats.
+- Quota and TPM controls are not runtime-enforced yet. Configuration enabling quota or non-zero TPM is rejected so deployments cannot silently assume cost controls are active.
+- Virtual key revocation is process-local until a managed admin path or shared store is implemented; short token TTLs and signing-key rotation remain the current operational fallback.
 
 ## Security Review Gates
 
@@ -46,3 +48,4 @@ flowchart LR
 - Empty egress allowlist is a configuration error.
 - Any new log field must be reviewed as metadata-only.
 - Any new dependency must have a security review before merge.
+- Any configuration field that enables an unimplemented security or cost-control capability must fail fast rather than silently falling back.

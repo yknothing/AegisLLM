@@ -43,6 +43,7 @@ Exports:
 Internal:
 - HTTP mux registration.
 - Recovery, request ID, and audit metadata middleware.
+- The main gateway currently mounts only `/v1/*` and `/health`.
 
 ### `internal/middleware`
 
@@ -77,5 +78,7 @@ Invariants:
 | Add a Redis limiter | `internal/middleware/ratelimit.go`, runtime config mapping | Isolated |
 | Add RS256 virtual keys | `internal/middleware/auth.go`, config, tests | Isolated if auth interface stays stable |
 | Add Anthropic request conversion | `internal/middleware/adapter.go`, adapter tests | Isolated |
-| Move local KMS from file blobs to SQLite | `internal/kms/local`, runtime backend wiring | Isolated |
+| Move local KMS file blobs to another durable backend | `internal/kms/local`, runtime backend wiring | Isolated |
 | Change middleware order | ADR, `internal/runtime`, order tests | Requires architecture review |
+| Add quota enforcement | `internal/quota`, new middleware, runtime config mapping, durable store | Requires architecture review because it changes request rejection semantics |
+| Mount Admin API | `internal/admin`, `cmd/aegis` or runtime listener wiring, auth/audit config | Requires architecture review because it adds a new trust boundary |

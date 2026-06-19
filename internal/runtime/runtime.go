@@ -30,8 +30,8 @@ func NewServer(cfg *config.Config, logger *slog.Logger) (*server.Server, error) 
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if cfg.RateLimit.Enabled && cfg.RateLimit.Backend == "redis" {
-		return nil, fmt.Errorf("redis rate limiter backend is not implemented")
+	if err := validateRuntimeConfig(cfg); err != nil {
+		return nil, err
 	}
 
 	kmsProvider, err := newKMSProvider(cfg.KMS)
@@ -109,6 +109,34 @@ func NewServer(cfg *config.Config, logger *slog.Logger) (*server.Server, error) 
 		return nil, err
 	}
 	return srv, nil
+}
+
+func validateRuntimeConfig(cfg *config.Config) error {
+	if cfg.Quota.Enabled {
+		return fmt.Errorf("quota enforcement is not implemented; set quota.enabled=false")
+	}
+	if cfg.RateLimit.Enabled {
+		switch cfg.RateLimit.Backend {
+		case "memory":
+		case "redis":
+			return fmt.Errorf("redis rate limiter backend is not implemented")
+		default:
+			return fmt.Errorf("unsupported rate_limit backend: %q", cfg.RateLimit.Backend)
+		}
+		if cfg.RateLimit.DefaultTPM > 0 {
+			return fmt.Errorf("rate_limit.default_tpm is reserved; TPM enforcement is not implemented")
+		}
+	}
+	for _, p := range cfg.Providers {
+		if p.Enabled && p.MaxTPM > 0 {
+			providerID := p.ID
+			if providerID == "" {
+				providerID = p.Name
+			}
+			return fmt.Errorf("provider %q: max_tpm is reserved; TPM enforcement is not implemented", providerID)
+		}
+	}
+	return nil
 }
 
 func newKMSProvider(cfg config.KMSConfig) (kms.Provider, error) {

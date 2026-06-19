@@ -4,7 +4,8 @@
 // DESIGN:
 //   - Plugin-based adapter registry: each provider type registers its adapter
 //   - Adapters transform request/response formats without buffering full bodies
-//   - Supports: OpenAI, Anthropic Claude, Google Gemini, DeepSeek, and more
+//   - Current runtime support: OpenAI-compatible OpenAI and DeepSeek.
+//   - Anthropic and Gemini adapter types are reserved until implemented.
 //
 // SECURITY:
 //   - Adapters never log or retain message content

@@ -45,9 +45,10 @@ type TLSConfig struct {
 }
 
 // KMSConfig defines the Key Management System configuration.
-// Mode can be "local" (built-in AES-256-GCM) or "vault" (HashiCorp Vault).
+// Current runtime supports "local" (built-in AES-256-GCM). "vault" is reserved
+// and rejected until the Vault client and failure-mode tests exist.
 type KMSConfig struct {
-	Mode  string      `json:"mode"` // "local" | "vault"
+	Mode  string      `json:"mode"` // runtime: "local"; reserved: "vault"
 	Local LocalKMS    `json:"local"`
 	Vault VaultConfig `json:"vault"`
 }
@@ -59,7 +60,8 @@ type LocalKMS struct {
 	KeyStorePath string `json:"key_store_path"` // Directory for encrypted local key blobs
 }
 
-// VaultConfig configures HashiCorp Vault integration.
+// VaultConfig reserves HashiCorp Vault integration settings.
+// kms.mode="vault" fails fast in the current runtime.
 type VaultConfig struct {
 	Address  string `json:"address"`
 	Path     string `json:"path"`
@@ -77,7 +79,7 @@ type Provider struct {
 	Models   []string `json:"models"`
 	Weight   int      `json:"weight"`
 	MaxRPM   int      `json:"max_rpm"`
-	MaxTPM   int      `json:"max_tpm"`
+	MaxTPM   int      `json:"max_tpm"` // Reserved until TPM enforcement exists
 	Enabled  bool     `json:"enabled"`
 	Priority int      `json:"priority"` // Lower = higher priority for fallback
 }
@@ -92,22 +94,23 @@ type AuthConfig struct {
 // RateLimitConfig defines rate limiting behavior.
 type RateLimitConfig struct {
 	Enabled               bool   `json:"enabled"`
-	Backend               string `json:"backend"` // "memory" | "redis"
+	Backend               string `json:"backend"` // runtime: "memory"; reserved: "redis"
 	RedisURL              string `json:"redis_url"`
 	DefaultRPM            int    `json:"default_rpm"`
-	DefaultTPM            int    `json:"default_tpm"`
+	DefaultTPM            int    `json:"default_tpm"` // Reserved until TPM enforcement exists
 	DefaultMaxConcurrency int    `json:"default_max_concurrency"`
 }
 
-// QuotaConfig defines budget and cost management settings.
+// QuotaConfig reserves budget and cost management settings.
+// quota.enabled=true fails fast until runtime enforcement exists.
 type QuotaConfig struct {
 	Enabled       bool    `json:"enabled"`
-	Backend       string  `json:"backend"` // "sqlite" | "mysql"
+	Backend       string  `json:"backend"` // Reserved durable store backend
 	DSN           string  `json:"dsn"`
 	DefaultBudget float64 `json:"default_budget"` // Default monthly budget in USD
 }
 
-// StoreConfig defines the persistence layer.
+// StoreConfig reserves the persistence layer for future control-plane state.
 type StoreConfig struct {
 	Type string `json:"type"` // "sqlite" | "mysql"
 	DSN  string `json:"dsn"`
@@ -282,11 +285,11 @@ func defaultConfig() *Config {
 			Enabled:               true,
 			Backend:               "memory",
 			DefaultRPM:            60,
-			DefaultTPM:            100000,
+			DefaultTPM:            0,
 			DefaultMaxConcurrency: 10,
 		},
 		Quota: QuotaConfig{
-			Enabled:       true,
+			Enabled:       false,
 			Backend:       "sqlite",
 			DSN:           "aegis.db",
 			DefaultBudget: 100.0,
@@ -303,12 +306,58 @@ func (c *Config) validate() error {
 	if c.Server.Address == "" {
 		return errors.New("server address must not be empty")
 	}
+	if c.Server.TLS.Enabled {
+		if c.Server.TLS.CertFile == "" || c.Server.TLS.KeyFile == "" {
+			return errors.New("server TLS requires cert_file and key_file")
+		}
+		switch c.Server.TLS.MinVersion {
+		case "", "1.3", "TLS1.3", "tls1.3":
+		default:
+			return errors.New("server.tls.min_version currently supports only TLS 1.3")
+		}
+	}
+
+	enabledProviders := 0
 
 	// SECURITY: Ensure no plaintext keys in config
 	for _, p := range c.Providers {
-		if p.APIKeyID == "" && p.Enabled {
-			return fmt.Errorf("provider %q: api_key_id must reference a KMS key, not be empty", p.Name)
+		if !p.Enabled {
+			continue
 		}
+		enabledProviders++
+		providerName := p.ID
+		if providerName == "" {
+			providerName = p.Name
+		}
+		if p.APIKeyID == "" {
+			return fmt.Errorf("provider %q: api_key_id must reference a KMS key, not be empty", providerName)
+		}
+		if p.MaxTPM > 0 {
+			return fmt.Errorf("provider %q: max_tpm is reserved; TPM enforcement is not implemented", providerName)
+		}
+	}
+	if enabledProviders == 0 {
+		return errors.New("at least one provider must be enabled")
+	}
+	if len(c.Egress.AllowedDomains) == 0 {
+		return errors.New("egress.allowed_domains must contain at least one host")
+	}
+
+	if c.RateLimit.Enabled {
+		switch c.RateLimit.Backend {
+		case "memory":
+		case "redis":
+			return errors.New("redis rate limiter backend is not implemented")
+		default:
+			return fmt.Errorf("unsupported rate_limit backend: %q", c.RateLimit.Backend)
+		}
+		if c.RateLimit.DefaultTPM > 0 {
+			return errors.New("rate_limit.default_tpm is reserved; TPM enforcement is not implemented")
+		}
+	}
+
+	if c.Quota.Enabled {
+		return errors.New("quota enforcement is not implemented; set quota.enabled=false")
 	}
 
 	switch c.KMS.Mode {
@@ -321,9 +370,7 @@ func (c *Config) validate() error {
 			return fmt.Errorf("environment variable %q for master key is not set", c.KMS.Local.MasterKeyEnv)
 		}
 	case "vault":
-		if c.KMS.Vault.Address == "" {
-			return errors.New("vault KMS requires address to be set")
-		}
+		return errors.New("vault KMS backend is not implemented")
 	default:
 		return fmt.Errorf("unsupported KMS mode: %q", c.KMS.Mode)
 	}

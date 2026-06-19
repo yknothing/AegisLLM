@@ -1,14 +1,14 @@
-// Package vault implements the HashiCorp Vault KMS backend for Aegis.
+// Package vault is the reserved HashiCorp Vault KMS backend for Aegis.
 //
-// SECURITY PROPERTIES:
+// TARGET SECURITY PROPERTIES:
 //   - API keys never touch Aegis's local storage
 //   - Keys are fetched on-demand from Vault and held only in memory
 //   - Vault token is loaded from environment variable
 //   - Supports Vault's built-in key rotation and audit logging
 //   - Network communication uses TLS (enforced by Vault client)
 //
-// This backend is recommended for production deployments where
-// a dedicated secrets management infrastructure is available.
+// This backend is not wired into the current runtime. Production use requires
+// implementing the Vault HTTP client, failure-mode tests, and runtime wiring.
 package vault
 
 import (

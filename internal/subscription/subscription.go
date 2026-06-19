@@ -2,11 +2,12 @@
 //
 // DESIGN:
 //   - Defines permission templates for each tier (Free, Pro, Enterprise)
-//   - Used by the admin API when issuing Virtual Keys
+//   - Reserved for the planned admin API when issuing Virtual Keys
 //   - Centralizes the business logic of "what does each tier get?"
 //
-// This package bridges the gap between the app's billing system and
-// Aegis's technical access control (models, RPM, TPM, budget).
+// This package will bridge the gap between the app's billing system and
+// Aegis's technical access control. Current runtime does not yet mount the
+// admin API or enforce TPM/budget controls.
 package subscription
 
 import "time"
@@ -34,16 +35,17 @@ type Template struct {
 }
 
 // DefaultTemplates returns the standard tier configurations.
-// These should be overridable via configuration file.
+// Current runtime-compatible templates keep TPM and BudgetUSD at 0 because
+// non-zero values are rejected until enforcement exists.
 func DefaultTemplates() map[Tier]Template {
 	return map[Tier]Template{
 		TierFree: {
 			Tier:           TierFree,
 			Models:         []string{"gpt-4o-mini", "gemini-2.5-flash", "deepseek-v3"},
 			RPM:            10,
-			TPM:            20000,
+			TPM:            0,
 			MaxConcurrency: 2,
-			BudgetUSD:      1.0,
+			BudgetUSD:      0,
 			TokenExpiry:    30 * 24 * time.Hour, // 30 days
 			KeySource:      "pool",
 		},
@@ -51,9 +53,9 @@ func DefaultTemplates() map[Tier]Template {
 			Tier:           TierPro,
 			Models:         []string{"gpt-4o", "gpt-4o-mini", "claude-sonnet-4-20250514", "claude-haiku-3-5", "gemini-2.5-pro", "gemini-2.5-flash", "deepseek-v3", "deepseek-r1"},
 			RPM:            60,
-			TPM:            200000,
+			TPM:            0,
 			MaxConcurrency: 10,
-			BudgetUSD:      50.0,
+			BudgetUSD:      0,
 			TokenExpiry:    30 * 24 * time.Hour,
 			KeySource:      "pool",
 		},
@@ -61,9 +63,9 @@ func DefaultTemplates() map[Tier]Template {
 			Tier:           TierEnterprise,
 			Models:         []string{"*"}, // All models
 			RPM:            300,
-			TPM:            1000000,
+			TPM:            0,
 			MaxConcurrency: 50,
-			BudgetUSD:      500.0,
+			BudgetUSD:      0,
 			TokenExpiry:    90 * 24 * time.Hour,
 			KeySource:      "pool",
 		},

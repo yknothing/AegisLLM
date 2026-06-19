@@ -3,16 +3,19 @@
 ## Status
 Accepted
 
+## Implementation Status
+Current runtime implements the local AES-256-GCM KMS with in-memory and encrypted file backends. `kms.mode: "vault"` is a reserved production target and currently fails fast during configuration/runtime validation.
+
 ## Context
 Aegis must store provider API keys securely at rest. Different deployment environments have different capabilities: a solo developer running Aegis locally cannot be expected to operate a HashiCorp Vault cluster, while an enterprise deployment demands integration with existing secrets infrastructure.
 
 ## Decision
 We will implement a **dual-layer KMS** with a unified `kms.Provider` interface:
 
-1. **Local Layer (Built-in)**: AES-256-GCM encryption using a master key from an environment variable. Encrypted blobs stored in SQLite or memory. Suitable for development and small-team deployments.
-2. **Vault Layer (External)**: Delegates all key operations to HashiCorp Vault (or compatible systems like AWS Secrets Manager). Suitable for enterprise deployments.
+1. **Local Layer (Built-in)**: AES-256-GCM encryption using a master key from an environment variable. Encrypted blobs are currently stored in memory for smoke/tests or file storage for standalone validation. Suitable for development and small-team deployments.
+2. **Vault Layer (External)**: Delegates all key operations to HashiCorp Vault (or compatible systems like AWS Secrets Manager). This is a reserved enterprise deployment target, not current runtime behavior.
 
-Both layers implement the same `kms.Provider` interface. The choice is a single configuration toggle (`kms.mode: "local" | "vault"`).
+Both layers share the same `kms.Provider` interface. The current supported runtime choice is `kms.mode: "local"`; `kms.mode: "vault"` is rejected until the Vault client and failure-mode tests are implemented.
 
 ## Consequences
 

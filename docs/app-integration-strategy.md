@@ -6,6 +6,8 @@ This document describes how consumer-facing applications should integrate with A
 
 Consumer apps face a fundamental three-way tension when integrating LLM capabilities: **who holds the keys**, **who bears the cost**, and **who controls access**. Aegis resolves this through a unified Virtual Key abstraction that supports multiple underlying key sources transparently.
 
+Current runtime status: the gateway supports server-hosted pool keys when provider keys have already been seeded into KMS. BYOK registration, virtual-key issuance, revocation, usage dashboard APIs, quota enforcement, and TPM enforcement are planned control-plane work and are not current runtime capabilities.
+
 ## Access Modes
 
 | Mode | Key Holder | Cost Bearer | Best For |
@@ -41,10 +43,9 @@ App Client
 │     ├── key_source = "pool" → Pool Key from KMS │
 │     └── key_source = "byok" → User Key from KMS │
 │  3. Rate Limit (per Virtual Key)                 │
-│  4. Budget Check (per Virtual Key)               │
-│  5. Route to Provider                            │
-│  6. Inject Real API Key                          │
-│  7. Proxy Request                                │
+│  4. Route to Provider                            │
+│  5. Inject Real API Key                          │
+│  6. Proxy Request                                │
 └─────────────────────────────────────────────────┘
     │
     ▼
@@ -66,8 +67,8 @@ The App client **never** distinguishes between pool and BYOK modes. It always se
   "pool_group": "default",
   "models": ["gpt-4o", "gpt-4o-mini", "claude-sonnet-4-20250514"],
   "rpm": 60,
-  "tpm": 100000,
-  "budget": 10.0,
+  "tpm": 0,
+  "budget": 0,
   "iat": 1718700000,
   "exp": 1721292000
 }
@@ -91,12 +92,12 @@ For BYOK users, the claims differ:
 }
 ```
 
-When `rpm`, `tpm`, or `budget` is `0`, it means unlimited (no restriction).
+Current runtime accepts non-zero `rpm`. `tpm` and `budget` are reserved and must be `0` until TPM and quota enforcement are implemented.
 
 ## BYOK Workflow
 
 1. User navigates to App settings and enters their API key
-2. App sends the key to Aegis Admin API: `POST /admin/keys/byok`
+2. App sends the key to the planned Aegis Admin API: `POST /admin/keys/byok`
 3. Aegis encrypts the key via KMS and stores it with ID `user-{uid}-{provider}`
 4. Aegis generates a new Virtual Key (JWT) with `key_source: "byok"`
 5. App stores the Virtual Key and uses it for all subsequent requests
@@ -112,7 +113,7 @@ When `rpm`, `tpm`, or `budget` is `0`, it means unlimited (no restriction).
 
 ## Implementation Phases
 
-**Phase 1 (MVP)**: Server-hosted pool only. Single tier, fixed quota. Ship fast.
+**Phase 1 (MVP)**: Server-hosted pool only. Runtime enforces model permission, RPM, and concurrency. Quota/TPM claims are reserved until enforcement is implemented.
 
 **Phase 2 (Growth)**: Introduce subscription tiers. Differentiate by model access and quota.
 

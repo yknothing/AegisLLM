@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -13,9 +14,9 @@ func TestLoadParsesDurationStrings(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "aegis.json")
 	data := []byte(`{
-		"server": {
-			"address": ":9090",
-			"read_timeout": "5s",
+			"server": {
+				"address": ":9090",
+				"read_timeout": "5s",
 			"write_timeout": "2m",
 			"shutdown_timeout": "10s",
 			"max_request_body_size": 1024
@@ -27,12 +28,29 @@ func TestLoadParsesDurationStrings(t *testing.T) {
 				"key_store_path": "aegis.keys"
 			}
 		},
-		"auth": {
-			"jwt_signing_key_env": "AEGIS_JWT_KEY",
-			"token_expiry": "24h",
-			"issuer": "aegis"
-		}
-	}`)
+			"auth": {
+				"jwt_signing_key_env": "AEGIS_JWT_KEY",
+				"token_expiry": "24h",
+				"issuer": "aegis"
+			},
+			"providers": [
+				{
+					"id": "openai-primary",
+					"name": "OpenAI Primary",
+					"type": "openai",
+					"base_url": "https://api.openai.com",
+					"api_key_id": "openai-key-1",
+					"models": ["gpt-4o-mini"],
+					"enabled": true
+				}
+			],
+			"quota": {
+				"enabled": false
+			},
+			"egress": {
+				"allowed_domains": ["api.openai.com"]
+			}
+		}`)
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -57,4 +75,190 @@ func TestLoadParsesDurationStrings(t *testing.T) {
 	if cfg.KMS.Local.KeyStorePath != "aegis.keys" {
 		t.Fatalf("key store path = %q, want aegis.keys", cfg.KMS.Local.KeyStorePath)
 	}
+}
+
+func TestLoadExampleConfig(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+
+	cfg, err := Load(filepath.Join("..", "..", "aegis.example.json"))
+	if err != nil {
+		t.Fatalf("Load example config returned error: %v", err)
+	}
+	if cfg.RateLimit.DefaultTPM != 0 {
+		t.Fatalf("example default_tpm = %d, want 0 until TPM enforcement exists", cfg.RateLimit.DefaultTPM)
+	}
+	if cfg.Quota.Enabled {
+		t.Fatal("example config enabled quota before runtime enforcement exists")
+	}
+}
+
+func TestLoadRejectsQuotaUntilRuntimeEnforcementExists(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+
+	path := writeConfig(t, `{
+		"kms": {
+			"mode": "local",
+			"local": {"master_key_env": "AEGIS_MASTER_KEY"}
+		},
+		"providers": [
+			{
+				"id": "openai-primary",
+				"name": "OpenAI Primary",
+				"type": "openai",
+				"base_url": "https://api.openai.com",
+				"api_key_id": "openai-key-1",
+				"models": ["gpt-4o-mini"],
+				"enabled": true
+			}
+		],
+		"quota": {"enabled": true},
+		"egress": {"allowed_domains": ["api.openai.com"]}
+	}`)
+
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "quota enforcement is not implemented") {
+		t.Fatalf("Load error = %v, want quota enforcement failure", err)
+	}
+}
+
+func TestLoadRejectsReservedTPMControls(t *testing.T) {
+	tests := []struct {
+		name   string
+		config string
+	}{
+		{
+			name: "provider max_tpm",
+			config: `{
+				"kms": {
+					"mode": "local",
+					"local": {"master_key_env": "AEGIS_MASTER_KEY"}
+				},
+				"providers": [
+					{
+						"id": "openai-primary",
+						"name": "OpenAI Primary",
+						"type": "openai",
+						"base_url": "https://api.openai.com",
+						"api_key_id": "openai-key-1",
+						"models": ["gpt-4o-mini"],
+						"max_tpm": 1000,
+						"enabled": true
+					}
+				],
+				"quota": {"enabled": false},
+				"egress": {"allowed_domains": ["api.openai.com"]}
+			}`,
+		},
+		{
+			name: "default_tpm",
+			config: `{
+				"kms": {
+					"mode": "local",
+					"local": {"master_key_env": "AEGIS_MASTER_KEY"}
+				},
+				"providers": [
+					{
+						"id": "openai-primary",
+						"name": "OpenAI Primary",
+						"type": "openai",
+						"base_url": "https://api.openai.com",
+						"api_key_id": "openai-key-1",
+						"models": ["gpt-4o-mini"],
+						"enabled": true
+					}
+				],
+				"rate_limit": {
+					"enabled": true,
+					"backend": "memory",
+					"default_tpm": 1000
+				},
+				"quota": {"enabled": false},
+				"egress": {"allowed_domains": ["api.openai.com"]}
+			}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+			path := writeConfig(t, tt.config)
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), "TPM enforcement is not implemented") {
+				t.Fatalf("Load error = %v, want TPM failure", err)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsUnsupportedRuntimeBackends(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  string
+		wantErr string
+	}{
+		{
+			name: "redis",
+			config: `"rate_limit": {
+				"enabled": true,
+				"backend": "redis"
+			}`,
+			wantErr: "redis rate limiter backend is not implemented",
+		},
+		{
+			name: "unknown rate limiter",
+			config: `"rate_limit": {
+				"enabled": true,
+				"backend": "memcached"
+			}`,
+			wantErr: `unsupported rate_limit backend: "memcached"`,
+		},
+		{
+			name: "vault",
+			config: `"kms": {
+				"mode": "vault",
+				"vault": {
+					"address": "https://vault.internal:8200",
+					"path": "secret/data/aegis/keys",
+					"token_env": "VAULT_TOKEN"
+				}
+			}`,
+			wantErr: "vault KMS backend is not implemented",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+			path := writeConfig(t, `{
+				`+tt.config+`,
+				"providers": [
+					{
+						"id": "openai-primary",
+						"name": "OpenAI Primary",
+						"type": "openai",
+						"base_url": "https://api.openai.com",
+						"api_key_id": "openai-key-1",
+						"models": ["gpt-4o-mini"],
+						"enabled": true
+					}
+				],
+				"quota": {"enabled": false},
+				"egress": {"allowed_domains": ["api.openai.com"]}
+			}`)
+
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Load error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func writeConfig(t *testing.T, data string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "aegis.json")
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return path
 }

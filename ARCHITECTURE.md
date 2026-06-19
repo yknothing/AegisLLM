@@ -1,55 +1,81 @@
-# AegisLLM 架构与目录设计
+# AegisLLM Architecture Truth Surface
 
-## 核心设计理念
+## Version
 
-AegisLLM 是一个安全至上的企业级 LLM 接入网关。架构采用 **微内核 + 中间件管道（Microkernel & Middleware Pipeline）** 模式。
+| Field | Value |
+| --- | --- |
+| Architecture version | `v0.2.0` |
+| Supersedes | `v0.1.0` legacy architecture scaffold |
+| Status | Current runtime truth |
+| Scope | Capability status, runtime dependencies, and reserved architecture targets |
 
-优先级排序：**安全 > 优雅 > 健壮 > 易用 > 轻量**
+## Current Runtime Shape
 
-## 目录结构设计
-
-遵循 Go 标准项目布局（Standard Go Project Layout）。
+AegisLLM is a single-process, security-first LLM API gateway built as a microkernel HTTP server plus an ordered middleware pipeline.
 
 ```text
-AegisLLM/
-├── cmd/
-│   └── aegis/                # 应用程序入口
-│       └── main.go
-├── internal/                 # 私有应用和库代码
-│   ├── config/               # 配置加载与管理
-│   ├── server/               # HTTP/SSE 服务器核心
-│   │   └── pipeline.go       # 中间件管道调度器
-│   ├── middleware/           # 核心中间件实现
-│   │   ├── auth.go           # ① Auth & JWT (虚拟密钥验证)
-│   │   ├── ratelimit.go      # ② Rate Limiter (分布式令牌桶)
-│   │   ├── redaction.go      # ③ PII Redaction (数据脱敏)
-│   │   ├── router.go         # ④ Router & LB (智能路由)
-│   │   ├── kms.go            # ⑤ KMS & Vault (密钥注入与内存覆写)
-│   │   └── adapter.go        # ⑥ Protocol Adapter (协议转换)
-│   ├── kms/                  # 密钥管理系统 (双层 KMS 架构)
-│   │   ├── local/            # 内置 AES-256-GCM KMS
-│   │   └── vault/            # HashiCorp Vault / AWS Secrets Manager 适配
-│   ├── proxy/                # 代理与适配器层
-│   │   ├── stream.go         # 异步非阻塞流式代理引擎 (Streaming Proxy)
-│   │   └── providers/        # 各大 LLM 提供商的具体适配逻辑
-│   ├── store/                # 状态与持久化存储
-│   │   ├── sqlite/           # Standalone 模式存储
-│   │   └── redis/            # Cluster 模式限流与黑名单
-│   └── utils/                # 工具函数
-│       ├── memzero.go        # 内存安全擦除工具
-│       └── logger.go         # 零 PII 审计日志
-├── pkg/                      # 外部可复用的库代码（如提供给其他 Go 项目使用的客户端）
-├── api/                      # OpenAPI/Swagger 规范文件
-├── docs/                     # 设计文档与用户手册
-├── scripts/                  # 构建、部署脚本
-├── Dockerfile                # 基于 Distroless 的多阶段构建镜像
-├── go.mod
-└── go.sum
+Client
+  -> internal/server
+  -> Auth
+  -> RateLimit
+  -> PII Redaction
+  -> Router
+  -> KMS Injector
+  -> Adapter
+  -> Proxy
+  -> Provider
 ```
 
-## 核心模块职责说明
+The main gateway mounts only `/v1/*` and `/health`. Admin routes exist as a scaffold in `internal/admin` but are not mounted by `cmd/aegis`.
 
-1.  **`internal/server/pipeline.go`**: 实现洋葱模型中间件管道，是微内核的体现。所有的请求都必须穿过管道。
-2.  **`internal/middleware/kms.go` & `internal/kms/`**: 负责动态获取提供商 API Key。绝对禁止将 Key 打印到日志或长期保留在内存中。使用后调用 `utils.memzero` 清理。
-3.  **`internal/proxy/stream.go`**: 流式代理引擎。在转发 SSE 数据块的同时，解析数据结构，实时计算 Token，并在流结束时写入审计日志并扣减额度。
-4.  **`internal/utils/logger.go`**: 严格的审计日志记录器，仅记录元数据，屏蔽任何可能的 Prompt/Completion 文本。
+## Implemented Baseline
+
+| Capability | Runtime status |
+| --- | --- |
+| Auth | HS256 virtual-key validation, issuer/expiry checks, process-local revocation store |
+| Rate limiting | In-memory RPM and concurrency |
+| PII | Default regex redaction mode |
+| Routing | Enabled provider selection by model, priority, and circuit-breaker state |
+| KMS | Local AES-256-GCM with in-memory and encrypted file backends |
+| Providers | OpenAI-compatible `openai` and `deepseek` request path |
+| Proxy | SSE forwarding, egress allowlist validation, heuristic token counting |
+| TLS | Server TLS with TLS 1.3 baseline; mTLS requires `ca_file` |
+
+## Reserved Capabilities
+
+These are architecture targets, not current runtime capabilities:
+
+| Capability | Current guardrail |
+| --- | --- |
+| Redis rate limiter | `rate_limit.backend="redis"` fails fast |
+| TPM enforcement | Non-zero configured TPM or JWT TPM fails closed |
+| Quota / budget enforcement | `quota.enabled=true` fails fast |
+| Vault KMS | `kms.mode="vault"` fails fast |
+| Admin API / BYOK control plane | Handler scaffold exists; not mounted by main gateway |
+| RS256 virtual keys | Reserved pending reviewed key loading and rotation |
+| Anthropic/Gemini adapters | Runtime rejects unsupported provider types |
+
+## Runtime Dependencies
+
+The default standalone profile needs:
+
+- `AEGIS_MASTER_KEY`
+- `AEGIS_JWT_KEY`
+- an explicit config file
+- `egress.allowed_domains`
+- at least one enabled provider whose `api_key_id` references a KMS key
+- a writable key-store path when using local file KMS
+
+Container smoke runs can use the bundled `/etc/aegis/aegis.json`. Production container deployments should mount `/etc/aegis/aegis.json` explicitly and must provide a writable `/var/lib/aegis` volume when using file-backed local KMS.
+
+## Source Of Truth
+
+Use these files as the current architecture source of truth:
+
+- `README.md`
+- `docs/architecture-design.md`
+- `docs/module-boundaries.md`
+- `docs/threat-model.md`
+- `docs/adr/*.md`
+- `internal/runtime/runtime.go`
+- `internal/config/config.go`
