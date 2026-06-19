@@ -95,15 +95,19 @@ response = client.chat.completions.create(
 The image includes `/etc/aegis/aegis.json` derived from `aegis.example.json` with `kms.local.key_store_path` set to `/var/lib/aegis/keys`, and creates `/var/lib/aegis` for the local encrypted key store. Production deployments should mount a writable data volume and may mount their own config explicitly:
 
 ```bash
+make docker VERSION=v0.2.0-rc-local
+
 docker run --rm \
   -e AEGIS_MASTER_KEY="$(openssl rand -hex 32)" \
   -e AEGIS_JWT_KEY="$(openssl rand -hex 64)" \
   -v aegis-data:/var/lib/aegis \
   -p 8080:8080 \
-  aegis:latest
+  aegis:v0.2.0-rc-local
 ```
 
 The bundled example config is non-secret and suitable only for smoke validation. If you mount a custom config at `/etc/aegis/aegis.json`, set `kms.local.key_store_path` to a path backed by a writable volume. Provider API keys must still be seeded into KMS before real `/v1` provider calls can succeed.
+
+The default Docker target tags only the explicit `VERSION`. Set `DOCKER_TAG_LATEST=true` only for a supported release.
 
 ## Security
 

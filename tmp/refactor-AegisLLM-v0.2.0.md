@@ -233,3 +233,21 @@ After each significant step:
   - Fix local GitHub push credential path or provide another approved push route.
   - Push branch and verify GitHub Actions CI green on the remote runner.
   - Tag `v0.2.0` only after remote CI is green and release artifacts are confirmed clean.
+
+### Step 7 - Release Policy Truth Surface
+
+- Security policy fix:
+  - `SECURITY.md` no longer claims a generic "Latest release" is supported.
+  - It now states that no stable version is supported yet.
+  - `v0.2.0` is recorded as a release candidate that is not supported until the release branch is pushed, GitHub Actions are green, and the `v0.2.0` tag exists.
+- README Docker example:
+  - Replaced `aegis:latest` with explicit local smoke tag `aegis:v0.2.0-rc-local`.
+  - Added `make docker VERSION=v0.2.0-rc-local` before the run command so the example does not imply a stable latest release exists.
+- Docker tag policy:
+  - `make docker` now tags only the explicit `VERSION` by default.
+  - `aegis:latest` is produced only when `DOCKER_TAG_LATEST=true` is set for a supported release.
+- Documentation consistency:
+  - Verified `internal/utils/logger.go` and `SensitiveFields` exist before keeping the secure logging guidance.
+- Remaining gates before release-complete claim:
+  - Push branch and verify GitHub Actions CI green on the remote runner.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.

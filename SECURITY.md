@@ -54,8 +54,11 @@ Contributors MUST follow these rules:
 
 ## Supported Versions
 
+No stable version is supported yet. The current release candidate is `v0.2.0`,
+but it must not be treated as a supported release until the release branch has
+been pushed, GitHub Actions are green, and the `v0.2.0` tag has been created.
+
 | Version | Supported |
 | :--- | :---: |
-| Latest release | Yes |
-| Previous minor | Security fixes only |
-| Older | No |
+| `v0.2.0` release candidate | No |
+| `v0.1.0` scaffold baseline | No |

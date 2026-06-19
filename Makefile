@@ -17,6 +17,7 @@ GO      ?= go
 GOVULNCHECK_VERSION ?= v1.4.0
 GOSEC_VERSION       ?= v2.27.1
 GOLANGCI_VERSION    ?= v2.12.2
+DOCKER_TAG_LATEST   ?= false
 
 BINARY  := aegis
 GOFLAGS := -trimpath
@@ -24,6 +25,10 @@ LDFLAGS := -s -w \
 	-X main.version=$(VERSION) \
 	-X main.commit=$(COMMIT) \
 	-X main.buildDate=$(BUILD_DATE)
+DOCKER_TAGS := -t aegis:$(VERSION)
+ifeq ($(DOCKER_TAG_LATEST),true)
+DOCKER_TAGS += -t aegis:latest
+endif
 
 .PHONY: all build build-linux test test-coverage lint fmt vet security govulncheck gosec docker generate-key clean help
 
@@ -76,8 +81,7 @@ docker:
 		--build-arg VERSION=$(VERSION) \
 		--build-arg COMMIT=$(COMMIT) \
 		--build-arg BUILD_DATE=$(BUILD_DATE) \
-		-t aegis:$(VERSION) \
-		-t aegis:latest \
+		$(DOCKER_TAGS) \
 		.
 
 ## Utilities
