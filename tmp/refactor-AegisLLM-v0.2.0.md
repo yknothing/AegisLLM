@@ -489,3 +489,37 @@ After each significant step:
   - Restore an approved GitHub write credential path.
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
+### Step 15 - Adapter Target Path Boundary Hardening
+
+- Security finding:
+  - `internal/middleware.buildTargetURL` rejected absolute URLs but still allowed network-path references such as `//evil.example/v1/chat/completions`.
+  - The proxy engine egress allowlist would still block non-allowlisted hosts, but the middleware/plugin boundary should not let adapter-generated paths override the configured provider authority and rely on a later defense to catch it.
+- Fix:
+  - Restricted provider target paths to root-relative paths.
+  - Rejected adapter-generated target paths that include a scheme, host, or userinfo.
+  - Added regression tests for accepted root-relative paths, rejected network-path references, and rejected relative paths without a leading slash.
+  - Updated `CHANGELOG.md` under `v0.2.0 - Release Candidate`.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test ./internal/middleware` passed.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=52e1a67-target-path-hardening BUILD_DATE=2026-06-20T00:00:00Z PORT=18089` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `259.99kB`.
+    - Image `sha256:66da3ca3a9ab98c9b8d16178aa4dd2fb2ed46ef90b00ade4b41870993ada8bb2`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: 52e1a67-target-path-hardening, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Autoreview:
+  - Architecture expert review identified the original `buildTargetURL` authority-override behavior as the current blocking release issue and recommended the same root-relative path fix.
+  - Security expert review independently identified the same provider-key-to-wrong-authority risk and confirmed the current patch is the right first fix.
+  - Self-review confirmed the fix closes the authority-override edge before proxy egress validation while preserving the existing proxy allowlist as a second defense.
+  - Scope check confirmed built-in adapters already return root-relative `/v1/chat/completions` paths, so the change does not alter supported OpenAI-compatible request routing.
+  - Security expert review also found a remaining release blocker: `key_source=byok` trusts JWT `byok_key_id` without service-side owner/provider binding. This will be handled in the next clean batch.
+- Remaining gates before release-complete claim:
+  - Fix or explicitly fail closed the BYOK runtime path before `v0.2.0` release.
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.

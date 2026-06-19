@@ -11,6 +11,7 @@ All notable changes to AegisLLM are documented here.
 - Enforced a minimum HS256 JWT signing-key length, maximum virtual-key lifetime from `auth.token_expiry`, and generic authentication failure responses.
 - Rejected negative rate-limit configuration values instead of treating them as unlimited.
 - Tightened proxy egress validation to require HTTPS, enforced TLS 1.3 for upstream connections, and changed upstream request header forwarding to a minimal allowlist.
+- Restricted adapter-generated provider target paths to root-relative paths so plugin or adapter errors cannot override the configured provider authority before proxy egress validation.
 - Filtered unsafe upstream response headers so hop-by-hop and credential-bearing provider headers are not reflected to clients.
 - Removed the unused `MemZeroString` API because mutating Go string backing memory is unsafe.
 - Removed key identifiers from reserved Vault backend error messages.

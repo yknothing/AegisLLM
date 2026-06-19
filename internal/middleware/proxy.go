@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/yknothing/AegisLLM/internal/proxy"
 	"github.com/yknothing/AegisLLM/internal/server"
@@ -82,8 +83,11 @@ func buildTargetURL(baseURL, targetPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parsing target path: %w", err)
 	}
-	if rel.IsAbs() {
-		return "", fmt.Errorf("target path must be relative")
+	if rel.IsAbs() || rel.Host != "" || rel.User != nil {
+		return "", fmt.Errorf("target path must not include scheme or host")
+	}
+	if !strings.HasPrefix(targetPath, "/") {
+		return "", fmt.Errorf("target path must be root-relative")
 	}
 
 	return base.ResolveReference(rel).String(), nil

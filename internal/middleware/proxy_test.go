@@ -46,6 +46,29 @@ func TestProxyMarksPartialUpstreamFailureAsBadGateway(t *testing.T) {
 	}
 }
 
+func TestBuildTargetURLAcceptsRootRelativePath(t *testing.T) {
+	got, err := buildTargetURL("https://api.openai.com/base", "/v1/chat/completions?stream=true")
+	if err != nil {
+		t.Fatalf("buildTargetURL returned error: %v", err)
+	}
+	want := "https://api.openai.com/v1/chat/completions?stream=true"
+	if got != want {
+		t.Fatalf("target URL = %q, want %q", got, want)
+	}
+}
+
+func TestBuildTargetURLRejectsNetworkPathReference(t *testing.T) {
+	if _, err := buildTargetURL("https://api.openai.com", "//evil.example/v1/chat/completions"); err == nil {
+		t.Fatal("buildTargetURL accepted a network-path reference")
+	}
+}
+
+func TestBuildTargetURLRejectsRelativePathWithoutLeadingSlash(t *testing.T) {
+	if _, err := buildTargetURL("https://api.openai.com", "v1/chat/completions"); err == nil {
+		t.Fatal("buildTargetURL accepted a path without a leading slash")
+	}
+}
+
 type stubProxyEngine struct {
 	result *proxy.ProxyResult
 	err    error
