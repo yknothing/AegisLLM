@@ -453,3 +453,39 @@ After each significant step:
   - Restore an approved GitHub write credential path.
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
+### Step 14 - Auth/JWT Release-Blocking Hardening
+
+- Security finding:
+  - HS256 JWT signing keys only needed to be non-empty, so weak `AEGIS_JWT_KEY` values could start the gateway and validate attacker-forged virtual keys if brute-forced.
+  - `auth.token_expiry` was loaded and passed through config but was not enforced against JWT `exp - iat`, allowing arbitrarily long-lived tokens as long as `exp` was in the future.
+  - Auth 401 responses exposed distinct client-facing failure categories such as missing header, invalid format, or revoked token, despite the auth middleware comment requiring generic failures.
+- Fix:
+  - Added `middleware.MinJWTSigningKeyBytes` and reject HS256 signing keys shorter than 32 bytes in both token validation and runtime env loading.
+  - Reject non-positive `auth.token_expiry` in config and runtime validation.
+  - Enforce max token lifetime: when `auth.token_expiry` is configured, `iat` must exist, `exp` must be after `iat`, and `exp - iat` must not exceed the configured maximum.
+  - Unified auth failure responses to `invalid or expired virtual key`.
+  - Updated `SECURITY.md` and `CHANGELOG.md` for the stronger virtual-key signing contract.
+  - Added regression coverage for weak signing keys, long-lived JWT rejection, missing `iat`, non-positive `auth.token_expiry`, runtime JWT key loading, and generic auth failure JSON.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test ./internal/middleware ./internal/runtime ./internal/config` passed.
+  - Initial `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` failed on `staticcheck` for an unnecessary nil check in a test cleanup.
+  - Removed the unnecessary nil check.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed after the fix.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=fc8aed1-auth-jwt-final BUILD_DATE=2026-06-20T00:00:00Z PORT=18088` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `258.78kB`.
+    - Image `sha256:c6ded14562e83187f3a3c879e556e113f63fc351cfaaa9ef36443e32521d3ca1`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: fc8aed1-auth-jwt-final, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Autoreview:
+  - Security architecture reviewer identified weak HS256 signing-key acceptance and unused `auth.token_expiry` as release-blocking. Both are now enforced with regression tests.
+  - Auth error category disclosure was identified as a should-fix oracle risk and is now generic at the client boundary.
+- Remaining gates before release-complete claim:
+  - Re-run clean-HEAD release preflight and `ceo` Docker smoke after commit.
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.

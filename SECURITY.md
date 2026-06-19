@@ -22,15 +22,19 @@ Provider API keys are **never** stored in plaintext — not in configuration fil
 
 Audit logs record only structural metadata (timestamps, token counts, model names, status codes). Request bodies (prompts) and response bodies (completions) are **never** logged under any circumstance.
 
-### 3. Memory Zeroing
+### 3. Strong Virtual-Key Signing
+
+HS256 virtual-key signing material must be at least 32 bytes. Aegis rejects shorter JWT signing keys at runtime and rejects virtual keys whose `exp - iat` lifetime exceeds `auth.token_expiry`.
+
+### 4. Memory Zeroing
 
 Sensitive data (decrypted API keys, JWT signing material) is explicitly overwritten with zeros after use via `utils.MemZero()`. This prevents credential recovery from memory dumps.
 
-### 4. Egress Filtering
+### 5. Egress Filtering
 
 The streaming proxy engine validates all outbound requests against a configured domain allowlist. Even if the gateway is compromised, it cannot exfiltrate data to unauthorized endpoints.
 
-### 5. Minimal Attack Surface
+### 6. Minimal Attack Surface
 
 The production Docker image uses Google Distroless (no shell, no package manager). The binary is statically compiled with no runtime dependencies.
 

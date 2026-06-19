@@ -8,6 +8,7 @@ All notable changes to AegisLLM are documented here.
 
 - Added fail-fast validation for reserved runtime controls: Vault KMS, Redis rate limiter, quota enforcement, provider TPM, provider RPM, default TPM, and unsupported provider adapters.
 - Changed virtual-key model authorization to fail closed when the `models` claim is missing or empty. Use explicit `"*"` for all-model access.
+- Enforced a minimum HS256 JWT signing-key length, maximum virtual-key lifetime from `auth.token_expiry`, and generic authentication failure responses.
 - Rejected negative rate-limit configuration values instead of treating them as unlimited.
 - Tightened proxy egress validation to require HTTPS, enforced TLS 1.3 for upstream connections, and changed upstream request header forwarding to a minimal allowlist.
 - Filtered unsafe upstream response headers so hop-by-hop and credential-bearing provider headers are not reflected to clients.

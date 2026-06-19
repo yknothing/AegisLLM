@@ -10,8 +10,12 @@ import (
 	"time"
 )
 
+var testSigningKey = []byte("0123456789abcdef0123456789abcdef")
+
+const testTokenMaxTTL = 24 * time.Hour
+
 func TestValidateTokenHS256(t *testing.T) {
-	key := []byte("test-signing-key")
+	key := testSigningKey
 	token := signTestToken(t, key, VirtualKeyClaims{
 		KeyID:     "vk_test",
 		Subject:   "user_1",
@@ -22,7 +26,7 @@ func TestValidateTokenHS256(t *testing.T) {
 		Issuer:    "aegis",
 	})
 
-	claims, err := validateToken(token, key, "aegis")
+	claims, err := validateToken(token, key, "aegis", testTokenMaxTTL)
 	if err != nil {
 		t.Fatalf("validateToken returned error: %v", err)
 	}
@@ -31,8 +35,8 @@ func TestValidateTokenHS256(t *testing.T) {
 	}
 }
 
-func TestValidateTokenRejectsBadSignature(t *testing.T) {
-	token := signTestToken(t, []byte("correct-key"), VirtualKeyClaims{
+func TestValidateTokenRejectsWeakSigningKey(t *testing.T) {
+	token := signTestToken(t, []byte("weak-signing-key"), VirtualKeyClaims{
 		KeyID:     "vk_test",
 		KeySource: "pool",
 		Models:    []string{"gpt-4o-mini"},
@@ -41,13 +45,28 @@ func TestValidateTokenRejectsBadSignature(t *testing.T) {
 		Issuer:    "aegis",
 	})
 
-	if _, err := validateToken(token, []byte("wrong-key"), "aegis"); err == nil {
+	if _, err := validateToken(token, []byte("weak-signing-key"), "aegis", testTokenMaxTTL); err == nil {
+		t.Fatal("validateToken accepted a weak signing key")
+	}
+}
+
+func TestValidateTokenRejectsBadSignature(t *testing.T) {
+	token := signTestToken(t, []byte("correct-key-0123456789abcdef012345"), VirtualKeyClaims{
+		KeyID:     "vk_test",
+		KeySource: "pool",
+		Models:    []string{"gpt-4o-mini"},
+		IssuedAt:  time.Now().Add(-time.Minute).Unix(),
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		Issuer:    "aegis",
+	})
+
+	if _, err := validateToken(token, []byte("wrong-key-0123456789abcdef01234567"), "aegis", testTokenMaxTTL); err == nil {
 		t.Fatal("validateToken accepted a token with the wrong signing key")
 	}
 }
 
 func TestValidateTokenRejectsExpired(t *testing.T) {
-	key := []byte("test-signing-key")
+	key := testSigningKey
 	token := signTestToken(t, key, VirtualKeyClaims{
 		KeyID:     "vk_test",
 		KeySource: "pool",
@@ -57,8 +76,39 @@ func TestValidateTokenRejectsExpired(t *testing.T) {
 		Issuer:    "aegis",
 	})
 
-	if _, err := validateToken(token, key, "aegis"); err == nil {
+	if _, err := validateToken(token, key, "aegis", testTokenMaxTTL); err == nil {
 		t.Fatal("validateToken accepted an expired token")
+	}
+}
+
+func TestValidateTokenRejectsTokenLifetimeAboveConfiguredMax(t *testing.T) {
+	key := testSigningKey
+	token := signTestToken(t, key, VirtualKeyClaims{
+		KeyID:     "vk_test",
+		KeySource: "pool",
+		Models:    []string{"gpt-4o-mini"},
+		IssuedAt:  time.Now().Add(-time.Minute).Unix(),
+		ExpiresAt: time.Now().Add(48 * time.Hour).Unix(),
+		Issuer:    "aegis",
+	})
+
+	if _, err := validateToken(token, key, "aegis", testTokenMaxTTL); err == nil {
+		t.Fatal("validateToken accepted a token lifetime above auth.token_expiry")
+	}
+}
+
+func TestValidateTokenRejectsMissingIssuedAtWhenMaxTTLConfigured(t *testing.T) {
+	key := testSigningKey
+	token := signTestToken(t, key, VirtualKeyClaims{
+		KeyID:     "vk_test",
+		KeySource: "pool",
+		Models:    []string{"gpt-4o-mini"},
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		Issuer:    "aegis",
+	})
+
+	if _, err := validateToken(token, key, "aegis", testTokenMaxTTL); err == nil {
+		t.Fatal("validateToken accepted missing iat with configured max TTL")
 	}
 }
 
@@ -81,7 +131,7 @@ func TestValidateTokenRejectsReservedBudgetAndTPMClaims(t *testing.T) {
 		},
 	}
 
-	key := []byte("test-signing-key")
+	key := testSigningKey
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			claims := tt.claims
@@ -93,7 +143,7 @@ func TestValidateTokenRejectsReservedBudgetAndTPMClaims(t *testing.T) {
 			claims.Issuer = "aegis"
 
 			token := signTestToken(t, key, claims)
-			if _, err := validateToken(token, key, "aegis"); err == nil {
+			if _, err := validateToken(token, key, "aegis", testTokenMaxTTL); err == nil {
 				t.Fatalf("validateToken accepted reserved %s claim", tt.name)
 			}
 		})
@@ -125,7 +175,7 @@ func TestValidateTokenRejectsNegativeLimitClaims(t *testing.T) {
 		},
 	}
 
-	key := []byte("test-signing-key")
+	key := testSigningKey
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			claims := tt.claims
@@ -137,7 +187,7 @@ func TestValidateTokenRejectsNegativeLimitClaims(t *testing.T) {
 			claims.Issuer = "aegis"
 
 			token := signTestToken(t, key, claims)
-			if _, err := validateToken(token, key, "aegis"); err == nil {
+			if _, err := validateToken(token, key, "aegis", testTokenMaxTTL); err == nil {
 				t.Fatalf("validateToken accepted negative %s claim", tt.name)
 			}
 		})
@@ -145,7 +195,7 @@ func TestValidateTokenRejectsNegativeLimitClaims(t *testing.T) {
 }
 
 func TestValidateTokenRejectsMissingModelPermissions(t *testing.T) {
-	key := []byte("test-signing-key")
+	key := testSigningKey
 	token := signTestToken(t, key, VirtualKeyClaims{
 		KeyID:     "vk_test",
 		KeySource: "pool",
@@ -154,13 +204,13 @@ func TestValidateTokenRejectsMissingModelPermissions(t *testing.T) {
 		Issuer:    "aegis",
 	})
 
-	if _, err := validateToken(token, key, "aegis"); err == nil || !strings.Contains(err.Error(), "missing model permissions") {
+	if _, err := validateToken(token, key, "aegis", testTokenMaxTTL); err == nil || !strings.Contains(err.Error(), "missing model permissions") {
 		t.Fatalf("validateToken error = %v, want missing model permissions", err)
 	}
 }
 
 func TestValidateTokenAcceptsExplicitWildcardModelPermission(t *testing.T) {
-	key := []byte("test-signing-key")
+	key := testSigningKey
 	token := signTestToken(t, key, VirtualKeyClaims{
 		KeyID:     "vk_test",
 		KeySource: "pool",
@@ -170,8 +220,20 @@ func TestValidateTokenAcceptsExplicitWildcardModelPermission(t *testing.T) {
 		Issuer:    "aegis",
 	})
 
-	if _, err := validateToken(token, key, "aegis"); err != nil {
+	if _, err := validateToken(token, key, "aegis", testTokenMaxTTL); err != nil {
 		t.Fatalf("validateToken rejected wildcard model permission: %v", err)
+	}
+}
+
+func TestAuthFailureJSONUsesSingleClientFacingMessage(t *testing.T) {
+	got := string(authFailureJSON())
+	for _, forbidden := range []string{"missing authorization", "invalid authorization format", "revoked"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("auth failure JSON exposed %q: %s", forbidden, got)
+		}
+	}
+	if !strings.Contains(got, "invalid or expired virtual key") {
+		t.Fatalf("auth failure JSON = %s, want generic virtual key failure", got)
 	}
 }
 

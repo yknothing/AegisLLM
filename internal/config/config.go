@@ -87,7 +87,7 @@ type Provider struct {
 // AuthConfig defines authentication settings.
 type AuthConfig struct {
 	JWTSigningKeyEnv string        `json:"jwt_signing_key_env"` // Env var for JWT private key
-	TokenExpiry      time.Duration `json:"token_expiry"`
+	TokenExpiry      time.Duration `json:"token_expiry"`        // Maximum accepted token lifetime
 	Issuer           string        `json:"issuer"`
 }
 
@@ -315,6 +315,9 @@ func (c *Config) validate() error {
 		default:
 			return errors.New("server.tls.min_version currently supports only TLS 1.3")
 		}
+	}
+	if c.Auth.TokenExpiry <= 0 {
+		return errors.New("auth.token_expiry must be positive")
 	}
 
 	enabledProviders := 0

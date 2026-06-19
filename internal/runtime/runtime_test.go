@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yknothing/AegisLLM/internal/config"
 )
@@ -141,12 +142,57 @@ func TestNewKMSProviderUsesFileBackend(t *testing.T) {
 	}
 }
 
+func TestLoadJWTSigningKeyEnvRejectsWeakSecret(t *testing.T) {
+	const envVar = "TEST_AEGIS_WEAK_JWT_KEY"
+	t.Setenv(envVar, "short-secret")
+
+	key, err := loadJWTSigningKeyEnv(envVar)
+	if err == nil {
+		t.Fatal("loadJWTSigningKeyEnv accepted a weak JWT signing key")
+	}
+	if key != nil {
+		t.Fatal("loadJWTSigningKeyEnv returned key bytes on failure")
+	}
+	if strings.Contains(err.Error(), "short-secret") {
+		t.Fatalf("error leaked JWT signing key value: %v", err)
+	}
+	if !strings.Contains(err.Error(), "at least 32 bytes") {
+		t.Fatalf("error = %v, want minimum length failure", err)
+	}
+}
+
+func TestLoadJWTSigningKeyEnvAcceptsStrongSecret(t *testing.T) {
+	const envVar = "TEST_AEGIS_STRONG_JWT_KEY"
+	secret := "0123456789abcdef0123456789abcdef"
+	t.Setenv(envVar, secret)
+
+	key, err := loadJWTSigningKeyEnv(envVar)
+	if err != nil {
+		t.Fatalf("loadJWTSigningKeyEnv returned error: %v", err)
+	}
+	defer func() {
+		for i := range key {
+			key[i] = 0
+		}
+	}()
+	if string(key) != secret {
+		t.Fatalf("key bytes = %q, want configured secret", string(key))
+	}
+}
+
 func TestNewServerRejectsUnsupportedRuntimeControls(t *testing.T) {
 	tests := []struct {
 		name    string
 		mutate  func(*config.Config)
 		wantErr string
 	}{
+		{
+			name: "token expiry",
+			mutate: func(cfg *config.Config) {
+				cfg.Auth.TokenExpiry = 0
+			},
+			wantErr: "auth.token_expiry must be positive",
+		},
 		{
 			name: "quota",
 			mutate: func(cfg *config.Config) {
@@ -281,6 +327,9 @@ func minimalRuntimeConfig() *config.Config {
 		},
 		Egress: config.EgressConfig{
 			AllowedDomains: []string{"api.openai.com"},
+		},
+		Auth: config.AuthConfig{
+			TokenExpiry: 24 * time.Hour,
 		},
 	}
 }

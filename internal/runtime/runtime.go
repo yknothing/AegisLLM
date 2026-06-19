@@ -39,7 +39,7 @@ func NewServer(cfg *config.Config, logger *slog.Logger) (*server.Server, error) 
 		return nil, err
 	}
 
-	signingKey, err := loadSecretEnv(cfg.Auth.JWTSigningKeyEnv, "JWT signing key")
+	signingKey, err := loadJWTSigningKeyEnv(cfg.Auth.JWTSigningKeyEnv)
 	if err != nil {
 		_ = kmsProvider.Close()
 		return nil, err
@@ -161,6 +161,9 @@ func runtimeMiddlewareOptions(
 }
 
 func validateRuntimeConfig(cfg *config.Config) error {
+	if cfg.Auth.TokenExpiry <= 0 {
+		return fmt.Errorf("auth.token_expiry must be positive")
+	}
 	if cfg.Quota.Enabled {
 		return fmt.Errorf("quota enforcement is not implemented; set quota.enabled=false")
 	}
@@ -237,6 +240,18 @@ func loadSecretEnv(envName, label string) ([]byte, error) {
 		return nil, fmt.Errorf("%s env var %q is not set", label, envName)
 	}
 	return []byte(value), nil
+}
+
+func loadJWTSigningKeyEnv(envName string) ([]byte, error) {
+	key, err := loadSecretEnv(envName, "JWT signing key")
+	if err != nil {
+		return nil, err
+	}
+	if len(key) < middleware.MinJWTSigningKeyBytes {
+		utils.MemZero(key)
+		return nil, fmt.Errorf("JWT signing key env var %q must contain at least %d bytes", envName, middleware.MinJWTSigningKeyBytes)
+	}
+	return key, nil
 }
 
 func providerRuntime(cfg *config.Config) ([]middleware.ProviderChannel, map[string]string, map[string]string, error) {

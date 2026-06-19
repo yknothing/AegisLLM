@@ -126,6 +126,51 @@ func TestLoadRejectsQuotaUntilRuntimeEnforcementExists(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsNonPositiveAuthTokenExpiry(t *testing.T) {
+	tests := []struct {
+		name        string
+		tokenExpiry string
+	}{
+		{name: "zero", tokenExpiry: "0s"},
+		{name: "negative", tokenExpiry: "-1s"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+			path := writeConfig(t, `{
+				"kms": {
+					"mode": "local",
+					"local": {"master_key_env": "AEGIS_MASTER_KEY"}
+				},
+				"auth": {
+					"jwt_signing_key_env": "AEGIS_JWT_KEY",
+					"token_expiry": "`+tt.tokenExpiry+`",
+					"issuer": "aegis"
+				},
+				"providers": [
+					{
+						"id": "openai-primary",
+						"name": "OpenAI Primary",
+						"type": "openai",
+						"base_url": "https://api.openai.com",
+						"api_key_id": "openai-key-1",
+						"models": ["gpt-4o-mini"],
+						"enabled": true
+					}
+				],
+				"quota": {"enabled": false},
+				"egress": {"allowed_domains": ["api.openai.com"]}
+			}`)
+
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), "auth.token_expiry must be positive") {
+				t.Fatalf("Load error = %v, want auth.token_expiry failure", err)
+			}
+		})
+	}
+}
+
 func TestLoadRejectsReservedRateControls(t *testing.T) {
 	tests := []struct {
 		name    string

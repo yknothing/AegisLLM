@@ -29,9 +29,15 @@ import (
 type AuthConfig struct {
 	SigningKey []byte        // JWT signing key (loaded from env, zeroed on shutdown)
 	Issuer     string        // Expected JWT issuer
-	Expiry     time.Duration // Default token expiry
+	Expiry     time.Duration // Maximum accepted token lifetime
 	Revocation RevocationStore
 }
+
+const (
+	// MinJWTSigningKeyBytes is the minimum HS256 signing-key length accepted by runtime.
+	MinJWTSigningKeyBytes = 32
+	maxClockSkew          = 60 * time.Second
+)
 
 // RevocationStore checks if a virtual key has been revoked.
 // Current runtime uses an in-memory set; Redis-backed shared revocation is a
@@ -69,29 +75,29 @@ func Auth(cfg AuthConfig) server.Middleware {
 		// Extract bearer token from Authorization header
 		authHeader := ctx.Request.Header.Get("Authorization")
 		if authHeader == "" {
-			ctx.Abort(http.StatusUnauthorized, errorJSON("missing authorization header"))
+			ctx.Abort(http.StatusUnauthorized, authFailureJSON())
 			return
 		}
 
 		parts := strings.SplitN(authHeader, " ", 2)
 		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-			ctx.Abort(http.StatusUnauthorized, errorJSON("invalid authorization format"))
+			ctx.Abort(http.StatusUnauthorized, authFailureJSON())
 			return
 		}
 
 		token := parts[1]
 
 		// Validate the virtual key (JWT)
-		claims, err := validateToken(token, cfg.SigningKey, cfg.Issuer)
+		claims, err := validateToken(token, cfg.SigningKey, cfg.Issuer, cfg.Expiry)
 		if err != nil {
 			// SECURITY: Do not reveal specific validation failure reason
-			ctx.Abort(http.StatusUnauthorized, errorJSON("invalid or expired virtual key"))
+			ctx.Abort(http.StatusUnauthorized, authFailureJSON())
 			return
 		}
 
 		// Check revocation list
 		if cfg.Revocation != nil && cfg.Revocation.IsRevoked(claims.KeyID) {
-			ctx.Abort(http.StatusUnauthorized, errorJSON("virtual key has been revoked"))
+			ctx.Abort(http.StatusUnauthorized, authFailureJSON())
 			return
 		}
 
@@ -111,9 +117,9 @@ func Auth(cfg AuthConfig) server.Middleware {
 
 // validateToken verifies the JWT signature and claims.
 // SECURITY: Uses constant-time comparison to prevent timing attacks.
-func validateToken(token string, signingKey []byte, expectedIssuer string) (*VirtualKeyClaims, error) {
-	if len(signingKey) == 0 {
-		return nil, fmt.Errorf("missing signing key")
+func validateToken(token string, signingKey []byte, expectedIssuer string, maxTokenTTL time.Duration) (*VirtualKeyClaims, error) {
+	if len(signingKey) < MinJWTSigningKeyBytes {
+		return nil, fmt.Errorf("signing key must be at least %d bytes", MinJWTSigningKeyBytes)
 	}
 
 	parts := strings.Split(token, ".")
@@ -167,8 +173,20 @@ func validateToken(token string, signingKey []byte, expectedIssuer string) (*Vir
 	if claims.ExpiresAt <= now {
 		return nil, fmt.Errorf("token expired")
 	}
-	if claims.IssuedAt > now+60 {
+	if claims.IssuedAt > now+int64(maxClockSkew.Seconds()) {
 		return nil, fmt.Errorf("token issued in the future")
+	}
+	if maxTokenTTL > 0 {
+		if claims.IssuedAt <= 0 {
+			return nil, fmt.Errorf("missing issued-at claim")
+		}
+		if claims.ExpiresAt <= claims.IssuedAt {
+			return nil, fmt.Errorf("token expires before issued-at")
+		}
+		tokenTTL := time.Unix(claims.ExpiresAt, 0).Sub(time.Unix(claims.IssuedAt, 0))
+		if tokenTTL > maxTokenTTL {
+			return nil, fmt.Errorf("token lifetime exceeds configured maximum")
+		}
 	}
 	if expectedIssuer != "" && claims.Issuer != expectedIssuer {
 		return nil, fmt.Errorf("invalid issuer")
@@ -201,7 +219,11 @@ func validateToken(token string, signingKey []byte, expectedIssuer string) (*Vir
 	return &claims, nil
 }
 
-// errorJSON creates a standard error response body.
+func authFailureJSON() []byte {
+	return errorJSON("invalid or expired virtual key")
+}
+
+// errorJSON creates a standard authentication error response body.
 func errorJSON(msg string) []byte {
 	resp := struct {
 		Error struct {
