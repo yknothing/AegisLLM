@@ -221,46 +221,6 @@ func (m *memoryLimiter) RecordTokens(key string, tokens int, window time.Duratio
 	return nil
 }
 
-// --- Redis Limiter (Cluster Mode) ---
-
-type redisLimiter struct {
-	url string
-	// TODO: Redis client connection pool
-}
-
-func newRedisLimiter(url string) *redisLimiter {
-	return &redisLimiter{url: url}
-}
-
-func (r *redisLimiter) Allow(key, dimension string, limit int, window time.Duration) (bool, error) {
-	// TODO: Implement Redis Lua script for atomic token bucket
-	//
-	// EVAL script:
-	//   local key = KEYS[1]
-	//   local limit = tonumber(ARGV[1])
-	//   local window = tonumber(ARGV[2])
-	//   local now = tonumber(ARGV[3])
-	//   redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
-	//   local count = redis.call('ZCARD', key)
-	//   if count < limit then
-	//     redis.call('ZADD', key, now, now .. math.random())
-	//     redis.call('EXPIRE', key, window / 1000)
-	//     return 1
-	//   end
-	//   return 0
-	return false, errors.New("redis rate limiter backend is not implemented")
-}
-
-func (r *redisLimiter) AcquireConcurrency(key string, maxConc int) (bool, func()) {
-	// TODO: Implement Redis-based semaphore
-	return false, func() {}
-}
-
-func (r *redisLimiter) RecordTokens(key string, tokens int, window time.Duration) error {
-	// TODO: Implement Redis INCRBY with TTL
-	return errors.New("redis rate limiter backend is not implemented")
-}
-
 // rateLimitErrorJSON creates a rate limit error response.
 func rateLimitErrorJSON(msg string) []byte {
 	return []byte(`{"error":{"message":"` + msg + `","type":"rate_limit_error"}}`)

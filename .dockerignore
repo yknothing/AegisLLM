@@ -1,0 +1,42 @@
+# VCS and local metadata
+.git
+.gitignore
+.DS_Store
+
+# Local configuration, secrets, and generated key stores
+.env
+.env.*
+aegis.json
+aegis.db
+aegis.keys/
+*.db
+*.sqlite
+*.sqlite3
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+*.der
+*.log
+
+# Build and test artifacts
+bin/
+coverage.*
+*.out
+*.coverprofile
+profile.cov
+*.test
+
+# Local-only progress and scratch files
+tmp/
+.docker/
+.github/
+
+# Editor and OS artifacts
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+Thumbs.db

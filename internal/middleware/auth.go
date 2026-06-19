@@ -161,6 +161,9 @@ func validateToken(token string, signingKey []byte, expectedIssuer string) (*Vir
 	if claims.KeyID == "" {
 		return nil, fmt.Errorf("missing key id")
 	}
+	if len(claims.Models) == 0 {
+		return nil, fmt.Errorf("missing model permissions")
+	}
 	if claims.ExpiresAt <= now {
 		return nil, fmt.Errorf("token expired")
 	}
@@ -179,8 +182,17 @@ func validateToken(token string, signingKey []byte, expectedIssuer string) (*Vir
 	if claims.KeySource == "byok" && claims.BYOKKeyID == "" {
 		return nil, fmt.Errorf("missing BYOK key id")
 	}
+	if claims.MaxRPM < 0 {
+		return nil, fmt.Errorf("RPM limit must not be negative")
+	}
+	if claims.BudgetUSD < 0 {
+		return nil, fmt.Errorf("budget must not be negative")
+	}
 	if claims.BudgetUSD > 0 {
 		return nil, fmt.Errorf("budget enforcement is not implemented")
+	}
+	if claims.MaxTPM < 0 {
+		return nil, fmt.Errorf("TPM limit must not be negative")
 	}
 	if claims.MaxTPM > 0 {
 		return nil, fmt.Errorf("TPM enforcement is not implemented")

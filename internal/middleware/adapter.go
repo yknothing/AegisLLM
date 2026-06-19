@@ -3,7 +3,7 @@
 //
 // DESIGN:
 //   - Plugin-based adapter registry: each provider type registers its adapter
-//   - Adapters transform request/response formats without buffering full bodies
+//   - Adapters transform bounded request bodies up to max_request_body_size
 //   - Current runtime support: OpenAI-compatible OpenAI and DeepSeek.
 //   - Anthropic and Gemini adapter types are reserved until implemented.
 //
@@ -136,7 +136,8 @@ type AnthropicAdapter struct{}
 
 func (a *AnthropicAdapter) Name() string { return "anthropic" }
 func (a *AnthropicAdapter) TransformRequest(body []byte, model string) ([]byte, string, error) {
-	// TODO: Transform OpenAI chat completion format to Anthropic Messages API
+	// Reserved implementation point: transform OpenAI chat completion format
+	// to the Anthropic Messages API.
 	// Key differences:
 	//   - system message → top-level "system" field
 	//   - model naming: "claude-sonnet-4-20250514" etc.
@@ -153,7 +154,7 @@ type GeminiAdapter struct{}
 
 func (a *GeminiAdapter) Name() string { return "google" }
 func (a *GeminiAdapter) TransformRequest(body []byte, model string) ([]byte, string, error) {
-	// TODO: Transform to Gemini generateContent format
+	// Reserved implementation point: transform to Gemini generateContent format.
 	// Key differences:
 	//   - messages → contents[].parts[].text
 	//   - Different auth: API key in URL param or OAuth

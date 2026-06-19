@@ -29,7 +29,6 @@ var (
 
 // Manager handles budget tracking and cost calculation.
 type Manager struct {
-	mu      sync.RWMutex
 	store   Store
 	pricing *PricingTable
 }

@@ -87,6 +87,11 @@ func TestLoadExampleConfig(t *testing.T) {
 	if cfg.RateLimit.DefaultTPM != 0 {
 		t.Fatalf("example default_tpm = %d, want 0 until TPM enforcement exists", cfg.RateLimit.DefaultTPM)
 	}
+	for _, provider := range cfg.Providers {
+		if provider.MaxRPM != 0 {
+			t.Fatalf("example provider %q max_rpm = %d, want 0 until provider RPM enforcement exists", provider.ID, provider.MaxRPM)
+		}
+	}
 	if cfg.Quota.Enabled {
 		t.Fatal("example config enabled quota before runtime enforcement exists")
 	}
@@ -121,11 +126,36 @@ func TestLoadRejectsQuotaUntilRuntimeEnforcementExists(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsReservedTPMControls(t *testing.T) {
+func TestLoadRejectsReservedRateControls(t *testing.T) {
 	tests := []struct {
-		name   string
-		config string
+		name    string
+		config  string
+		wantErr string
 	}{
+		{
+			name: "provider max_rpm",
+			config: `{
+				"kms": {
+					"mode": "local",
+					"local": {"master_key_env": "AEGIS_MASTER_KEY"}
+				},
+				"providers": [
+					{
+						"id": "openai-primary",
+						"name": "OpenAI Primary",
+						"type": "openai",
+						"base_url": "https://api.openai.com",
+						"api_key_id": "openai-key-1",
+						"models": ["gpt-4o-mini"],
+						"max_rpm": 100,
+						"enabled": true
+					}
+				],
+				"quota": {"enabled": false},
+				"egress": {"allowed_domains": ["api.openai.com"]}
+			}`,
+			wantErr: "provider RPM enforcement is not implemented",
+		},
 		{
 			name: "provider max_tpm",
 			config: `{
@@ -148,6 +178,7 @@ func TestLoadRejectsReservedTPMControls(t *testing.T) {
 				"quota": {"enabled": false},
 				"egress": {"allowed_domains": ["api.openai.com"]}
 			}`,
+			wantErr: "TPM enforcement is not implemented",
 		},
 		{
 			name: "default_tpm",
@@ -175,6 +206,7 @@ func TestLoadRejectsReservedTPMControls(t *testing.T) {
 				"quota": {"enabled": false},
 				"egress": {"allowed_domains": ["api.openai.com"]}
 			}`,
+			wantErr: "TPM enforcement is not implemented",
 		},
 	}
 
@@ -183,8 +215,109 @@ func TestLoadRejectsReservedTPMControls(t *testing.T) {
 			t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
 			path := writeConfig(t, tt.config)
 			_, err := Load(path)
-			if err == nil || !strings.Contains(err.Error(), "TPM enforcement is not implemented") {
-				t.Fatalf("Load error = %v, want TPM failure", err)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Load error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsNegativeRateLimitValues(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  string
+		wantErr string
+	}{
+		{
+			name: "provider max_rpm",
+			config: `{
+				"kms": {
+					"mode": "local",
+					"local": {"master_key_env": "AEGIS_MASTER_KEY"}
+				},
+				"providers": [
+					{
+						"id": "openai-primary",
+						"name": "OpenAI Primary",
+						"type": "openai",
+						"base_url": "https://api.openai.com",
+						"api_key_id": "openai-key-1",
+						"models": ["gpt-4o-mini"],
+						"max_rpm": -1,
+						"enabled": true
+					}
+				],
+				"quota": {"enabled": false},
+				"egress": {"allowed_domains": ["api.openai.com"]}
+			}`,
+			wantErr: "max_rpm must not be negative",
+		},
+		{
+			name: "default_rpm",
+			config: `{
+				"kms": {
+					"mode": "local",
+					"local": {"master_key_env": "AEGIS_MASTER_KEY"}
+				},
+				"providers": [
+					{
+						"id": "openai-primary",
+						"name": "OpenAI Primary",
+						"type": "openai",
+						"base_url": "https://api.openai.com",
+						"api_key_id": "openai-key-1",
+						"models": ["gpt-4o-mini"],
+						"enabled": true
+					}
+				],
+				"rate_limit": {
+					"enabled": true,
+					"backend": "memory",
+					"default_rpm": -1
+				},
+				"quota": {"enabled": false},
+				"egress": {"allowed_domains": ["api.openai.com"]}
+			}`,
+			wantErr: "rate_limit.default_rpm must not be negative",
+		},
+		{
+			name: "default_max_concurrency",
+			config: `{
+				"kms": {
+					"mode": "local",
+					"local": {"master_key_env": "AEGIS_MASTER_KEY"}
+				},
+				"providers": [
+					{
+						"id": "openai-primary",
+						"name": "OpenAI Primary",
+						"type": "openai",
+						"base_url": "https://api.openai.com",
+						"api_key_id": "openai-key-1",
+						"models": ["gpt-4o-mini"],
+						"enabled": true
+					}
+				],
+				"rate_limit": {
+					"enabled": true,
+					"backend": "memory",
+					"default_max_concurrency": -1
+				},
+				"quota": {"enabled": false},
+				"egress": {"allowed_domains": ["api.openai.com"]}
+			}`,
+			wantErr: "rate_limit.default_max_concurrency must not be negative",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+			path := writeConfig(t, tt.config)
+
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Load error = %v, want %q", err, tt.wantErr)
 			}
 		})
 	}

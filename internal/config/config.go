@@ -78,7 +78,7 @@ type Provider struct {
 	APIKeyID string   `json:"api_key_id"` // Reference to KMS-stored key
 	Models   []string `json:"models"`
 	Weight   int      `json:"weight"`
-	MaxRPM   int      `json:"max_rpm"`
+	MaxRPM   int      `json:"max_rpm"` // Reserved until provider-level RPM enforcement exists
 	MaxTPM   int      `json:"max_tpm"` // Reserved until TPM enforcement exists
 	Enabled  bool     `json:"enabled"`
 	Priority int      `json:"priority"` // Lower = higher priority for fallback
@@ -244,7 +244,7 @@ func Load(path string) (*Config, error) {
 	cfg := defaultConfig()
 
 	if path != "" {
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(path) // #nosec G304 -- path is the explicit operator-supplied config file path.
 		if err != nil {
 			return nil, fmt.Errorf("reading config file: %w", err)
 		}
@@ -332,6 +332,15 @@ func (c *Config) validate() error {
 		if p.APIKeyID == "" {
 			return fmt.Errorf("provider %q: api_key_id must reference a KMS key, not be empty", providerName)
 		}
+		if p.MaxRPM < 0 {
+			return fmt.Errorf("provider %q: max_rpm must not be negative", providerName)
+		}
+		if p.MaxRPM > 0 {
+			return fmt.Errorf("provider %q: max_rpm is reserved; provider RPM enforcement is not implemented", providerName)
+		}
+		if p.MaxTPM < 0 {
+			return fmt.Errorf("provider %q: max_tpm must not be negative", providerName)
+		}
 		if p.MaxTPM > 0 {
 			return fmt.Errorf("provider %q: max_tpm is reserved; TPM enforcement is not implemented", providerName)
 		}
@@ -350,6 +359,15 @@ func (c *Config) validate() error {
 			return errors.New("redis rate limiter backend is not implemented")
 		default:
 			return fmt.Errorf("unsupported rate_limit backend: %q", c.RateLimit.Backend)
+		}
+		if c.RateLimit.DefaultRPM < 0 {
+			return errors.New("rate_limit.default_rpm must not be negative")
+		}
+		if c.RateLimit.DefaultTPM < 0 {
+			return errors.New("rate_limit.default_tpm must not be negative")
+		}
+		if c.RateLimit.DefaultMaxConcurrency < 0 {
+			return errors.New("rate_limit.default_max_concurrency must not be negative")
 		}
 		if c.RateLimit.DefaultTPM > 0 {
 			return errors.New("rate_limit.default_tpm is reserved; TPM enforcement is not implemented")

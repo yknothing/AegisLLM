@@ -1,16 +1,29 @@
 package middleware
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/url"
 
 	"github.com/yknothing/AegisLLM/internal/proxy"
 	"github.com/yknothing/AegisLLM/internal/server"
+	"github.com/yknothing/AegisLLM/internal/utils"
 )
 
+type proxyEngine interface {
+	ProxyRequest(
+		ctx context.Context,
+		w http.ResponseWriter,
+		originalReq *http.Request,
+		targetURL string,
+		apiKey *utils.SecureBytes,
+		isStreaming bool,
+	) (*proxy.ProxyResult, error)
+}
+
 // Proxy creates the terminal middleware that forwards requests upstream.
-func Proxy(engine *proxy.Engine) server.Middleware {
+func Proxy(engine proxyEngine) server.Middleware {
 	return func(ctx *server.RequestContext, next func()) {
 		if engine == nil {
 			ctx.Abort(http.StatusInternalServerError, []byte(`{"error":{"message":"proxy engine unavailable","type":"server_error"}}`))
@@ -40,7 +53,13 @@ func Proxy(engine *proxy.Engine) server.Middleware {
 			ctx.InputTokens = int(result.InputTokens)
 			ctx.OutputTokens = int(result.OutputTokens)
 		}
-		if err != nil && result == nil {
+		if err != nil {
+			ctx.StatusCode = http.StatusBadGateway
+			if result != nil {
+				// The upstream response may already have been partially written.
+				// Preserve failure accounting without appending a second JSON body.
+				return
+			}
 			ctx.Abort(http.StatusBadGateway, []byte(`{"error":{"message":"upstream request failed","type":"server_error"}}`))
 			return
 		}

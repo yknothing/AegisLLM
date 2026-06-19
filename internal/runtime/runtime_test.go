@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -123,7 +124,9 @@ func TestNewKMSProviderUsesFileBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newKMSProvider returned error: %v", err)
 	}
-	defer provider.Close()
+	defer func() {
+		_ = provider.Close()
+	}()
 
 	if err := provider.StoreKey(context.Background(), "openai-key-1", []byte("sk-runtime-file-key")); err != nil {
 		t.Fatalf("StoreKey returned error: %v", err)
@@ -169,6 +172,22 @@ func TestNewServerRejectsUnsupportedRuntimeControls(t *testing.T) {
 			wantErr: "TPM enforcement is not implemented",
 		},
 		{
+			name: "negative default RPM",
+			mutate: func(cfg *config.Config) {
+				cfg.RateLimit.Enabled = true
+				cfg.RateLimit.Backend = "memory"
+				cfg.RateLimit.DefaultRPM = -1
+			},
+			wantErr: "rate_limit.default_rpm must not be negative",
+		},
+		{
+			name: "provider RPM",
+			mutate: func(cfg *config.Config) {
+				cfg.Providers[0].MaxRPM = 100
+			},
+			wantErr: "provider RPM enforcement is not implemented",
+		},
+		{
 			name: "provider TPM",
 			mutate: func(cfg *config.Config) {
 				cfg.Providers[0].MaxTPM = 1000
@@ -185,6 +204,48 @@ func TestNewServerRejectsUnsupportedRuntimeControls(t *testing.T) {
 			_, err := NewServer(cfg, nil)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("NewServer error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestRuntimeMiddlewareOrder(t *testing.T) {
+	tests := []struct {
+		name             string
+		rateLimitEnabled bool
+		want             []string
+	}{
+		{
+			name:             "with rate limit",
+			rateLimitEnabled: true,
+			want: []string{
+				runtimeStepAuth,
+				runtimeStepRateLimit,
+				runtimeStepPIIRedaction,
+				runtimeStepRouter,
+				runtimeStepKMS,
+				runtimeStepAdapter,
+				runtimeStepProxy,
+			},
+		},
+		{
+			name:             "without rate limit",
+			rateLimitEnabled: false,
+			want: []string{
+				runtimeStepAuth,
+				runtimeStepPIIRedaction,
+				runtimeStepRouter,
+				runtimeStepKMS,
+				runtimeStepAdapter,
+				runtimeStepProxy,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := runtimeMiddlewareOrder(tt.rateLimitEnabled); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("runtimeMiddlewareOrder(%t) = %v, want %v", tt.rateLimitEnabled, got, tt.want)
 			}
 		})
 	}

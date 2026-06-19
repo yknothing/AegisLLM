@@ -24,26 +24,10 @@ func MemZero(b []byte) {
 		return
 	}
 	// Use volatile-like semantics to prevent compiler optimization
-	p := unsafe.Pointer(&b[0])
+	p := unsafe.Pointer(&b[0]) // #nosec G103 -- required to keep secret zeroing from being optimized away.
 	for i := range b {
 		*(*byte)(unsafe.Add(p, i)) = 0
 	}
-}
-
-// MemZeroString securely zeroes the backing array of a string.
-// WARNING: This is inherently unsafe as Go strings are immutable.
-// Only use this for strings that were constructed from mutable buffers
-// and are about to be discarded.
-//
-//go:noinline
-func MemZeroString(s *string) {
-	if s == nil || len(*s) == 0 {
-		return
-	}
-	// Access the string's underlying byte array
-	bytes := unsafe.Slice(unsafe.StringData(*s), len(*s))
-	MemZero(bytes)
-	*s = ""
 }
 
 // SecureBytes is a byte slice wrapper that automatically zeroes its content

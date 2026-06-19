@@ -3,7 +3,7 @@
 # SECURITY DESIGN:
 #   - Multi-stage build: only the compiled binary enters the final image
 #   - Final image: Google Distroless (no shell, no package manager, no attack surface)
-#   - Runs as non-root user (nobody:nobody)
+#   - Runs as non-root user (nonroot:nonroot)
 #   - Read-only filesystem recommended at runtime
 #   - No secrets baked into the image (all via env vars at runtime)
 
@@ -11,9 +11,10 @@
 # Stage 1: Build
 # ============================================================
 ARG BUILDPLATFORM=linux/amd64
-FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.22-alpine@sha256:1699c10032ca2582ec89a24a1312d986a3f094aed3d5c1147b19880afe40e052 AS builder
 
-# Security: Pin dependencies and verify checksums
+# Security: Base image digest is pinned; Alpine packages track repository
+# security patch levels at build time.
 RUN apk add --no-cache ca-certificates git
 
 WORKDIR /build
@@ -51,7 +52,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build \
 # ============================================================
 # Stage 2: Runtime (Distroless)
 # ============================================================
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639
 
 # Copy only the binary and CA certificates
 COPY --from=builder /build/aegis /aegis

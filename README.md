@@ -137,6 +137,10 @@ internal/
 
 Contributions are welcome. Please read [SECURITY.md](SECURITY.md) for security guidelines before submitting code.
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes.
+
 ## License
 
 MIT License. See [LICENSE](LICENSE).

@@ -61,11 +61,11 @@ func New(cfg Config) (*Client, error) {
 
 // GetKey retrieves a decrypted API key from Vault.
 // SECURITY: The caller MUST call Close() on the returned SecureBytes.
-func (c *Client) GetKey(ctx context.Context, keyID string) (*utils.SecureBytes, error) {
+func (c *Client) GetKey(ctx context.Context, _ string) (*utils.SecureBytes, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	// TODO: Implement actual Vault HTTP API call
+	// Reserved implementation point: Vault HTTP API call.
 	// GET {address}/v1/{path}/{keyID}
 	// Headers: X-Vault-Token: {token}
 	//
@@ -76,36 +76,36 @@ func (c *Client) GetKey(ctx context.Context, keyID string) (*utils.SecureBytes, 
 	// 4. Return as SecureBytes
 	// 5. Zero any intermediate buffers
 
-	return nil, fmt.Errorf("vault backend not yet implemented for key: %s", keyID)
+	return nil, errors.New("vault backend not yet implemented")
 }
 
 // StoreKey writes an API key to Vault.
 // SECURITY: The input plaintext is zeroed after transmission.
-func (c *Client) StoreKey(ctx context.Context, keyID string, plaintext []byte) error {
+func (c *Client) StoreKey(ctx context.Context, _ string, plaintext []byte) error {
 	defer utils.MemZero(plaintext)
 
-	// TODO: Implement actual Vault HTTP API call
+	// Reserved implementation point: Vault HTTP API call.
 	// POST {address}/v1/{path}/{keyID}
 	// Body: {"data": {"value": "<base64-encoded-key>"}}
 
-	return fmt.Errorf("vault backend not yet implemented for key: %s", keyID)
+	return errors.New("vault backend not yet implemented")
 }
 
 // DeleteKey removes a key from Vault.
-func (c *Client) DeleteKey(ctx context.Context, keyID string) error {
-	// TODO: DELETE {address}/v1/{path}/{keyID}
-	return fmt.Errorf("vault backend not yet implemented for key: %s", keyID)
+func (c *Client) DeleteKey(ctx context.Context, _ string) error {
+	// Reserved implementation point: DELETE {address}/v1/{path}/{keyID}.
+	return errors.New("vault backend not yet implemented")
 }
 
 // RotateKey triggers Vault's built-in key versioning.
-func (c *Client) RotateKey(ctx context.Context, keyID string) error {
+func (c *Client) RotateKey(ctx context.Context, _ string) error {
 	// Vault handles rotation natively through its versioned KV store
-	return fmt.Errorf("vault backend not yet implemented for key: %s", keyID)
+	return errors.New("vault backend not yet implemented")
 }
 
 // ListKeyIDs returns all key identifiers stored in Vault.
 func (c *Client) ListKeyIDs(ctx context.Context) ([]string, error) {
-	// TODO: LIST {address}/v1/{path}
+	// Reserved implementation point: LIST {address}/v1/{path}.
 	return nil, errors.New("vault backend not yet implemented")
 }
 

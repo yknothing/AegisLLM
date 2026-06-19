@@ -255,7 +255,7 @@ func extractModelFromRequest(r *http.Request, limit int64) (string, bool, error)
 
 func isModelAllowed(model string, allowed []string) bool {
 	if len(allowed) == 0 {
-		return true // No restrictions
+		return false
 	}
 	for _, m := range allowed {
 		if m == model || m == "*" {

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -17,15 +18,16 @@ func TestStoreAndRetrieveKey(t *testing.T) {
 	masterKeyHex := hex.EncodeToString(masterKey)
 
 	const envVar = "TEST_AEGIS_MASTER_KEY"
-	os.Setenv(envVar, masterKeyHex)
-	defer os.Unsetenv(envVar)
+	t.Setenv(envVar, masterKeyHex)
 
 	// Create store with in-memory backend
 	store, err := New(envVar, NewMemoryBackend())
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
-	defer store.Close()
+	defer func() {
+		_ = store.Close()
+	}()
 
 	ctx := context.Background()
 
@@ -58,14 +60,15 @@ func TestStoreAndRetrieveKey(t *testing.T) {
 func TestGetKeyNotFound(t *testing.T) {
 	masterKeyHex := hex.EncodeToString(make([]byte, 32))
 	const envVar = "TEST_AEGIS_MASTER_KEY_2"
-	os.Setenv(envVar, masterKeyHex)
-	defer os.Unsetenv(envVar)
+	t.Setenv(envVar, masterKeyHex)
 
 	store, err := New(envVar, NewMemoryBackend())
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
-	defer store.Close()
+	defer func() {
+		_ = store.Close()
+	}()
 
 	_, err = store.GetKey(context.Background(), "nonexistent")
 	if err == nil {
@@ -76,14 +79,15 @@ func TestGetKeyNotFound(t *testing.T) {
 func TestSecureBytesClose(t *testing.T) {
 	masterKeyHex := hex.EncodeToString(make([]byte, 32))
 	const envVar = "TEST_AEGIS_MASTER_KEY_3"
-	os.Setenv(envVar, masterKeyHex)
-	defer os.Unsetenv(envVar)
+	t.Setenv(envVar, masterKeyHex)
 
 	store, err := New(envVar, NewMemoryBackend())
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
-	defer store.Close()
+	defer func() {
+		_ = store.Close()
+	}()
 
 	ctx := context.Background()
 	original := []byte("secret-api-key")
@@ -103,27 +107,25 @@ func TestInvalidMasterKey(t *testing.T) {
 	const envVar = "TEST_AEGIS_INVALID_KEY"
 
 	// Test: empty env var
-	os.Setenv(envVar, "")
+	t.Setenv(envVar, "")
 	_, err := New(envVar, NewMemoryBackend())
 	if err == nil {
 		t.Fatal("expected error for empty master key")
 	}
 
 	// Test: non-hex value
-	os.Setenv(envVar, "not-hex-value")
+	t.Setenv(envVar, "not-hex-value")
 	_, err = New(envVar, NewMemoryBackend())
 	if err == nil {
 		t.Fatal("expected error for non-hex master key")
 	}
 
 	// Test: wrong length
-	os.Setenv(envVar, hex.EncodeToString(make([]byte, 16))) // 128-bit, not 256-bit
+	t.Setenv(envVar, hex.EncodeToString(make([]byte, 16))) // 128-bit, not 256-bit
 	_, err = New(envVar, NewMemoryBackend())
 	if err == nil {
 		t.Fatal("expected error for wrong-length master key")
 	}
-
-	os.Unsetenv(envVar)
 }
 
 func TestFileBackendPersistsEncryptedKeys(t *testing.T) {
@@ -176,7 +178,9 @@ func TestFileBackendPersistsEncryptedKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen New returned error: %v", err)
 	}
-	defer reopened.Close()
+	defer func() {
+		_ = reopened.Close()
+	}()
 
 	key, err := reopened.GetKey(ctx, "openai-key-1")
 	if err != nil {
@@ -200,5 +204,59 @@ func TestFileBackendPersistsEncryptedKeys(t *testing.T) {
 	}
 	if _, err := reopened.GetKey(ctx, "openai-key-1"); err == nil {
 		t.Fatal("GetKey succeeded after DeleteKey")
+	}
+}
+
+func TestFileBackendConfinesEncodedKeyIDs(t *testing.T) {
+	masterKeyHex := hex.EncodeToString(make([]byte, 32))
+	const envVar = "TEST_AEGIS_FILE_BACKEND_CONFINEMENT_KEY"
+	t.Setenv(envVar, masterKeyHex)
+
+	root := t.TempDir()
+	dir := filepath.Join(root, "keys")
+	backend, err := NewFileBackend(dir)
+	if err != nil {
+		t.Fatalf("NewFileBackend returned error: %v", err)
+	}
+	store, err := New(envVar, backend)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	defer func() {
+		_ = store.Close()
+	}()
+
+	ctx := context.Background()
+	keyIDs := []string{
+		"../outside/key",
+		"..",
+		"nested/key",
+		" key with spaces ",
+		strings.Repeat("x", 96),
+	}
+	for _, keyID := range keyIDs {
+		plaintext := []byte("sk-confined-" + keyID)
+		if err := store.StoreKey(ctx, keyID, plaintext); err != nil {
+			t.Fatalf("StoreKey(%q) returned error: %v", keyID, err)
+		}
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir returned error: %v", err)
+	}
+	if len(entries) != len(keyIDs) {
+		t.Fatalf("file count = %d, want %d", len(entries), len(keyIDs))
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			t.Fatalf("file backend created directory %q", entry.Name())
+		}
+		if filepath.Dir(filepath.Join(dir, entry.Name())) != dir {
+			t.Fatalf("entry %q escaped key store directory", entry.Name())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "outside")); !os.IsNotExist(err) {
+		t.Fatalf("unexpected outside path stat error = %v, want not exist", err)
 	}
 }

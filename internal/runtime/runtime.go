@@ -58,49 +58,16 @@ func NewServer(cfg *config.Config, logger *slog.Logger) (*server.Server, error) 
 		AllowedDomains:     cfg.Egress.AllowedDomains,
 	})
 
-	opts := []server.Option{
-		server.WithMiddleware(middleware.Auth(middleware.AuthConfig{
-			SigningKey: signingKey,
-			Issuer:     cfg.Auth.Issuer,
-			Expiry:     cfg.Auth.TokenExpiry,
-			Revocation: middleware.NewMemoryRevocationStore(),
-		})),
+	opts, err := runtimeMiddlewareOptions(cfg, signingKey, kmsProvider, channels, poolKeyMapping, providerTypes, engine)
+	if err != nil {
+		utils.MemZero(signingKey)
+		_ = kmsProvider.Close()
+		return nil, err
 	}
-
-	if cfg.RateLimit.Enabled {
-		opts = append(opts, server.WithMiddleware(middleware.RateLimiter(middleware.RateLimitConfig{
-			Backend:        cfg.RateLimit.Backend,
-			RedisURL:       cfg.RateLimit.RedisURL,
-			DefaultRPM:     cfg.RateLimit.DefaultRPM,
-			DefaultTPM:     cfg.RateLimit.DefaultTPM,
-			DefaultMaxConc: cfg.RateLimit.DefaultMaxConcurrency,
-		})))
-	}
-
-	opts = append(opts,
-		server.WithMiddleware(middleware.PIIRedaction(middleware.RedactionConfig{
-			Mode:               middleware.ModeRedact,
-			MaxRequestBodySize: cfg.Server.MaxRequestBodySize,
-		})),
-		server.WithMiddleware(middleware.Router(middleware.RouterConfig{
-			Channels:           channels,
-			MaxRequestBodySize: cfg.Server.MaxRequestBodySize,
-		})),
-		server.WithMiddleware(middleware.KMSInjector(middleware.KMSMiddlewareConfig{
-			Provider:       kmsProvider,
-			PoolKeyMapping: poolKeyMapping,
-		})),
-		server.WithMiddleware(middleware.Adapter(
-			middleware.NewAdapterRegistry(),
-			providerTypes,
-			cfg.Server.MaxRequestBodySize,
-		)),
-		server.WithMiddleware(middleware.Proxy(engine)),
-		server.WithShutdownHook(func() error {
-			utils.MemZero(signingKey)
-			return kmsProvider.Close()
-		}),
-	)
+	opts = append(opts, server.WithShutdownHook(func() error {
+		utils.MemZero(signingKey)
+		return kmsProvider.Close()
+	}))
 
 	srv, err := server.New(cfg, logger, opts...)
 	if err != nil {
@@ -109,6 +76,88 @@ func NewServer(cfg *config.Config, logger *slog.Logger) (*server.Server, error) 
 		return nil, err
 	}
 	return srv, nil
+}
+
+const (
+	runtimeStepAuth         = "auth"
+	runtimeStepRateLimit    = "rate_limit"
+	runtimeStepPIIRedaction = "pii_redaction"
+	runtimeStepRouter       = "router"
+	runtimeStepKMS          = "kms"
+	runtimeStepAdapter      = "adapter"
+	runtimeStepProxy        = "proxy"
+)
+
+func runtimeMiddlewareOrder(rateLimitEnabled bool) []string {
+	order := []string{runtimeStepAuth}
+	if rateLimitEnabled {
+		order = append(order, runtimeStepRateLimit)
+	}
+	return append(order,
+		runtimeStepPIIRedaction,
+		runtimeStepRouter,
+		runtimeStepKMS,
+		runtimeStepAdapter,
+		runtimeStepProxy,
+	)
+}
+
+func runtimeMiddlewareOptions(
+	cfg *config.Config,
+	signingKey []byte,
+	kmsProvider kms.Provider,
+	channels []middleware.ProviderChannel,
+	poolKeyMapping map[string]string,
+	providerTypes map[string]string,
+	engine *proxy.Engine,
+) ([]server.Option, error) {
+	order := runtimeMiddlewareOrder(cfg.RateLimit.Enabled)
+	opts := make([]server.Option, 0, len(order))
+	for _, step := range order {
+		switch step {
+		case runtimeStepAuth:
+			opts = append(opts, server.WithMiddleware(middleware.Auth(middleware.AuthConfig{
+				SigningKey: signingKey,
+				Issuer:     cfg.Auth.Issuer,
+				Expiry:     cfg.Auth.TokenExpiry,
+				Revocation: middleware.NewMemoryRevocationStore(),
+			})))
+		case runtimeStepRateLimit:
+			opts = append(opts, server.WithMiddleware(middleware.RateLimiter(middleware.RateLimitConfig{
+				Backend:        cfg.RateLimit.Backend,
+				RedisURL:       cfg.RateLimit.RedisURL,
+				DefaultRPM:     cfg.RateLimit.DefaultRPM,
+				DefaultTPM:     cfg.RateLimit.DefaultTPM,
+				DefaultMaxConc: cfg.RateLimit.DefaultMaxConcurrency,
+			})))
+		case runtimeStepPIIRedaction:
+			opts = append(opts, server.WithMiddleware(middleware.PIIRedaction(middleware.RedactionConfig{
+				Mode:               middleware.ModeRedact,
+				MaxRequestBodySize: cfg.Server.MaxRequestBodySize,
+			})))
+		case runtimeStepRouter:
+			opts = append(opts, server.WithMiddleware(middleware.Router(middleware.RouterConfig{
+				Channels:           channels,
+				MaxRequestBodySize: cfg.Server.MaxRequestBodySize,
+			})))
+		case runtimeStepKMS:
+			opts = append(opts, server.WithMiddleware(middleware.KMSInjector(middleware.KMSMiddlewareConfig{
+				Provider:       kmsProvider,
+				PoolKeyMapping: poolKeyMapping,
+			})))
+		case runtimeStepAdapter:
+			opts = append(opts, server.WithMiddleware(middleware.Adapter(
+				middleware.NewAdapterRegistry(),
+				providerTypes,
+				cfg.Server.MaxRequestBodySize,
+			)))
+		case runtimeStepProxy:
+			opts = append(opts, server.WithMiddleware(middleware.Proxy(engine)))
+		default:
+			return nil, fmt.Errorf("unknown runtime middleware step %q", step)
+		}
+	}
+	return opts, nil
 }
 
 func validateRuntimeConfig(cfg *config.Config) error {
@@ -123,16 +172,37 @@ func validateRuntimeConfig(cfg *config.Config) error {
 		default:
 			return fmt.Errorf("unsupported rate_limit backend: %q", cfg.RateLimit.Backend)
 		}
+		if cfg.RateLimit.DefaultRPM < 0 {
+			return fmt.Errorf("rate_limit.default_rpm must not be negative")
+		}
+		if cfg.RateLimit.DefaultTPM < 0 {
+			return fmt.Errorf("rate_limit.default_tpm must not be negative")
+		}
+		if cfg.RateLimit.DefaultMaxConcurrency < 0 {
+			return fmt.Errorf("rate_limit.default_max_concurrency must not be negative")
+		}
 		if cfg.RateLimit.DefaultTPM > 0 {
 			return fmt.Errorf("rate_limit.default_tpm is reserved; TPM enforcement is not implemented")
 		}
 	}
 	for _, p := range cfg.Providers {
-		if p.Enabled && p.MaxTPM > 0 {
-			providerID := p.ID
-			if providerID == "" {
-				providerID = p.Name
-			}
+		if !p.Enabled {
+			continue
+		}
+		providerID := p.ID
+		if providerID == "" {
+			providerID = p.Name
+		}
+		if p.MaxRPM < 0 {
+			return fmt.Errorf("provider %q: max_rpm must not be negative", providerID)
+		}
+		if p.MaxRPM > 0 {
+			return fmt.Errorf("provider %q: max_rpm is reserved; provider RPM enforcement is not implemented", providerID)
+		}
+		if p.MaxTPM < 0 {
+			return fmt.Errorf("provider %q: max_tpm must not be negative", providerID)
+		}
+		if p.MaxTPM > 0 {
 			return fmt.Errorf("provider %q: max_tpm is reserved; TPM enforcement is not implemented", providerID)
 		}
 	}

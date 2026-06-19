@@ -7,8 +7,8 @@
 //   - Automatic timeout and cancellation propagation
 //
 // SECURITY:
-//   - Never buffers complete request/response bodies in memory
-//   - API keys are injected per-request and zeroed immediately after
+//   - Never buffers complete response bodies in memory
+//   - API keys are injected per-request and zeroed after the upstream request is sent
 //   - Response bodies are never logged (only token counts)
 //   - Egress validation ensures requests only go to allowed domains
 package proxy
@@ -116,10 +116,10 @@ func (e *Engine) ProxyRequest(
 	// Copy safe headers (exclude hop-by-hop and sensitive headers)
 	copyHeaders(upstreamReq.Header, originalReq.Header)
 
-	// Inject API key and immediately schedule zeroing
+	// Inject API key for the outbound request. The header string cannot be
+	// zeroed by Go, so remove the header and close SecureBytes as soon as the
+	// transport returns response headers.
 	upstreamReq.Header.Set("Authorization", "Bearer "+string(apiKey.Bytes()))
-	defer upstreamReq.Header.Del("Authorization")
-	defer apiKey.Close() // Zero the key after request is sent
 
 	// Set request timeout
 	reqCtx, cancel := context.WithTimeout(ctx, e.config.StreamTimeout)
@@ -127,11 +127,15 @@ func (e *Engine) ProxyRequest(
 	upstreamReq = upstreamReq.WithContext(reqCtx)
 
 	// Execute request
-	resp, err := e.client.Do(upstreamReq)
+	resp, err := e.client.Do(upstreamReq) // #nosec G704 -- targetURL is parsed, HTTPS-only, and host-allowlisted by validateEgress above.
+	upstreamReq.Header.Del("Authorization")
+	apiKey.Close()
 	if err != nil {
 		return nil, fmt.Errorf("upstream request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	result := &ProxyResult{
 		StatusCode: resp.StatusCode,
@@ -145,7 +149,9 @@ func (e *Engine) ProxyRequest(
 		}
 	} else {
 		// Non-streaming: forward response directly
-		e.forwardResponse(w, resp)
+		if err := e.forwardResponse(w, resp); err != nil {
+			return result, fmt.Errorf("forwarding response failed: %w", err)
+		}
 	}
 
 	return result, nil
@@ -199,7 +205,7 @@ func (e *Engine) streamSSE(w http.ResponseWriter, resp *http.Response) (int64, e
 }
 
 // forwardResponse copies a non-streaming response to the client.
-func (e *Engine) forwardResponse(w http.ResponseWriter, resp *http.Response) {
+func (e *Engine) forwardResponse(w http.ResponseWriter, resp *http.Response) error {
 	// Copy response headers
 	for key, values := range resp.Header {
 		for _, v := range values {
@@ -209,7 +215,10 @@ func (e *Engine) forwardResponse(w http.ResponseWriter, resp *http.Response) {
 	w.WriteHeader(resp.StatusCode)
 
 	// Stream body without full buffering
-	io.Copy(w, resp.Body)
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		return err
+	}
+	return nil
 }
 
 // validateEgress checks if the target URL's domain is in the allowlist.
@@ -222,6 +231,9 @@ func (e *Engine) validateEgress(targetURL string) error {
 	parsed, err := url.Parse(targetURL)
 	if err != nil {
 		return fmt.Errorf("invalid target URL: %w", err)
+	}
+	if parsed.Scheme != "https" {
+		return fmt.Errorf("target URL must use https")
 	}
 	host := normalizeHost(parsed.Hostname())
 	if host == "" {
@@ -266,6 +278,12 @@ func copyHeaders(dst, src http.Header) {
 	skipHeaders := map[string]bool{
 		"Authorization":       true, // Will be replaced with provider key
 		"Proxy-Authorization": true,
+		"X-Api-Key":           true,
+		"X-Admin-Token":       true,
+		"X-Forwarded-For":     true,
+		"X-Forwarded-Host":    true,
+		"X-Forwarded-Proto":   true,
+		"Forwarded":           true,
 		"Host":                true,
 		"Connection":          true,
 		"Transfer-Encoding":   true,
@@ -286,7 +304,7 @@ func copyHeaders(dst, src http.Header) {
 // countTokensFromChunk estimates token count from an SSE data chunk.
 // This is a simplified heuristic; production should use tiktoken or similar.
 func countTokensFromChunk(data string) int {
-	// TODO: Implement proper token counting based on provider response format
+	// Reserved improvement: provider-specific token counting.
 	// OpenAI format: {"choices":[{"delta":{"content":"..."}}]}
 	// Each chunk typically contains 1 token
 	if strings.Contains(data, `"content"`) {

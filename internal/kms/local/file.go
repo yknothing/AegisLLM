@@ -24,10 +24,14 @@ func NewFileBackend(dir string) (*FileBackend, error) {
 	if strings.TrimSpace(dir) == "" {
 		return nil, errors.New("local KMS file backend requires a directory")
 	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, fmt.Errorf("resolving local KMS key store directory: %w", err)
+	}
+	if err := os.MkdirAll(absDir, 0700); err != nil {
 		return nil, fmt.Errorf("creating local KMS key store directory: %w", err)
 	}
-	return &FileBackend{dir: dir}, nil
+	return &FileBackend{dir: absDir}, nil
 }
 
 func (f *FileBackend) Get(keyID string) ([]byte, error) {
@@ -35,7 +39,7 @@ func (f *FileBackend) Get(keyID string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return os.ReadFile(path)
+	return os.ReadFile(path) // #nosec G304 -- keyPath restricts reads to encoded filenames under the configured key-store directory.
 }
 
 func (f *FileBackend) Put(keyID string, ciphertext []byte) error {
@@ -52,7 +56,9 @@ func (f *FileBackend) Put(keyID string, ciphertext []byte) error {
 		return fmt.Errorf("creating temporary key file: %w", err)
 	}
 	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
+	defer func() {
+		_ = os.Remove(tmpPath)
+	}()
 
 	if _, err := tmp.Write(cp); err != nil {
 		_ = tmp.Close()
@@ -108,7 +114,11 @@ func (f *FileBackend) keyPath(keyID string) (string, error) {
 		return "", errors.New("key id must not be empty")
 	}
 	name := base64.RawURLEncoding.EncodeToString([]byte(keyID)) + keyFileSuffix
-	return filepath.Join(f.dir, name), nil
+	path := filepath.Join(f.dir, name)
+	if filepath.Dir(path) != f.dir {
+		return "", errors.New("key path escaped key store directory")
+	}
+	return path, nil
 }
 
 var _ Backend = (*FileBackend)(nil)

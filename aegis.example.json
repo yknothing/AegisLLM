@@ -34,7 +34,7 @@
       "api_key_id": "openai-key-1",
       "models": ["gpt-4o", "gpt-4o-mini", "gpt-4.1"],
       "weight": 10,
-      "max_rpm": 500,
+      "max_rpm": 0,
       "max_tpm": 0,
       "enabled": true,
       "priority": 1
@@ -47,7 +47,7 @@
       "api_key_id": "anthropic-key-1",
       "models": ["claude-sonnet-4-20250514", "claude-haiku-3-5"],
       "weight": 10,
-      "max_rpm": 300,
+      "max_rpm": 0,
       "max_tpm": 0,
       "enabled": false,
       "priority": 1
@@ -60,7 +60,7 @@
       "api_key_id": "deepseek-key-1",
       "models": ["deepseek-v3", "deepseek-r1"],
       "weight": 5,
-      "max_rpm": 200,
+      "max_rpm": 0,
       "max_tpm": 0,
       "enabled": true,
       "priority": 2

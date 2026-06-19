@@ -11,15 +11,21 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DATE    ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+BUILD_DATE ?= $(DATE)
+GO      ?= go
+
+GOVULNCHECK_VERSION ?= v1.4.0
+GOSEC_VERSION       ?= v2.27.1
+GOLANGCI_VERSION    ?= v2.12.2
 
 BINARY  := aegis
 GOFLAGS := -trimpath
 LDFLAGS := -s -w \
 	-X main.version=$(VERSION) \
 	-X main.commit=$(COMMIT) \
-	-X main.buildDate=$(DATE)
+	-X main.buildDate=$(BUILD_DATE)
 
-.PHONY: all build test lint docker security clean
+.PHONY: all build build-linux test test-coverage lint fmt vet security govulncheck gosec docker generate-key clean help
 
 all: lint test build
 
@@ -27,44 +33,41 @@ all: lint test build
 
 build:
 	mkdir -p bin
-	CGO_ENABLED=0 go build $(GOFLAGS) -ldflags="$(LDFLAGS)" -o bin/$(BINARY) ./cmd/aegis
+	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -ldflags="$(LDFLAGS)" -o bin/$(BINARY) ./cmd/aegis
 
 build-linux:
 	mkdir -p bin
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(GOFLAGS) -ldflags="$(LDFLAGS)" -o bin/$(BINARY)-linux-amd64 ./cmd/aegis
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build $(GOFLAGS) -ldflags="$(LDFLAGS)" -o bin/$(BINARY)-linux-amd64 ./cmd/aegis
 
 ## Test
 
 test:
-	go test -race -cover ./...
+	$(GO) test -race -cover ./...
 
 test-coverage:
-	go test -race -coverprofile=coverage.out ./...
-	go tool cover -html=coverage.out -o coverage.html
+	$(GO) test -race -coverprofile=coverage.out ./...
+	$(GO) tool cover -html=coverage.out -o coverage.html
 
 ## Quality
 
 lint:
-	@command -v golangci-lint >/dev/null 2>&1 || echo "Install: https://golangci-lint.run/usage/install/"
-	golangci-lint run ./...
+	$(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION) run ./...
 
 fmt:
 	gofmt -s -w .
 
 vet:
-	go vet ./...
+	$(GO) vet ./...
 
 ## Security
 
 security: govulncheck gosec
 
 govulncheck:
-	@command -v govulncheck >/dev/null 2>&1 || go install golang.org/x/vuln/cmd/govulncheck@latest
-	govulncheck ./...
+	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
 gosec:
-	@command -v gosec >/dev/null 2>&1 || go install github.com/securego/gosec/v2/cmd/gosec@latest
-	gosec -quiet ./...
+	$(GO) run github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VERSION) -quiet ./...
 
 ## Docker
 
@@ -72,7 +75,7 @@ docker:
 	docker build \
 		--build-arg VERSION=$(VERSION) \
 		--build-arg COMMIT=$(COMMIT) \
-		--build-arg BUILD_DATE=$(DATE) \
+		--build-arg BUILD_DATE=$(BUILD_DATE) \
 		-t aegis:$(VERSION) \
 		-t aegis:latest \
 		.

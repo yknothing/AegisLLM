@@ -35,6 +35,7 @@ func TestValidateTokenRejectsBadSignature(t *testing.T) {
 	token := signTestToken(t, []byte("correct-key"), VirtualKeyClaims{
 		KeyID:     "vk_test",
 		KeySource: "pool",
+		Models:    []string{"gpt-4o-mini"},
 		IssuedAt:  time.Now().Add(-time.Minute).Unix(),
 		ExpiresAt: time.Now().Add(time.Hour).Unix(),
 		Issuer:    "aegis",
@@ -50,6 +51,7 @@ func TestValidateTokenRejectsExpired(t *testing.T) {
 	token := signTestToken(t, key, VirtualKeyClaims{
 		KeyID:     "vk_test",
 		KeySource: "pool",
+		Models:    []string{"gpt-4o-mini"},
 		IssuedAt:  time.Now().Add(-2 * time.Hour).Unix(),
 		ExpiresAt: time.Now().Add(-time.Hour).Unix(),
 		Issuer:    "aegis",
@@ -85,6 +87,7 @@ func TestValidateTokenRejectsReservedBudgetAndTPMClaims(t *testing.T) {
 			claims := tt.claims
 			claims.KeyID = "vk_test"
 			claims.KeySource = "pool"
+			claims.Models = []string{"gpt-4o-mini"}
 			claims.IssuedAt = time.Now().Add(-time.Minute).Unix()
 			claims.ExpiresAt = time.Now().Add(time.Hour).Unix()
 			claims.Issuer = "aegis"
@@ -94,6 +97,87 @@ func TestValidateTokenRejectsReservedBudgetAndTPMClaims(t *testing.T) {
 				t.Fatalf("validateToken accepted reserved %s claim", tt.name)
 			}
 		})
+	}
+}
+
+func TestValidateTokenRejectsNegativeLimitClaims(t *testing.T) {
+	tests := []struct {
+		name   string
+		claims VirtualKeyClaims
+	}{
+		{
+			name: "rpm",
+			claims: VirtualKeyClaims{
+				MaxRPM: -1,
+			},
+		},
+		{
+			name: "budget",
+			claims: VirtualKeyClaims{
+				BudgetUSD: -1,
+			},
+		},
+		{
+			name: "tpm",
+			claims: VirtualKeyClaims{
+				MaxTPM: -1,
+			},
+		},
+	}
+
+	key := []byte("test-signing-key")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			claims := tt.claims
+			claims.KeyID = "vk_test"
+			claims.KeySource = "pool"
+			claims.Models = []string{"gpt-4o-mini"}
+			claims.IssuedAt = time.Now().Add(-time.Minute).Unix()
+			claims.ExpiresAt = time.Now().Add(time.Hour).Unix()
+			claims.Issuer = "aegis"
+
+			token := signTestToken(t, key, claims)
+			if _, err := validateToken(token, key, "aegis"); err == nil {
+				t.Fatalf("validateToken accepted negative %s claim", tt.name)
+			}
+		})
+	}
+}
+
+func TestValidateTokenRejectsMissingModelPermissions(t *testing.T) {
+	key := []byte("test-signing-key")
+	token := signTestToken(t, key, VirtualKeyClaims{
+		KeyID:     "vk_test",
+		KeySource: "pool",
+		IssuedAt:  time.Now().Add(-time.Minute).Unix(),
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		Issuer:    "aegis",
+	})
+
+	if _, err := validateToken(token, key, "aegis"); err == nil || !strings.Contains(err.Error(), "missing model permissions") {
+		t.Fatalf("validateToken error = %v, want missing model permissions", err)
+	}
+}
+
+func TestValidateTokenAcceptsExplicitWildcardModelPermission(t *testing.T) {
+	key := []byte("test-signing-key")
+	token := signTestToken(t, key, VirtualKeyClaims{
+		KeyID:     "vk_test",
+		KeySource: "pool",
+		Models:    []string{"*"},
+		IssuedAt:  time.Now().Add(-time.Minute).Unix(),
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		Issuer:    "aegis",
+	})
+
+	if _, err := validateToken(token, key, "aegis"); err != nil {
+		t.Fatalf("validateToken rejected wildcard model permission: %v", err)
+	}
+}
+
+func TestIsModelAllowedFailsClosedForEmptyPermissions(t *testing.T) {
+	if isModelAllowed("gpt-4o-mini", nil) {
+		t.Fatal("isModelAllowed accepted an empty permission list")
 	}
 }
 
