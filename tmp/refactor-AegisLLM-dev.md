@@ -8,8 +8,8 @@ Refactor until the architecture is coherent and evidence-backed. After each sign
 
 - Branch: `codex/aegis-architecture-refactor`
 - Starting HEAD: `4864cb8 feat: implement hybrid key source resolution (ADR-003)`
-- Current state: architecture/runtime framework changes are present but uncommitted.
-- Known blocker from prior verification: no `go` or `gofmt` on `PATH`; must establish a Go toolchain before claiming test evidence.
+- Current state: architecture/runtime framework changes are committed on `codex/aegis-architecture-refactor`.
+- Tooling note: system `PATH` still has no `go` or `gofmt`; verification uses `$HOME/.cache/codex-go/go1.26.4/bin`.
 
 ## Step Log
 
@@ -63,3 +63,21 @@ Refactor until the architecture is coherent and evidence-backed. After each sign
   - `$HOME/.cache/codex-go/go1.26.4/bin/go vet ./...` passed.
   - `$HOME/.cache/codex-go/go1.26.4/bin/go test -race ./...` passed.
   - `git diff --check` passed.
+
+## Final Completion Audit
+
+- Branch contains three implementation commits:
+  - `ee55d1d refactor: wire secure runtime architecture baseline`
+  - `e36e31f refactor: make admin scaffold fail closed`
+  - `8b33eaf refactor: add encrypted local KMS file backend`
+- Current architecture state:
+  - `internal/server` remains the HTTP/pipeline microkernel.
+  - `internal/runtime` is the composition root and owns concrete middleware wiring.
+  - Unsupported production tracks are documented and fail closed instead of silently running.
+  - Local KMS supports smoke-test memory storage and encrypted file-backed standalone storage.
+- Final verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test ./...` passed.
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go vet ./...` passed.
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test -race ./...` passed.
+  - Final live-test using `/tmp/aegis-final-smoke.json` verified `/health` = 200, valid JWT with missing provider key = 503, and file KMS directory mode = 700.
+- Remaining planned capabilities are explicit non-goals for this refactor slice: Vault KMS, Redis limiter, TPM enforcement, quota runtime enforcement, Admin issuance/revocation/storage flows, RS256, and non-OpenAI protocol adapters.
