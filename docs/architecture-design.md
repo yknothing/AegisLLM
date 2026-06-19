@@ -54,7 +54,7 @@ flowchart LR
 
 ## Deployment Topology
 
-MVP topology is one Aegis process behind a trusted ingress or localhost development binding. Production topology should place `/v1/*` behind TLS or mTLS and keep any future admin API on a separate listener or internal-only network. Local KMS is suitable for development and small-team deployments; Vault mode remains a separate production hardening track.
+MVP topology is one Aegis process behind a trusted ingress or localhost development binding. Production topology should place `/v1/*` behind TLS or mTLS and keep any future admin API on a separate listener or internal-only network. The current local KMS runtime uses an in-memory backend for framework validation; a persistent encrypted local store or Vault mode is required before production use.
 
 ## Hard Decisions and Exit Cost
 

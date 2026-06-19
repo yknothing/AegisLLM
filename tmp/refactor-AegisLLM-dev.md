@@ -36,3 +36,16 @@ Refactor until the architecture is coherent and evidence-backed. After each sign
   - `$HOME/.cache/codex-go/go1.26.4/bin/go test -race ./...` passed.
   - `git diff --check` passed.
   - Live-test verified `/health` = 200, unauthenticated `/v1/chat/completions` = 401, valid JWT with missing provider key = 503.
+
+### Step 2 - Truth Surface and Admin Fail-Closed Cleanup
+
+- Changed Admin BYOK mutation endpoints to fail closed with `501` instead of storing a key and returning `vk_placeholder`.
+- Added admin tests proving missing admin auth is rejected and BYOK registration does not call KMS while unimplemented.
+- Updated README capability and deployment sections to distinguish implemented baseline from planned Vault, Redis, quota, persistent KMS, Admin, and non-OpenAI adapter work.
+- Updated Quick Start into a development smoke path and marked SDK usage as the intended interface after key issuance/provider-key seeding exists.
+- Live-test: started the gateway and verified `/health` returns `{"status":"ok"}` and a valid JWT request fails at KMS with `503` when no provider key is seeded.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test ./...` passed.
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go vet ./...` passed.
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test -race ./...` passed.
+  - `git diff --check` passed.

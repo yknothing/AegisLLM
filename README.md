@@ -9,9 +9,9 @@ Aegis is a lightweight, secure gateway for managing access to multiple LLM provi
 | Problem | Aegis Solution |
 | :--- | :--- |
 | API keys scattered across services | Centralized KMS with AES-256-GCM encryption |
-| No visibility into LLM costs | Real-time token metering and budget enforcement |
-| Single provider dependency | Multi-provider routing with automatic failover |
-| Rate limit errors from providers | Distributed token bucket with circuit breaker |
+| No visibility into LLM costs | Cost tracking architecture and planned quota enforcement |
+| Single provider dependency | Provider routing framework with OpenAI-compatible baseline |
+| Rate limit errors from providers | In-memory request/concurrency limiter baseline |
 | PII leakage to third-party APIs | Built-in PII detection and redaction |
 | Supply chain attack risk | Go static binary, Distroless image, zero runtime deps |
 
@@ -33,7 +33,7 @@ This repository currently provides the runtime framework and a minimal OpenAI-co
 - Explicitly not production-ready yet: persistent key store, Admin API key issuance, Vault KMS, Redis rate limiter, quota enforcement, and non-OpenAI protocol transformations.
 - Fail-fast behavior: unsupported Vault KMS and Redis limiter modes are rejected instead of silently running without controls.
 
-## Quick Start
+## Development Smoke
 
 ```bash
 # Generate a 256-bit master key for local KMS
@@ -42,9 +42,12 @@ export AEGIS_JWT_KEY=$(openssl rand -hex 64)
 
 # Run Aegis
 ./aegis --config aegis.example.json
+
+# Verify the process is alive
+curl http://localhost:8080/health
 ```
 
-Then point your OpenAI SDK to Aegis:
+The current baseline does not yet include a production key issuance and provider-key seeding flow. After that flow exists, OpenAI-compatible clients should point at Aegis like this:
 
 ```python
 from openai import OpenAI
@@ -61,25 +64,28 @@ response = client.chat.completions.create(
 )
 ```
 
-## Features
+## Capability Status
 
-- **Unified API**: OpenAI-compatible endpoint for all providers (OpenAI, Anthropic, Google, DeepSeek, etc.)
-- **Encrypted Key Storage**: Dual-layer KMS — built-in AES-256-GCM or HashiCorp Vault
-- **Smart Routing**: Priority-based routing with circuit breaker and automatic fallback
-- **Rate Limiting**: Three-dimensional limits (RPM, TPM, concurrency) with distributed backend
-- **Cost Management**: Hierarchical budgets, real-time metering, configurable pricing tables
-- **PII Protection**: Regex-based detection for emails, phone numbers, IDs, and API keys
-- **Streaming Support**: Zero-latency SSE proxy with real-time token counting
-- **Zero-PII Logging**: Audit trail records only metadata, never content
-- **mTLS Support**: Mutual TLS for zero-trust network deployments
-- **Minimal Footprint**: Single binary, <50MB Docker image (Distroless)
+| Capability | Status |
+| :--- | :--- |
+| OpenAI-compatible `/v1/chat/completions` path | Baseline framework implemented |
+| Virtual key auth | HS256 validation implemented; RS256 is planned |
+| Provider support | `openai` and OpenAI-compatible `deepseek` enabled; Anthropic/Gemini fail closed until adapters are implemented |
+| KMS | Local AES-GCM interface and in-memory backend implemented; persistent local store and Vault are planned |
+| Rate limiting | In-memory RPM and concurrency baseline implemented; TPM and Redis are planned |
+| PII protection | Regex-based request redaction baseline implemented |
+| Cost management | Pricing/quota modules scaffolded; runtime enforcement is planned |
+| Admin API / BYOK | Routes are scaffolded and fail closed with `501` until issuance, revocation, and storage flows are implemented |
+| Streaming proxy | SSE forwarding baseline implemented; token counting is heuristic |
+| mTLS | Server TLS/mTLS configuration path implemented |
 
 ## Deployment Modes
 
 | Mode | Dependencies | Use Case |
 | :--- | :--- | :--- |
-| **Standalone** | None (SQLite + memory) | Development, small teams |
-| **Cluster** | MySQL + Redis + Vault | Production, enterprise |
+| **Framework Smoke** | Local env vars + in-memory KMS | Development validation |
+| **Standalone** | Persistent local KMS store | Planned |
+| **Cluster** | Redis + Vault + durable quota store | Planned |
 
 ## Security
 
