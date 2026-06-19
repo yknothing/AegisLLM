@@ -90,7 +90,7 @@ After each significant step:
   - Final live-test using `/tmp/aegis-final-smoke.json` verified `/health` = 200, valid JWT with missing provider key = 503, and file KMS directory mode = 700.
 - Remaining planned capabilities are explicit non-goals for this refactor slice: Vault KMS, Redis limiter, TPM enforcement, quota runtime enforcement, Admin issuance/revocation/storage flows, RS256, and non-OpenAI protocol adapters.
 
-## Step 4 - Runtime Truth Surface and Docker Contract
+### Step 4 - Runtime Truth Surface and Docker Contract
 
 - Commit: `8a279e0 Align docs and defaults with runtime truth`.
 - Versioning: `README.md`, `ARCHITECTURE.md`, and `REVIEW.md` identify `v0.2.0` as the remediated baseline superseding `v0.1.0`.
@@ -252,41 +252,6 @@ After each significant step:
   - Push branch and verify GitHub Actions CI green on the remote runner.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
 
-### Step 9 - Release Boundary Hardening
-
-- Security-boundary fixes from the architecture expert review:
-  - Panic recovery now logs only `panic_type` and never logs the panic value, because panic values can contain request content or secrets.
-  - Added a regression test proving panic recovery does not log a secret panic string, request body content, or the `Authorization` header value.
-  - Rate-limit unavailable responses now use structured `json.Marshal` output and return a generic `rate limit service unavailable` message instead of reflecting unsupported backend internals to clients.
-  - Added a pipeline-level regression test proving the actual HTTP response body for an unsupported rate-limit backend is valid generic JSON and does not leak backend details.
-  - Adapter middleware now fails closed when a provider ID has no provider-type mapping instead of silently defaulting to the OpenAI passthrough adapter.
-  - Added adapter tests for missing provider-type mapping and known OpenAI mapping.
-- Release/CI gate fixes from the release expert review:
-  - GitHub Actions quality job now uses `make release-preflight GO=go VERSION=ci`, aligning remote CI with the local release gate script.
-  - GitHub Actions Docker smoke now captures `/health` and asserts the response body equals `{"status":"ok"}`.
-  - README Docker example now includes `--read-only` so the documented runtime path matches the CI and Mac mini smoke contract.
-- Verification:
-  - `$HOME/.cache/codex-go/go1.26.4/bin/go test ./internal/server ./internal/middleware` passed.
-  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed.
-  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=b28cfb8-dirty BUILD_DATE=2026-06-20T00:00:00Z PORT=18088` passed on `ssh ceo`.
-  - `ceo-docker-smoke` evidence:
-    - Host `Mac-mini.local`, `arm64`.
-    - Docker server `29.1.3`, architecture `aarch64`.
-    - Build context `238.32kB`.
-    - Image `sha256:599eac4601fbca4c33e55560c76af21158571e49f54397a0ef7ce31111ad7641`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
-    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
-    - Version output: `aegis v0.2.0-docker-test (commit: b28cfb8-dirty, built: 2026-06-20T00:00:00Z)`.
-    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
-  - `git diff --check` passed.
-  - `$HOME/.cache/codex-go/go1.26.4/bin/go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/ci.yml` passed.
-- Autoreview:
-  - Security architecture reviewer confirmed the three reported should-fix findings were remediated and found no blocking security findings.
-  - Release/operations reviewer confirmed CI health assertion, release-preflight reuse, and README read-only contract were remediated and found no new should-fix findings.
-- Remaining gates before release-complete claim:
-  - Commit this batch.
-  - Push branch and verify GitHub Actions CI green on the final remote SHA.
-  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
-
 ### Step 8 - Reproducible Release Gate Scripts
 
 - Added `scripts/release_preflight.sh`:
@@ -328,4 +293,57 @@ After each significant step:
     - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
 - Remaining gates before release-complete claim:
   - Push branch and verify GitHub Actions CI green on the remote runner.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
+### Step 9 - Release Boundary Hardening
+
+- Commit: `5554235 refactor: harden release boundary gates`.
+- Security-boundary fixes from the architecture expert review:
+  - Panic recovery now logs only `panic_type` and never logs the panic value, because panic values can contain request content or secrets.
+  - Added a regression test proving panic recovery does not log a secret panic string, request body content, or the `Authorization` header value.
+  - Rate-limit unavailable responses now use structured `json.Marshal` output and return a generic `rate limit service unavailable` message instead of reflecting unsupported backend internals to clients.
+  - Added a pipeline-level regression test proving the actual HTTP response body for an unsupported rate-limit backend is valid generic JSON and does not leak backend details.
+  - Adapter middleware now fails closed when a provider ID has no provider-type mapping instead of silently defaulting to the OpenAI passthrough adapter.
+  - Added adapter tests for missing provider-type mapping and known OpenAI mapping.
+- Release/CI gate fixes from the release expert review:
+  - GitHub Actions quality job now uses `make release-preflight GO=go VERSION=ci`, aligning remote CI with the local release gate script.
+  - GitHub Actions Docker smoke now captures `/health` and asserts the response body equals `{"status":"ok"}`.
+  - README Docker example now includes `--read-only` so the documented runtime path matches the CI and Mac mini smoke contract.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test ./internal/server ./internal/middleware` passed.
+  - `make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed on clean HEAD `5554235`.
+  - `make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=5554235 BUILD_DATE=2026-06-20T00:00:00Z PORT=18088` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `238.89kB`.
+    - Image `sha256:652c510786fe5c3e452bd732f362f85140fa6e63660c07d330775862a1394a55`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: 5554235, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+  - `git diff --check` passed.
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/ci.yml` passed.
+- Autoreview:
+  - Security architecture reviewer confirmed the three reported should-fix findings were remediated and found no blocking security findings.
+  - Release/operations reviewer confirmed CI health assertion, release-preflight reuse, and README read-only contract were remediated and found no new should-fix findings.
+- Remaining gates before release-complete claim:
+  - Push branch and verify GitHub Actions CI green on the final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
+### Step 10 - Remote Release Gate Recheck
+
+- Documentation hygiene:
+  - Reordered this progress log so Step 8 precedes Step 9.
+  - Normalized Step 4 to the same heading level as the other step logs.
+  - Updated Step 9 evidence from dirty-state smoke output to clean HEAD `5554235` output.
+- Remote release gate status:
+  - Local branch remains clean and ahead of `origin/codex/aegis-architecture-refactor` by 5 commits.
+  - Local HEAD: `5554235dc853116b2423d621c10396a359b64ec1`.
+  - Remote branch still points at `8a279e0547a6fb770b8f15620f26dbf37b5ea024`.
+  - Local HTTPS push dry-run with credential helper disabled still fails with `fatal: could not read Username for 'https://github.com': Device not configured`.
+  - `ssh ceo` has `gh`, but `gh auth status -h github.com` reports the active token for `bruceaiatgit` is invalid.
+  - `ssh ceo` to `git@github.com` still returns `Permission denied (publickey)`.
+- Remaining gates before release-complete claim:
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
