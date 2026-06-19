@@ -251,3 +251,46 @@ After each significant step:
 - Remaining gates before release-complete claim:
   - Push branch and verify GitHub Actions CI green on the remote runner.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
+### Step 8 - Reproducible Release Gate Scripts
+
+- Added `scripts/release_preflight.sh`:
+  - Requires a clean worktree by default; `ALLOW_DIRTY=1` can be used while developing the script itself.
+  - Runs `go test ./...`, `go vet ./...`, `go test -race ./...`, `make lint`, `make security`, `actionlint`, and `git diff --check`.
+  - Verifies default Docker tags do not include `aegis:latest`.
+  - Verifies `DOCKER_TAG_LATEST=true` explicitly adds `aegis:latest`.
+- Added `scripts/ceo_docker_smoke.sh`:
+  - Requires a clean worktree by default; `ALLOW_DIRTY=1` can be used while developing the script itself.
+  - Syncs the current source tree to `ssh ceo`.
+  - Uses `.dockerignore` as the rsync exclusion source so local secrets/config outside Docker build context are not copied to the remote temp directory.
+  - Validates configurable remote/Docker/version fields against a conservative character allowlist before invoking SSH.
+  - Uses run-id-suffixed image/container/volume defaults to reduce collision between runs.
+  - Supports configurable `PORT` and uses run-id-suffixed temporary files for copied binaries and unauth response bodies.
+  - Builds the Docker image with no cache and pulled bases.
+  - Asserts image OS/architecture/user/entrypoint/cmd.
+  - Copies `/aegis` from the image and verifies the binary with `file`.
+  - Runs the container with `--read-only`, env secrets, and `/var/lib/aegis` volume.
+  - Verifies `/health` returns `{"status":"ok"}` and unauthenticated `/v1/chat/completions` returns `401`.
+  - Cleans remote created container IDs, named runtime container, volume, image, binary copy, unauth body, and temp source directory.
+- Added Makefile targets:
+  - `release-preflight`
+  - `ceo-docker-smoke`
+- Verification:
+  - `sh -n scripts/release_preflight.sh` passed.
+  - `sh -n scripts/ceo_docker_smoke.sh` passed.
+  - `make -n release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` produced the expected command.
+  - `make -n ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=workspace BUILD_DATE=2026-06-20T00:00:00Z` produced the expected command.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=workspace BUILD_DATE=2026-06-20T00:00:00Z PORT=18088` passed on `ssh ceo` after the script hardening changes.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `234.41kB`.
+    - Image `sha256:4537de6f6dea345698aaeb35808b7daa99abb1c7cda75147bd5d35690031cda1`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Image tag `aegis:codex-docker-test-20260619175547-44607`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: workspace, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Remaining gates before release-complete claim:
+  - Push branch and verify GitHub Actions CI green on the remote runner.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.

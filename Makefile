@@ -30,7 +30,7 @@ ifeq ($(DOCKER_TAG_LATEST),true)
 DOCKER_TAGS += -t aegis:latest
 endif
 
-.PHONY: all build build-linux test test-coverage lint fmt vet security govulncheck gosec docker generate-key clean help
+.PHONY: all build build-linux test test-coverage lint fmt vet security govulncheck gosec docker release-preflight ceo-docker-smoke generate-key clean help
 
 all: lint test build
 
@@ -84,6 +84,12 @@ docker:
 		$(DOCKER_TAGS) \
 		.
 
+release-preflight:
+	GO=$(GO) VERSION=$(VERSION) scripts/release_preflight.sh
+
+ceo-docker-smoke:
+	VERSION=$(VERSION) COMMIT=$(COMMIT) BUILD_DATE=$(BUILD_DATE) scripts/ceo_docker_smoke.sh
+
 ## Utilities
 
 generate-key:
@@ -104,5 +110,7 @@ help:
 	@echo "  lint           Run golangci-lint"
 	@echo "  security       Run govulncheck and gosec"
 	@echo "  docker         Build Docker image"
+	@echo "  release-preflight  Run local release gates"
+	@echo "  ceo-docker-smoke   Run Docker smoke on the ceo Mac mini"
 	@echo "  generate-key   Generate random encryption keys"
 	@echo "  clean          Remove build artifacts"
