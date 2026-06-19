@@ -17,8 +17,9 @@ RUN apk add --no-cache ca-certificates git
 
 WORKDIR /build
 
-# Cache dependencies
-COPY go.mod go.sum ./
+# Cache dependencies. This project currently has no external dependencies, so
+# go.sum may not exist until one is introduced.
+COPY go.mod ./
 RUN go mod download && go mod verify
 
 # Copy source and build

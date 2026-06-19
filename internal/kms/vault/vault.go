@@ -24,10 +24,10 @@ import (
 
 // Client implements kms.Provider using HashiCorp Vault.
 type Client struct {
-	mu       sync.RWMutex
-	address  string
-	path     string
-	token    []byte // Vault access token (zeroed on Close)
+	mu      sync.RWMutex
+	address string
+	path    string
+	token   []byte // Vault access token (zeroed on Close)
 }
 
 // Config holds Vault connection parameters.

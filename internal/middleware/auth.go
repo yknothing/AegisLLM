@@ -1,7 +1,8 @@
 // Package middleware implements the core Aegis middleware pipeline components.
 //
 // Each middleware in this package follows the Aegis Middleware signature:
-//   func(ctx *server.RequestContext, next func())
+//
+//	func(ctx *server.RequestContext, next func())
 //
 // Middleware MUST:
 //   - Call next() to pass control to the next layer (or not, to short-circuit)
@@ -10,7 +11,10 @@
 package middleware
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -23,7 +27,7 @@ import (
 
 // AuthConfig holds authentication middleware configuration.
 type AuthConfig struct {
-	SigningKey  []byte        // JWT signing key (loaded from env, zeroed on shutdown)
+	SigningKey []byte        // JWT signing key (loaded from env, zeroed on shutdown)
 	Issuer     string        // Expected JWT issuer
 	Expiry     time.Duration // Default token expiry
 	Revocation RevocationStore
@@ -37,18 +41,18 @@ type RevocationStore interface {
 
 // VirtualKeyClaims represents the JWT payload for an Aegis virtual key.
 type VirtualKeyClaims struct {
-	KeyID       string   `json:"kid"`
-	Subject     string   `json:"sub"`        // Owner identifier
-	Models      []string `json:"models"`     // Allowed models
-	MaxRPM      int      `json:"rpm"`        // Per-key rate limit (0 = unlimited)
-	MaxTPM      int      `json:"tpm"`        // Per-key token limit (0 = unlimited)
-	BudgetUSD   float64  `json:"budget"`     // Monthly budget in USD (0 = unlimited)
-	KeySource   string   `json:"key_source"` // "pool" or "byok"
-	BYOKKeyID   string   `json:"byok_key_id,omitempty"` // KMS key ID for BYOK users
-	PoolGroup   string   `json:"pool_group,omitempty"`  // Pool group for server-hosted keys
-	IssuedAt    int64    `json:"iat"`
-	ExpiresAt   int64    `json:"exp"`
-	Issuer      string   `json:"iss"`
+	KeyID     string   `json:"kid"`
+	Subject   string   `json:"sub"`                   // Owner identifier
+	Models    []string `json:"models"`                // Allowed models
+	MaxRPM    int      `json:"rpm"`                   // Per-key rate limit (0 = unlimited)
+	MaxTPM    int      `json:"tpm"`                   // Per-key token limit (0 = unlimited)
+	BudgetUSD float64  `json:"budget"`                // Monthly budget in USD (0 = unlimited)
+	KeySource string   `json:"key_source"`            // "pool" or "byok"
+	BYOKKeyID string   `json:"byok_key_id,omitempty"` // KMS key ID for BYOK users
+	PoolGroup string   `json:"pool_group,omitempty"`  // Pool group for server-hosted keys
+	IssuedAt  int64    `json:"iat"`
+	ExpiresAt int64    `json:"exp"`
+	Issuer    string   `json:"iss"`
 }
 
 // Auth creates the authentication middleware.
@@ -96,6 +100,9 @@ func Auth(cfg AuthConfig) server.Middleware {
 		ctx.Budget = claims.BudgetUSD
 		ctx.KeySource = claims.KeySource
 		ctx.BYOKKeyID = claims.BYOKKeyID
+		ctx.MaxRPM = claims.MaxRPM
+		ctx.MaxTPM = claims.MaxTPM
+		ctx.MaxConcurrency = 0
 
 		next()
 	}
@@ -104,19 +111,75 @@ func Auth(cfg AuthConfig) server.Middleware {
 // validateToken verifies the JWT signature and claims.
 // SECURITY: Uses constant-time comparison to prevent timing attacks.
 func validateToken(token string, signingKey []byte, expectedIssuer string) (*VirtualKeyClaims, error) {
-	// TODO: Implement full JWT RS256/HS256 validation
-	// For the framework, we define the contract:
-	// 1. Split token into header.payload.signature
-	// 2. Verify signature using constant-time comparison
-	// 3. Decode and validate claims (expiry, issuer)
-	// 4. Return validated claims
+	if len(signingKey) == 0 {
+		return nil, fmt.Errorf("missing signing key")
+	}
 
-	_ = subtle.ConstantTimeCompare // Used in actual implementation
-	_ = token
-	_ = signingKey
-	_ = expectedIssuer
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("invalid token format")
+	}
 
-	return nil, fmt.Errorf("JWT validation not yet implemented")
+	headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return nil, fmt.Errorf("invalid token header: %w", err)
+	}
+	var header struct {
+		Alg string `json:"alg"`
+		Typ string `json:"typ"`
+	}
+	if err := json.Unmarshal(headerBytes, &header); err != nil {
+		return nil, fmt.Errorf("invalid token header JSON: %w", err)
+	}
+	if header.Alg != "HS256" {
+		return nil, fmt.Errorf("unsupported signing algorithm")
+	}
+
+	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return nil, fmt.Errorf("invalid token signature: %w", err)
+	}
+
+	mac := hmac.New(sha256.New, signingKey)
+	_, _ = mac.Write([]byte(parts[0] + "." + parts[1]))
+	expectedSignature := mac.Sum(nil)
+	if subtle.ConstantTimeCompare(signature, expectedSignature) != 1 {
+		return nil, fmt.Errorf("invalid signature")
+	}
+
+	claimsBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("invalid token payload: %w", err)
+	}
+	var claims VirtualKeyClaims
+	if err := json.Unmarshal(claimsBytes, &claims); err != nil {
+		return nil, fmt.Errorf("invalid token claims: %w", err)
+	}
+
+	now := time.Now().Unix()
+	if claims.KeyID == "" {
+		return nil, fmt.Errorf("missing key id")
+	}
+	if claims.ExpiresAt <= now {
+		return nil, fmt.Errorf("token expired")
+	}
+	if claims.IssuedAt > now+60 {
+		return nil, fmt.Errorf("token issued in the future")
+	}
+	if expectedIssuer != "" && claims.Issuer != expectedIssuer {
+		return nil, fmt.Errorf("invalid issuer")
+	}
+	if claims.KeySource == "" {
+		claims.KeySource = "pool"
+	}
+	if claims.KeySource != "pool" && claims.KeySource != "byok" {
+		return nil, fmt.Errorf("invalid key source")
+	}
+	if claims.KeySource == "byok" && claims.BYOKKeyID == "" {
+		return nil, fmt.Errorf("missing BYOK key id")
+	}
+
+	return &claims, nil
 }
 
 // errorJSON creates a standard error response body.

@@ -3,6 +3,8 @@
 ## Architecture
 
 - [Architecture Overview](../ARCHITECTURE.md) — High-level system design and module map
+- [Runtime Architecture Design](architecture-design.md) — Current runtime boundaries, drivers, topology, and fitness functions
+- [Module Boundaries](module-boundaries.md) — Internal dependency direction and module contracts
 - [ADR Index](adr/README.md) — Architecture Decision Records
 
 ## Strategy
@@ -12,6 +14,7 @@
 ## Security
 
 - [Security Policy](../SECURITY.md) — Vulnerability reporting and security design principles
+- [Threat Model](threat-model.md) — Assets, trust boundaries, abuse paths, and required controls
 
 ## Guides
 

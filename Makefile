@@ -26,9 +26,11 @@ all: lint test build
 ## Build
 
 build:
+	mkdir -p bin
 	CGO_ENABLED=0 go build $(GOFLAGS) -ldflags="$(LDFLAGS)" -o bin/$(BINARY) ./cmd/aegis
 
 build-linux:
+	mkdir -p bin
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(GOFLAGS) -ldflags="$(LDFLAGS)" -o bin/$(BINARY)-linux-amd64 ./cmd/aegis
 
 ## Test

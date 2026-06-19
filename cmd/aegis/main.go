@@ -14,7 +14,8 @@ import (
 	"syscall"
 
 	"github.com/yknothing/AegisLLM/internal/config"
-	"github.com/yknothing/AegisLLM/internal/server"
+	"github.com/yknothing/AegisLLM/internal/runtime"
+	"github.com/yknothing/AegisLLM/internal/utils"
 )
 
 var (
@@ -35,9 +36,7 @@ func main() {
 	}
 
 	// Initialize structured logger (zero-PII by design)
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
+	logger := utils.NewAuditLogger(os.Stdout, slog.LevelInfo)
 	slog.SetDefault(logger)
 
 	// Load configuration
@@ -51,7 +50,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	srv, err := server.New(cfg, logger)
+	srv, err := runtime.NewServer(cfg, logger)
 	if err != nil {
 		slog.Error("failed to initialize server", "error", err)
 		os.Exit(1)

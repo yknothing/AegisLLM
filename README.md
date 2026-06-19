@@ -25,6 +25,14 @@ Request → [Auth] → [RateLimit] → [PII] → [Router] → [KMS] → [Adapter
 
 Every feature is a middleware plugin. The core is minimal and auditable.
 
+## Current Implementation Status
+
+This repository currently provides the runtime framework and a minimal OpenAI-compatible gateway path:
+
+- Implemented baseline: safe logger, config loading, middleware composition, HS256 virtual-key validation, in-memory rate limiting, PII redaction, provider routing, local in-memory KMS backend, egress allowlist validation, and streaming proxy scaffolding.
+- Explicitly not production-ready yet: persistent key store, Admin API key issuance, Vault KMS, Redis rate limiter, quota enforcement, and non-OpenAI protocol transformations.
+- Fail-fast behavior: unsupported Vault KMS and Redis limiter modes are rejected instead of silently running without controls.
+
 ## Quick Start
 
 ```bash

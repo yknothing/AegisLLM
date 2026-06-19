@@ -2,7 +2,7 @@
 //
 // SECURITY CRITICAL:
 //   - This middleware fetches the real API key from KMS just before proxying
-//   - The key is stored in RequestContext.ProviderAPIKey as []byte
+//   - The key is stored in RequestContext.ProviderAPIKey as SecureBytes
 //   - The key MUST be zeroed after the proxy completes (handled by pipeline)
 //   - Keys are never logged, cached, or written to disk
 //   - If KMS is unreachable, the request fails gracefully (no fallback to plaintext)
@@ -63,9 +63,9 @@ func KMSInjector(cfg KMSMiddlewareConfig) server.Middleware {
 			return
 		}
 
-		// Inject key into request context
-		// SECURITY: This will be zeroed by the pipeline after request completion
-		ctx.ProviderAPIKey = secureKey.Bytes()
+		// Inject key into request context.
+		// SECURITY: This will be closed by the pipeline after request completion.
+		ctx.ProviderAPIKey = secureKey
 
 		next()
 

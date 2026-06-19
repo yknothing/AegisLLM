@@ -19,8 +19,8 @@ import (
 
 // Common errors returned by KMS implementations.
 var (
-	ErrKeyNotFound     = errors.New("kms: key not found")
-	ErrDecryptFailed   = errors.New("kms: decryption failed")
+	ErrKeyNotFound      = errors.New("kms: key not found")
+	ErrDecryptFailed    = errors.New("kms: decryption failed")
 	ErrVaultUnreachable = errors.New("kms: vault service unreachable")
 	ErrInvalidMasterKey = errors.New("kms: invalid master key")
 )

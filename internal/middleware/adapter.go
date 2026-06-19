@@ -13,6 +13,7 @@ package middleware
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 
@@ -79,7 +80,7 @@ func (r *AdapterRegistry) Get(providerType string) (ProtocolAdapter, error) {
 }
 
 // Adapter creates the protocol adaptation middleware.
-func Adapter(registry *AdapterRegistry, providerTypes map[string]string) server.Middleware {
+func Adapter(registry *AdapterRegistry, providerTypes map[string]string, maxRequestBodySize int64) server.Middleware {
 	return func(ctx *server.RequestContext, next func()) {
 		providerType, ok := providerTypes[ctx.ProviderID]
 		if !ok {
@@ -93,8 +94,24 @@ func Adapter(registry *AdapterRegistry, providerTypes map[string]string) server.
 			return
 		}
 
-		// Store adapter reference for use by the proxy engine
-		_ = adapter // TODO: Pass adapter to proxy via context
+		body, err := readAndReplaceBody(ctx.Request, maxRequestBodySize)
+		if errors.Is(err, errRequestBodyTooLarge) {
+			ctx.Abort(http.StatusRequestEntityTooLarge, []byte(`{"error":{"message":"request body too large","type":"invalid_request_error"}}`))
+			return
+		}
+		if err != nil {
+			ctx.Abort(http.StatusBadRequest, []byte(`{"error":{"message":"invalid request body","type":"invalid_request_error"}}`))
+			return
+		}
+
+		transformed, targetPath, err := adapter.TransformRequest(body, ctx.Model)
+		if err != nil {
+			ctx.Abort(http.StatusBadRequest, []byte(`{"error":{"message":"invalid provider request","type":"invalid_request_error"}}`))
+			return
+		}
+		replaceBody(ctx.Request, transformed)
+		ctx.ProviderType = providerType
+		ctx.TargetPath = targetPath
 
 		next()
 	}
@@ -105,13 +122,13 @@ func Adapter(registry *AdapterRegistry, providerTypes map[string]string) server.
 // OpenAIAdapter is a passthrough adapter (our API is already OpenAI-compatible).
 type OpenAIAdapter struct{}
 
-func (a *OpenAIAdapter) Name() string                                       { return "openai" }
+func (a *OpenAIAdapter) Name() string { return "openai" }
 func (a *OpenAIAdapter) TransformRequest(body []byte, model string) ([]byte, string, error) {
 	return body, "/v1/chat/completions", nil
 }
-func (a *OpenAIAdapter) TransformResponse(body []byte) ([]byte, error)      { return body, nil }
-func (a *OpenAIAdapter) TransformStreamChunk(chunk []byte) ([]byte, error)  { return chunk, nil }
-func (a *OpenAIAdapter) SupportsStreaming() bool                            { return true }
+func (a *OpenAIAdapter) TransformResponse(body []byte) ([]byte, error)     { return body, nil }
+func (a *OpenAIAdapter) TransformStreamChunk(chunk []byte) ([]byte, error) { return chunk, nil }
+func (a *OpenAIAdapter) SupportsStreaming() bool                           { return true }
 
 // AnthropicAdapter transforms between OpenAI and Anthropic Claude formats.
 type AnthropicAdapter struct{}
@@ -124,7 +141,7 @@ func (a *AnthropicAdapter) TransformRequest(body []byte, model string) ([]byte, 
 	//   - model naming: "claude-sonnet-4-20250514" etc.
 	//   - max_tokens is required (not optional)
 	//   - Different header: x-api-key instead of Authorization Bearer
-	return body, "/v1/messages", nil
+	return nil, "", fmt.Errorf("anthropic adapter is not implemented")
 }
 func (a *AnthropicAdapter) TransformResponse(body []byte) ([]byte, error)     { return body, nil }
 func (a *AnthropicAdapter) TransformStreamChunk(chunk []byte) ([]byte, error) { return chunk, nil }
@@ -140,7 +157,7 @@ func (a *GeminiAdapter) TransformRequest(body []byte, model string) ([]byte, str
 	//   - messages → contents[].parts[].text
 	//   - Different auth: API key in URL param or OAuth
 	//   - model in URL path: /v1/models/{model}:generateContent
-	return body, "/v1/models/" + model + ":generateContent", nil
+	return nil, "", fmt.Errorf("google adapter is not implemented")
 }
 func (a *GeminiAdapter) TransformResponse(body []byte) ([]byte, error)     { return body, nil }
 func (a *GeminiAdapter) TransformStreamChunk(chunk []byte) ([]byte, error) { return chunk, nil }

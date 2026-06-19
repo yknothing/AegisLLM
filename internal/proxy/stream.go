@@ -18,7 +18,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -47,6 +49,13 @@ type Engine struct {
 
 // NewEngine creates a new streaming proxy engine.
 func NewEngine(cfg StreamConfig) *Engine {
+	if cfg.MaxRequestBodySize <= 0 {
+		cfg.MaxRequestBodySize = 10 << 20
+	}
+	if cfg.StreamTimeout <= 0 {
+		cfg.StreamTimeout = 5 * time.Minute
+	}
+
 	// Configure HTTP client with security-hardened settings
 	transport := &http.Transport{
 		MaxIdleConnsPerHost: 100,
@@ -85,6 +94,10 @@ func (e *Engine) ProxyRequest(
 	apiKey *utils.SecureBytes,
 	isStreaming bool,
 ) (*ProxyResult, error) {
+	if apiKey == nil {
+		return nil, fmt.Errorf("provider API key is missing")
+	}
+
 	// SECURITY: Validate target domain against allowlist
 	if err := e.validateEgress(targetURL); err != nil {
 		return nil, fmt.Errorf("egress blocked: %w", err)
@@ -105,6 +118,7 @@ func (e *Engine) ProxyRequest(
 
 	// Inject API key and immediately schedule zeroing
 	upstreamReq.Header.Set("Authorization", "Bearer "+string(apiKey.Bytes()))
+	defer upstreamReq.Header.Del("Authorization")
 	defer apiKey.Close() // Zero the key after request is sent
 
 	// Set request timeout
@@ -202,32 +216,65 @@ func (e *Engine) forwardResponse(w http.ResponseWriter, resp *http.Response) {
 // SECURITY: This prevents data exfiltration even if the gateway is compromised.
 func (e *Engine) validateEgress(targetURL string) error {
 	if len(e.config.AllowedDomains) == 0 {
-		return nil // No restrictions configured
+		return fmt.Errorf("no egress allowlist configured")
+	}
+
+	parsed, err := url.Parse(targetURL)
+	if err != nil {
+		return fmt.Errorf("invalid target URL: %w", err)
+	}
+	host := normalizeHost(parsed.Hostname())
+	if host == "" {
+		return fmt.Errorf("target URL has no host")
 	}
 
 	for _, domain := range e.config.AllowedDomains {
-		if strings.Contains(targetURL, domain) {
+		allowed := normalizeAllowedDomain(domain)
+		if allowed == "" {
+			continue
+		}
+		if host == allowed || strings.HasSuffix(host, "."+allowed) {
 			return nil
 		}
 	}
 
-	return fmt.Errorf("domain not in egress allowlist: %s", targetURL)
+	return fmt.Errorf("domain not in egress allowlist: %s", host)
+}
+
+func normalizeAllowedDomain(domain string) string {
+	if strings.Contains(domain, "://") {
+		parsed, err := url.Parse(domain)
+		if err == nil {
+			domain = parsed.Hostname()
+		}
+	}
+	return normalizeHost(domain)
+}
+
+func normalizeHost(host string) string {
+	host = strings.TrimSpace(strings.ToLower(host))
+	host = strings.TrimSuffix(host, ".")
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	return host
 }
 
 // copyHeaders copies safe headers from source to destination.
 // SECURITY: Strips hop-by-hop headers and sensitive headers.
 func copyHeaders(dst, src http.Header) {
 	skipHeaders := map[string]bool{
-		"Authorization":    true, // Will be replaced with provider key
-		"Host":             true,
-		"Connection":       true,
-		"Transfer-Encoding": true,
-		"Upgrade":          true,
-		"Cookie":           true,
+		"Authorization":       true, // Will be replaced with provider key
+		"Proxy-Authorization": true,
+		"Host":                true,
+		"Connection":          true,
+		"Transfer-Encoding":   true,
+		"Upgrade":             true,
+		"Cookie":              true,
 	}
 
 	for key, values := range src {
-		if skipHeaders[key] {
+		if skipHeaders[http.CanonicalHeaderKey(key)] {
 			continue
 		}
 		for _, v := range values {

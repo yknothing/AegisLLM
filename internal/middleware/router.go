@@ -12,7 +12,10 @@
 package middleware
 
 import (
+	"encoding/json"
+	"errors"
 	"net/http"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -35,7 +38,8 @@ type ProviderChannel struct {
 
 // RouterConfig configures the routing middleware.
 type RouterConfig struct {
-	Channels []ProviderChannel
+	Channels           []ProviderChannel
+	MaxRequestBodySize int64
 }
 
 // Router creates the routing middleware.
@@ -45,7 +49,15 @@ func Router(cfg RouterConfig) server.Middleware {
 
 	return func(ctx *server.RequestContext, next func()) {
 		// Extract requested model from the request
-		model := extractModelFromRequest(ctx.Request)
+		model, streaming, err := extractModelFromRequest(ctx.Request, cfg.MaxRequestBodySize)
+		if errors.Is(err, errRequestBodyTooLarge) {
+			ctx.Abort(http.StatusRequestEntityTooLarge, []byte(`{"error":{"message":"request body too large","type":"invalid_request_error"}}`))
+			return
+		}
+		if err != nil {
+			ctx.Abort(http.StatusBadRequest, []byte(`{"error":{"message":"invalid request body","type":"invalid_request_error"}}`))
+			return
+		}
 		if model == "" {
 			ctx.Abort(http.StatusBadRequest, []byte(`{"error":{"message":"model field is required","type":"invalid_request_error"}}`))
 			return
@@ -66,8 +78,11 @@ func Router(cfg RouterConfig) server.Middleware {
 
 		// Populate routing decision in context
 		ctx.ProviderID = channel.ID
+		ctx.ProviderType = channel.Type
+		ctx.ProviderAPIKeyID = channel.KeyID
 		ctx.Model = model
 		ctx.BaseURL = channel.BaseURL
+		ctx.IsStreaming = streaming
 
 		next()
 
@@ -116,6 +131,12 @@ func (rt *routerTable) Route(model string) *ProviderChannel {
 			candidates = append(candidates, ch)
 		}
 	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].Priority == candidates[j].Priority {
+			return candidates[i].Weight > candidates[j].Weight
+		}
+		return candidates[i].Priority < candidates[j].Priority
+	})
 
 	// Select the first healthy channel (lowest priority number = highest priority)
 	for _, ch := range candidates {
@@ -164,11 +185,11 @@ const (
 )
 
 type circuitBreaker struct {
-	state          atomic.Int32
-	failures       atomic.Int64
-	lastFailure    atomic.Int64 // Unix timestamp
-	threshold      int64        // Failures before opening
-	recoveryTime   time.Duration
+	state        atomic.Int32
+	failures     atomic.Int64
+	lastFailure  atomic.Int64 // Unix timestamp
+	threshold    int64        // Failures before opening
+	recoveryTime time.Duration
 }
 
 func newCircuitBreaker() *circuitBreaker {
@@ -212,11 +233,24 @@ func (cb *circuitBreaker) RecordSuccess() {
 
 // --- Helper Functions ---
 
-func extractModelFromRequest(r *http.Request) string {
-	// TODO: Parse request body to extract "model" field
-	// For streaming-compatible parsing, use a buffered reader
-	// that doesn't consume the body
-	return ""
+func extractModelFromRequest(r *http.Request, limit int64) (string, bool, error) {
+	body, err := readAndReplaceBody(r, limit)
+	if err != nil {
+		return "", false, err
+	}
+
+	var req struct {
+		Model  string `json:"model"`
+		Stream bool   `json:"stream"`
+	}
+	if len(body) == 0 {
+		return "", false, nil
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return "", false, err
+	}
+
+	return req.Model, req.Stream, nil
 }
 
 func isModelAllowed(model string, allowed []string) bool {

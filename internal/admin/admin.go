@@ -14,6 +14,7 @@
 package admin
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -59,10 +60,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 
 // BYOKRequest represents a request to register a user's own API key.
 type BYOKRequest struct {
-	UserID   string `json:"user_id"`   // Owner identifier
-	Provider string `json:"provider"`  // e.g., "openai", "anthropic"
-	APIKey   string `json:"api_key"`   // The user's real API key (will be encrypted)
-	Models   []string `json:"models"`  // Models the user wants to access
+	UserID   string   `json:"user_id"`  // Owner identifier
+	Provider string   `json:"provider"` // e.g., "openai", "anthropic"
+	APIKey   string   `json:"api_key"`  // The user's real API key (will be encrypted)
+	Models   []string `json:"models"`   // Models the user wants to access
 }
 
 // BYOKResponse is returned after successful BYOK registration.
@@ -221,11 +222,7 @@ func constantTimeEqual(a, b []byte) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	var result byte
-	for i := range a {
-		result |= a[i] ^ b[i]
-	}
-	return result == 0
+	return subtle.ConstantTimeCompare(a, b) == 1
 }
 
 // --- Helpers ---

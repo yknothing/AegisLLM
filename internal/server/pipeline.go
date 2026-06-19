@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/yknothing/AegisLLM/internal/config"
+	"github.com/yknothing/AegisLLM/internal/utils"
 )
 
 // Middleware is a function that processes a request and optionally
@@ -31,19 +32,26 @@ type RequestContext struct {
 	Request *http.Request
 
 	// Identity (populated by auth middleware)
-	VirtualKeyID string
-	Permissions  []string
-	Budget       float64
-	KeySource    string // "pool" or "byok" (from JWT claims)
-	BYOKKeyID    string // KMS key ID for BYOK users (from JWT claims)
+	VirtualKeyID   string
+	Permissions    []string
+	Budget         float64
+	KeySource      string // "pool" or "byok" (from JWT claims)
+	BYOKKeyID      string // KMS key ID for BYOK users (from JWT claims)
+	MaxRPM         int
+	MaxTPM         int
+	MaxConcurrency int
 
 	// Routing decision (populated by router middleware)
-	ProviderID string
-	Model      string
-	BaseURL    string
+	ProviderID       string
+	ProviderType     string
+	ProviderAPIKeyID string
+	Model            string
+	BaseURL          string
+	TargetPath       string
+	IsStreaming      bool
 
 	// Secrets (populated by KMS middleware, zeroed after use)
-	ProviderAPIKey []byte
+	ProviderAPIKey *utils.SecureBytes
 
 	// Metrics (populated during processing)
 	StartTime    time.Time
@@ -52,10 +60,10 @@ type RequestContext struct {
 	StatusCode   int
 
 	// Internal pipeline state
-	logger     *slog.Logger
-	aborted    bool
-	abortCode  int
-	abortBody  []byte
+	logger    *slog.Logger
+	aborted   bool
+	abortCode int
+	abortBody []byte
 }
 
 // Abort stops the pipeline and returns an error response.
@@ -63,6 +71,7 @@ func (rc *RequestContext) Abort(statusCode int, body []byte) {
 	rc.aborted = true
 	rc.abortCode = statusCode
 	rc.abortBody = body
+	rc.StatusCode = statusCode
 }
 
 // IsAborted returns whether the pipeline has been short-circuited.
@@ -77,13 +86,9 @@ type Pipeline struct {
 }
 
 // NewPipeline constructs the middleware pipeline based on configuration.
-// The order of middleware is critical and security-sensitive:
-//   1. Auth (reject unauthorized requests immediately)
-//   2. Rate Limiter (prevent abuse before expensive processing)
-//   3. PII Redaction (sanitize before routing/logging)
-//   4. Router & LB (select provider)
-//   5. KMS (inject real API key)
-//   6. Protocol Adapter & Proxy (forward to provider)
+// The infrastructure middleware is always registered here. Runtime policy
+// middleware is registered by internal/runtime so the server microkernel does
+// not import concrete middleware packages.
 func NewPipeline(cfg *config.Config, logger *slog.Logger) (*Pipeline, error) {
 	p := &Pipeline{
 		logger: logger,
@@ -94,14 +99,6 @@ func NewPipeline(cfg *config.Config, logger *slog.Logger) (*Pipeline, error) {
 	p.Use(RecoveryMiddleware(logger))
 	p.Use(RequestIDMiddleware())
 	p.Use(AuditMiddleware(logger))
-
-	// TODO: Initialize and register core middleware from config
-	// p.Use(middleware.NewAuth(cfg.Auth))
-	// p.Use(middleware.NewRateLimiter(cfg.RateLimit))
-	// p.Use(middleware.NewPIIRedaction())
-	// p.Use(middleware.NewRouter(cfg.Providers))
-	// p.Use(middleware.NewKMS(cfg.KMS))
-	// p.Use(middleware.NewProxy())
 
 	return p, nil
 }
@@ -131,8 +128,10 @@ func (p *Pipeline) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// SECURITY: Zero sensitive fields after request completion
-	clear(ctx.ProviderAPIKey)
-	ctx.ProviderAPIKey = nil
+	if ctx.ProviderAPIKey != nil {
+		ctx.ProviderAPIKey.Close()
+		ctx.ProviderAPIKey = nil
+	}
 }
 
 // execute recursively runs the middleware chain.

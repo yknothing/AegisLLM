@@ -26,9 +26,9 @@ var (
 
 // Manager handles budget tracking and cost calculation.
 type Manager struct {
-	mu       sync.RWMutex
-	store    Store
-	pricing  *PricingTable
+	mu      sync.RWMutex
+	store   Store
+	pricing *PricingTable
 }
 
 // Store is the persistence interface for quota data.
@@ -73,7 +73,7 @@ type PricingTable struct {
 
 // ModelPricing defines the cost per token for a specific model.
 type ModelPricing struct {
-	Model           string
+	Model            string
 	InputPerMillion  float64 // USD per 1M input tokens
 	OutputPerMillion float64 // USD per 1M output tokens
 }

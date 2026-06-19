@@ -8,26 +8,26 @@ package model
 
 // ChatCompletionRequest represents an OpenAI-compatible chat completion request.
 type ChatCompletionRequest struct {
-	Model            string          `json:"model"`
-	Messages         []Message       `json:"messages"`
-	Temperature      *float64        `json:"temperature,omitempty"`
-	TopP             *float64        `json:"top_p,omitempty"`
-	N                *int            `json:"n,omitempty"`
-	Stream           bool            `json:"stream,omitempty"`
-	Stop             []string        `json:"stop,omitempty"`
-	MaxTokens        *int            `json:"max_tokens,omitempty"`
-	MaxCompletionTokens *int         `json:"max_completion_tokens,omitempty"`
-	PresencePenalty  *float64        `json:"presence_penalty,omitempty"`
-	FrequencyPenalty *float64        `json:"frequency_penalty,omitempty"`
-	User             string          `json:"user,omitempty"`
-	Tools            []Tool          `json:"tools,omitempty"`
-	ToolChoice       interface{}     `json:"tool_choice,omitempty"`
-	ResponseFormat   *ResponseFormat `json:"response_format,omitempty"`
+	Model               string          `json:"model"`
+	Messages            []Message       `json:"messages"`
+	Temperature         *float64        `json:"temperature,omitempty"`
+	TopP                *float64        `json:"top_p,omitempty"`
+	N                   *int            `json:"n,omitempty"`
+	Stream              bool            `json:"stream,omitempty"`
+	Stop                []string        `json:"stop,omitempty"`
+	MaxTokens           *int            `json:"max_tokens,omitempty"`
+	MaxCompletionTokens *int            `json:"max_completion_tokens,omitempty"`
+	PresencePenalty     *float64        `json:"presence_penalty,omitempty"`
+	FrequencyPenalty    *float64        `json:"frequency_penalty,omitempty"`
+	User                string          `json:"user,omitempty"`
+	Tools               []Tool          `json:"tools,omitempty"`
+	ToolChoice          interface{}     `json:"tool_choice,omitempty"`
+	ResponseFormat      *ResponseFormat `json:"response_format,omitempty"`
 }
 
 // Message represents a single message in the conversation.
 type Message struct {
-	Role       string      `json:"role"` // "system" | "user" | "assistant" | "tool"
+	Role       string      `json:"role"`    // "system" | "user" | "assistant" | "tool"
 	Content    interface{} `json:"content"` // string or []ContentPart for multimodal
 	Name       string      `json:"name,omitempty"`
 	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
@@ -93,9 +93,9 @@ type ChatCompletionResponse struct {
 
 // Choice represents a single completion choice.
 type Choice struct {
-	Index        int      `json:"index"`
-	Message      Message  `json:"message"`
-	FinishReason string   `json:"finish_reason"` // "stop" | "length" | "tool_calls"
+	Index        int     `json:"index"`
+	Message      Message `json:"message"`
+	FinishReason string  `json:"finish_reason"` // "stop" | "length" | "tool_calls"
 }
 
 // Usage reports token consumption for a request.

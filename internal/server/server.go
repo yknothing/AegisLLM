@@ -30,6 +30,13 @@ func WithMiddleware(m Middleware) Option {
 	}
 }
 
+// WithShutdownHook registers a callback run during server shutdown.
+func WithShutdownHook(hook func() error) Option {
+	return func(s *Server) {
+		s.shutdownHooks = append(s.shutdownHooks, hook)
+	}
+}
+
 // Server is the core Aegis gateway server.
 type Server struct {
 	httpServer      *http.Server
@@ -37,6 +44,7 @@ type Server struct {
 	cfg             *config.Config
 	logger          *slog.Logger
 	extraMiddleware []Middleware
+	shutdownHooks   []func() error
 }
 
 // New creates a new Aegis server with the configured middleware pipeline.
@@ -88,7 +96,17 @@ func New(cfg *config.Config, logger *slog.Logger, opts ...Option) (*Server, erro
 }
 
 // Run starts the server and blocks until the context is cancelled.
-func (s *Server) Run(ctx context.Context) error {
+func (s *Server) Run(ctx context.Context) (err error) {
+	defer func() {
+		if closeErr := s.closeResources(); closeErr != nil {
+			if err == nil {
+				err = closeErr
+			} else {
+				s.logger.Error("failed to close server resources", "error", closeErr)
+			}
+		}
+	}()
+
 	errCh := make(chan error, 1)
 
 	go func() {
@@ -118,6 +136,16 @@ func (s *Server) Run(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+func (s *Server) closeResources() error {
+	var closeErr error
+	for _, hook := range s.shutdownHooks {
+		if err := hook(); err != nil && closeErr == nil {
+			closeErr = err
+		}
+	}
+	return closeErr
 }
 
 // healthHandler returns a simple health check response.

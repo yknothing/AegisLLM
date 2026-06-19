@@ -14,6 +14,7 @@
 package middleware
 
 import (
+	"errors"
 	"net/http"
 	"regexp"
 	"sync"
@@ -43,8 +44,9 @@ type RedactionRule struct {
 
 // RedactionConfig configures the PII redaction middleware.
 type RedactionConfig struct {
-	Mode  RedactionMode
-	Rules []RedactionRule
+	Mode               RedactionMode
+	Rules              []RedactionRule
+	MaxRequestBodySize int64
 }
 
 // DefaultRedactionRules returns a set of common PII detection patterns.
@@ -100,17 +102,31 @@ func PIIRedaction(cfg RedactionConfig) server.Middleware {
 	scanner := newPIIScanner(cfg)
 
 	return func(ctx *server.RequestContext, next func()) {
-		// TODO: Read and scan request body for PII
-		// Implementation notes:
-		// 1. Read body into buffer (respecting MaxRequestBodySize)
-		// 2. Scan buffer against all enabled rules
-		// 3. Based on mode: detect/redact/block
-		// 4. If redacting, replace body with sanitized version
-		// 5. If blocking, abort with 400
+		body, err := readAndReplaceBody(ctx.Request, cfg.MaxRequestBodySize)
+		if errors.Is(err, errRequestBodyTooLarge) {
+			ctx.Abort(http.StatusRequestEntityTooLarge, []byte(`{"error":{"message":"request body too large","type":"invalid_request_error"}}`))
+			return
+		}
+		if err != nil {
+			ctx.Abort(http.StatusBadRequest, []byte(`{"error":{"message":"invalid request body","type":"invalid_request_error"}}`))
+			return
+		}
 
-		_ = scanner // Will be used in full implementation
+		findings := scanner.Scan(string(body))
+		if len(findings) == 0 {
+			next()
+			return
+		}
 
-		next()
+		switch scanner.mode {
+		case ModeDetect:
+			next()
+		case ModeBlock:
+			ctx.Abort(http.StatusBadRequest, blockErrorJSON())
+		default:
+			replaceBody(ctx.Request, []byte(scanner.Redact(string(body))))
+			next()
+		}
 	}
 }
 
@@ -127,8 +143,12 @@ func newPIIScanner(cfg RedactionConfig) *piiScanner {
 	if len(rules) == 0 {
 		rules = DefaultRedactionRules()
 	}
+	mode := cfg.Mode
+	if mode == "" {
+		mode = ModeRedact
+	}
 	return &piiScanner{
-		mode:  cfg.Mode,
+		mode:  mode,
 		rules: rules,
 	}
 }
@@ -181,6 +201,3 @@ type PIIFinding struct {
 func blockErrorJSON() []byte {
 	return []byte(`{"error":{"message":"request blocked: contains personally identifiable information","type":"content_policy_error"}}`)
 }
-
-// Ensure unused import is referenced
-var _ = http.StatusBadRequest

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -21,15 +22,17 @@ type Config struct {
 	RateLimit RateLimitConfig `json:"rate_limit"`
 	Quota     QuotaConfig     `json:"quota"`
 	Store     StoreConfig     `json:"store"`
+	Egress    EgressConfig    `json:"egress"`
 }
 
 // ServerConfig defines the HTTP server settings.
 type ServerConfig struct {
-	Address         string        `json:"address"`
-	ReadTimeout     time.Duration `json:"read_timeout"`
-	WriteTimeout    time.Duration `json:"write_timeout"`
-	ShutdownTimeout time.Duration `json:"shutdown_timeout"`
-	TLS             TLSConfig     `json:"tls"`
+	Address            string        `json:"address"`
+	ReadTimeout        time.Duration `json:"read_timeout"`
+	WriteTimeout       time.Duration `json:"write_timeout"`
+	ShutdownTimeout    time.Duration `json:"shutdown_timeout"`
+	MaxRequestBodySize int64         `json:"max_request_body_size"`
+	TLS                TLSConfig     `json:"tls"`
 }
 
 // TLSConfig defines mutual TLS settings.
@@ -65,17 +68,17 @@ type VaultConfig struct {
 // Provider defines an LLM provider channel configuration.
 // SECURITY: The api_key_id references a key stored in KMS, NOT a plaintext key.
 type Provider struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Type        string   `json:"type"` // "openai" | "anthropic" | "google" | "deepseek" | ...
-	BaseURL     string   `json:"base_url"`
-	APIKeyID    string   `json:"api_key_id"` // Reference to KMS-stored key
-	Models      []string `json:"models"`
-	Weight      int      `json:"weight"`
-	MaxRPM      int      `json:"max_rpm"`
-	MaxTPM      int      `json:"max_tpm"`
-	Enabled     bool     `json:"enabled"`
-	Priority    int      `json:"priority"`    // Lower = higher priority for fallback
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Type     string   `json:"type"` // "openai" | "anthropic" | "google" | "deepseek" | ...
+	BaseURL  string   `json:"base_url"`
+	APIKeyID string   `json:"api_key_id"` // Reference to KMS-stored key
+	Models   []string `json:"models"`
+	Weight   int      `json:"weight"`
+	MaxRPM   int      `json:"max_rpm"`
+	MaxTPM   int      `json:"max_tpm"`
+	Enabled  bool     `json:"enabled"`
+	Priority int      `json:"priority"` // Lower = higher priority for fallback
 }
 
 // AuthConfig defines authentication settings.
@@ -87,19 +90,19 @@ type AuthConfig struct {
 
 // RateLimitConfig defines rate limiting behavior.
 type RateLimitConfig struct {
-	Enabled       bool   `json:"enabled"`
-	Backend       string `json:"backend"` // "memory" | "redis"
-	RedisURL      string `json:"redis_url"`
-	DefaultRPM    int    `json:"default_rpm"`
-	DefaultTPM    int    `json:"default_tpm"`
-	DefaultMaxConcurrency int `json:"default_max_concurrency"`
+	Enabled               bool   `json:"enabled"`
+	Backend               string `json:"backend"` // "memory" | "redis"
+	RedisURL              string `json:"redis_url"`
+	DefaultRPM            int    `json:"default_rpm"`
+	DefaultTPM            int    `json:"default_tpm"`
+	DefaultMaxConcurrency int    `json:"default_max_concurrency"`
 }
 
 // QuotaConfig defines budget and cost management settings.
 type QuotaConfig struct {
-	Enabled      bool   `json:"enabled"`
-	Backend      string `json:"backend"` // "sqlite" | "mysql"
-	DSN          string `json:"dsn"`
+	Enabled       bool    `json:"enabled"`
+	Backend       string  `json:"backend"` // "sqlite" | "mysql"
+	DSN           string  `json:"dsn"`
 	DefaultBudget float64 `json:"default_budget"` // Default monthly budget in USD
 }
 
@@ -112,6 +115,109 @@ type StoreConfig struct {
 // EgressConfig defines outbound network restrictions.
 type EgressConfig struct {
 	AllowedDomains []string `json:"allowed_domains"`
+}
+
+// UnmarshalJSON accepts both Go duration nanoseconds and human-readable
+// duration strings such as "30s". Missing fields preserve existing defaults.
+func (c *ServerConfig) UnmarshalJSON(data []byte) error {
+	type serverConfigJSON struct {
+		Address            *string         `json:"address"`
+		ReadTimeout        json.RawMessage `json:"read_timeout"`
+		WriteTimeout       json.RawMessage `json:"write_timeout"`
+		ShutdownTimeout    json.RawMessage `json:"shutdown_timeout"`
+		MaxRequestBodySize *int64          `json:"max_request_body_size"`
+		TLS                *TLSConfig      `json:"tls"`
+	}
+
+	var raw serverConfigJSON
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	if raw.Address != nil {
+		c.Address = *raw.Address
+	}
+	if raw.ReadTimeout != nil {
+		d, err := parseDuration(raw.ReadTimeout, "server.read_timeout")
+		if err != nil {
+			return err
+		}
+		c.ReadTimeout = d
+	}
+	if raw.WriteTimeout != nil {
+		d, err := parseDuration(raw.WriteTimeout, "server.write_timeout")
+		if err != nil {
+			return err
+		}
+		c.WriteTimeout = d
+	}
+	if raw.ShutdownTimeout != nil {
+		d, err := parseDuration(raw.ShutdownTimeout, "server.shutdown_timeout")
+		if err != nil {
+			return err
+		}
+		c.ShutdownTimeout = d
+	}
+	if raw.MaxRequestBodySize != nil {
+		c.MaxRequestBodySize = *raw.MaxRequestBodySize
+	}
+	if raw.TLS != nil {
+		c.TLS = *raw.TLS
+	}
+
+	return nil
+}
+
+// UnmarshalJSON accepts both Go duration nanoseconds and duration strings.
+func (c *AuthConfig) UnmarshalJSON(data []byte) error {
+	type authConfigJSON struct {
+		JWTSigningKeyEnv *string         `json:"jwt_signing_key_env"`
+		TokenExpiry      json.RawMessage `json:"token_expiry"`
+		Issuer           *string         `json:"issuer"`
+	}
+
+	var raw authConfigJSON
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	if raw.JWTSigningKeyEnv != nil {
+		c.JWTSigningKeyEnv = *raw.JWTSigningKeyEnv
+	}
+	if raw.TokenExpiry != nil {
+		d, err := parseDuration(raw.TokenExpiry, "auth.token_expiry")
+		if err != nil {
+			return err
+		}
+		c.TokenExpiry = d
+	}
+	if raw.Issuer != nil {
+		c.Issuer = *raw.Issuer
+	}
+
+	return nil
+}
+
+func parseDuration(raw json.RawMessage, field string) (time.Duration, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, nil
+	}
+
+	var value string
+	if err := json.Unmarshal(raw, &value); err == nil {
+		d, parseErr := time.ParseDuration(value)
+		if parseErr != nil {
+			return 0, fmt.Errorf("%s must be a valid duration: %w", field, parseErr)
+		}
+		return d, nil
+	}
+
+	var nanos int64
+	if err := json.Unmarshal(raw, &nanos); err == nil {
+		return time.Duration(nanos), nil
+	}
+
+	return 0, fmt.Errorf("%s must be a duration string or integer nanoseconds, got %s", field, strconv.Quote(string(raw)))
 }
 
 // Load reads and validates the configuration from the given path.
@@ -154,10 +260,11 @@ func Load(path string) (*Config, error) {
 func defaultConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
-			Address:         ":8080",
-			ReadTimeout:     30 * time.Second,
-			WriteTimeout:    120 * time.Second, // Long timeout for streaming
-			ShutdownTimeout: 15 * time.Second,
+			Address:            ":8080",
+			ReadTimeout:        30 * time.Second,
+			WriteTimeout:       120 * time.Second, // Long timeout for streaming
+			ShutdownTimeout:    15 * time.Second,
+			MaxRequestBodySize: 10 << 20,
 		},
 		KMS: KMSConfig{
 			Mode: "local",

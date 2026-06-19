@@ -1,9 +1,9 @@
 // Package middleware - ratelimit.go implements the distributed rate limiter.
 //
 // DESIGN: Three-dimensional rate limiting:
-//   1. RPM (Requests Per Minute) - prevents request flooding
-//   2. TPM (Tokens Per Minute) - prevents token budget exhaustion
-//   3. Concurrency - prevents connection pool exhaustion
+//  1. RPM (Requests Per Minute) - prevents request flooding
+//  2. TPM (Tokens Per Minute) - prevents token budget exhaustion
+//  3. Concurrency - prevents connection pool exhaustion
 //
 // Backends:
 //   - "memory": In-process sliding window (standalone mode)
@@ -15,6 +15,7 @@
 package middleware
 
 import (
+	"errors"
 	"net/http"
 	"sync"
 	"time"
@@ -47,15 +48,24 @@ func RateLimiter(cfg RateLimitConfig) server.Middleware {
 			key = ctx.Request.RemoteAddr
 		}
 
+		rpmLimit := cfg.DefaultRPM
+		if ctx.MaxRPM > 0 {
+			rpmLimit = ctx.MaxRPM
+		}
+		maxConcurrency := cfg.DefaultMaxConc
+		if ctx.MaxConcurrency > 0 {
+			maxConcurrency = ctx.MaxConcurrency
+		}
+
 		// Check RPM limit
-		allowed, err := limiter.Allow(key, "rpm", cfg.DefaultRPM, time.Minute)
+		allowed, err := limiter.Allow(key, "rpm", rpmLimit, time.Minute)
 		if err != nil || !allowed {
 			ctx.Abort(http.StatusTooManyRequests, rateLimitErrorJSON("rate limit exceeded (RPM)"))
 			return
 		}
 
 		// Check concurrency limit
-		acquired, release := limiter.AcquireConcurrency(key, cfg.DefaultMaxConc)
+		acquired, release := limiter.AcquireConcurrency(key, maxConcurrency)
 		if !acquired {
 			ctx.Abort(http.StatusTooManyRequests, rateLimitErrorJSON("concurrency limit exceeded"))
 			return
@@ -88,9 +98,9 @@ type Limiter interface {
 // --- In-Memory Limiter (Standalone Mode) ---
 
 type memoryLimiter struct {
-	mu       sync.Mutex
-	windows  map[string]*slidingWindow
-	conc     map[string]*concurrencyTracker
+	mu      sync.Mutex
+	windows map[string]*slidingWindow
+	conc    map[string]*concurrencyTracker
 }
 
 type slidingWindow struct {
@@ -116,6 +126,10 @@ func newMemoryLimiter() *memoryLimiter {
 }
 
 func (m *memoryLimiter) Allow(key, dimension string, limit int, window time.Duration) (bool, error) {
+	if limit <= 0 {
+		return true, nil
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -148,6 +162,10 @@ func (m *memoryLimiter) Allow(key, dimension string, limit int, window time.Dura
 }
 
 func (m *memoryLimiter) AcquireConcurrency(key string, maxConc int) (bool, func()) {
+	if maxConc <= 0 {
+		return true, func() {}
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -213,17 +231,17 @@ func (r *redisLimiter) Allow(key, dimension string, limit int, window time.Durat
 	//     return 1
 	//   end
 	//   return 0
-	return true, nil
+	return false, errors.New("redis rate limiter backend is not implemented")
 }
 
 func (r *redisLimiter) AcquireConcurrency(key string, maxConc int) (bool, func()) {
 	// TODO: Implement Redis-based semaphore
-	return true, func() {}
+	return false, func() {}
 }
 
 func (r *redisLimiter) RecordTokens(key string, tokens int, window time.Duration) error {
 	// TODO: Implement Redis INCRBY with TTL
-	return nil
+	return errors.New("redis rate limiter backend is not implemented")
 }
 
 // rateLimitErrorJSON creates a rate limit error response.
