@@ -419,3 +419,37 @@ After each significant step:
   - Restore an approved GitHub write credential path.
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
+### Step 13 - Proxy Header and Upstream TLS Hardening
+
+- Security finding:
+  - Upstream request header forwarding was still blacklist-based, so unlisted ingress, tenant, trace, or provider-account headers could be reflected to external providers.
+  - Non-streaming upstream response headers were copied directly to clients, allowing provider `Set-Cookie`, hop-by-hop, or proxy-authentication headers to cross the gateway boundary.
+  - `internal/proxy` documented TLS 1.3 minimum for outbound connections, but the transport did not explicitly set `TLSClientConfig.MinVersion`.
+- Fix:
+  - Changed upstream request header forwarding to a minimal allowlist: `Accept`, `Content-Type`, and `User-Agent`.
+  - Added response-header filtering for `Set-Cookie`, hop-by-hop headers, and proxy-authentication headers.
+  - Set upstream `http.Transport` TLS minimum to `tls.VersionTLS13`.
+  - Added proxy tests for TLS 1.3 transport configuration, request header allowlist behavior, and unsafe upstream response header stripping.
+  - Updated `CHANGELOG.md` under `v0.2.0 - Release Candidate`.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test ./internal/proxy` passed.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=9a99d08-proxy-header-tls BUILD_DATE=2026-06-20T00:00:00Z PORT=18088` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `252.49kB`.
+    - Image `sha256:4f097811ca007b4ba1cc631f36cf786d4368d839e2fafc841dbffd6efdaeeac2`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: 9a99d08-proxy-header-tls, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Autoreview:
+  - Security architecture reviewer found the request-header blacklist and missing TLS 1.3 enforcement should be fixed before a public gateway release; both were remediated in this step.
+  - Release/operations reviewer found the dirty-tree state and missing progress record were release blockers for the current candidate; this step records the change before commit and clean-HEAD verification.
+  - Security architecture reviewer also found two remaining Auth/JWT blocking issues: weak HS256 signing-key acceptance and unused `auth.token_expiry` maximum TTL. These remain release-blocking and will be repaired in the next implementation batch.
+- Remaining gates before release-complete claim:
+  - Fix the remaining Auth/JWT release blockers.
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.

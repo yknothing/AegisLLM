@@ -16,6 +16,7 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -47,6 +48,24 @@ type Engine struct {
 	config StreamConfig
 }
 
+var allowedRequestHeaders = map[string]struct{}{
+	"Accept":       {},
+	"Content-Type": {},
+	"User-Agent":   {},
+}
+
+var blockedResponseHeaders = map[string]struct{}{
+	"Connection":          {},
+	"Keep-Alive":          {},
+	"Proxy-Authenticate":  {},
+	"Proxy-Authorization": {},
+	"Set-Cookie":          {},
+	"Te":                  {},
+	"Trailer":             {},
+	"Transfer-Encoding":   {},
+	"Upgrade":             {},
+}
+
 // NewEngine creates a new streaming proxy engine.
 func NewEngine(cfg StreamConfig) *Engine {
 	if cfg.MaxRequestBodySize <= 0 {
@@ -60,8 +79,9 @@ func NewEngine(cfg StreamConfig) *Engine {
 	transport := &http.Transport{
 		MaxIdleConnsPerHost: 100,
 		IdleConnTimeout:     90 * time.Second,
-		// TLS 1.3 minimum for outbound connections
-		// TLSClientConfig is configured per-deployment
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS13,
+		},
 	}
 
 	client := &http.Client{
@@ -206,12 +226,7 @@ func (e *Engine) streamSSE(w http.ResponseWriter, resp *http.Response) (int64, e
 
 // forwardResponse copies a non-streaming response to the client.
 func (e *Engine) forwardResponse(w http.ResponseWriter, resp *http.Response) error {
-	// Copy response headers
-	for key, values := range resp.Header {
-		for _, v := range values {
-			w.Header().Add(key, v)
-		}
-	}
+	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 
 	// Stream body without full buffering
@@ -272,27 +287,26 @@ func normalizeHost(host string) string {
 	return host
 }
 
-// copyHeaders copies safe headers from source to destination.
-// SECURITY: Strips hop-by-hop headers and sensitive headers.
+// copyHeaders copies the minimal safe client headers needed by provider APIs.
+// SECURITY: This is an allowlist so ingress, proxy, auth, cookie, trace, and
+// tenant/account headers cannot be reflected to upstream providers.
 func copyHeaders(dst, src http.Header) {
-	skipHeaders := map[string]bool{
-		"Authorization":       true, // Will be replaced with provider key
-		"Proxy-Authorization": true,
-		"X-Api-Key":           true,
-		"X-Admin-Token":       true,
-		"X-Forwarded-For":     true,
-		"X-Forwarded-Host":    true,
-		"X-Forwarded-Proto":   true,
-		"Forwarded":           true,
-		"Host":                true,
-		"Connection":          true,
-		"Transfer-Encoding":   true,
-		"Upgrade":             true,
-		"Cookie":              true,
-	}
-
 	for key, values := range src {
-		if skipHeaders[http.CanonicalHeaderKey(key)] {
+		if _, allowed := allowedRequestHeaders[http.CanonicalHeaderKey(key)]; !allowed {
+			continue
+		}
+		for _, v := range values {
+			dst.Add(key, v)
+		}
+	}
+}
+
+// copyResponseHeaders copies safe upstream response headers to the client.
+// SECURITY: Upstream hop-by-hop and credential-bearing headers are not part of
+// the gateway's client contract and must not be reflected downstream.
+func copyResponseHeaders(dst, src http.Header) {
+	for key, values := range src {
+		if _, blocked := blockedResponseHeaders[http.CanonicalHeaderKey(key)]; blocked {
 			continue
 		}
 		for _, v := range values {
