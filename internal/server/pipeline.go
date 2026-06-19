@@ -153,8 +153,9 @@ func RecoveryMiddleware(logger *slog.Logger) Middleware {
 		defer func() {
 			if r := recover(); r != nil {
 				logger.Error("panic recovered in pipeline",
-					"error", fmt.Sprintf("%v", r),
+					"panic_type", fmt.Sprintf("%T", r),
 					// SECURITY: Do NOT log request body or headers
+					// SECURITY: Do NOT log the panic value; it may contain user content or secrets
 				)
 				ctx.Abort(http.StatusInternalServerError, []byte(`{"error":"internal server error"}`))
 			}

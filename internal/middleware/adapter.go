@@ -85,8 +85,8 @@ func Adapter(registry *AdapterRegistry, providerTypes map[string]string, maxRequ
 	return func(ctx *server.RequestContext, next func()) {
 		providerType, ok := providerTypes[ctx.ProviderID]
 		if !ok {
-			// Default to OpenAI-compatible (passthrough)
-			providerType = "openai"
+			ctx.Abort(http.StatusInternalServerError, []byte(`{"error":{"message":"unsupported provider type","type":"server_error"}}`))
+			return
 		}
 
 		adapter, err := registry.Get(providerType)

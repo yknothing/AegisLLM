@@ -15,6 +15,7 @@
 package middleware
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"sync"
@@ -47,7 +48,7 @@ func RateLimiter(cfg RateLimitConfig) server.Middleware {
 
 	return func(ctx *server.RequestContext, next func()) {
 		if initErr != nil {
-			ctx.Abort(http.StatusServiceUnavailable, rateLimitUnavailableJSON(initErr.Error()))
+			ctx.Abort(http.StatusServiceUnavailable, rateLimitUnavailableJSON())
 			return
 		}
 
@@ -61,7 +62,7 @@ func RateLimiter(cfg RateLimitConfig) server.Middleware {
 			tpmLimit = ctx.MaxTPM
 		}
 		if tpmLimit > 0 {
-			ctx.Abort(http.StatusServiceUnavailable, rateLimitUnavailableJSON("token rate limiting is not implemented"))
+			ctx.Abort(http.StatusServiceUnavailable, rateLimitUnavailableJSON())
 			return
 		}
 
@@ -223,9 +224,22 @@ func (m *memoryLimiter) RecordTokens(key string, tokens int, window time.Duratio
 
 // rateLimitErrorJSON creates a rate limit error response.
 func rateLimitErrorJSON(msg string) []byte {
-	return []byte(`{"error":{"message":"` + msg + `","type":"rate_limit_error"}}`)
+	return errorResponseJSON(msg, "rate_limit_error")
 }
 
-func rateLimitUnavailableJSON(msg string) []byte {
-	return []byte(`{"error":{"message":"` + msg + `","type":"server_error"}}`)
+func rateLimitUnavailableJSON() []byte {
+	return errorResponseJSON("rate limit service unavailable", "server_error")
+}
+
+func errorResponseJSON(msg, typ string) []byte {
+	resp := struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"error"`
+	}{}
+	resp.Error.Message = msg
+	resp.Error.Type = typ
+	b, _ := json.Marshal(resp)
+	return b
 }

@@ -252,6 +252,41 @@ After each significant step:
   - Push branch and verify GitHub Actions CI green on the remote runner.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
 
+### Step 9 - Release Boundary Hardening
+
+- Security-boundary fixes from the architecture expert review:
+  - Panic recovery now logs only `panic_type` and never logs the panic value, because panic values can contain request content or secrets.
+  - Added a regression test proving panic recovery does not log a secret panic string, request body content, or the `Authorization` header value.
+  - Rate-limit unavailable responses now use structured `json.Marshal` output and return a generic `rate limit service unavailable` message instead of reflecting unsupported backend internals to clients.
+  - Added a pipeline-level regression test proving the actual HTTP response body for an unsupported rate-limit backend is valid generic JSON and does not leak backend details.
+  - Adapter middleware now fails closed when a provider ID has no provider-type mapping instead of silently defaulting to the OpenAI passthrough adapter.
+  - Added adapter tests for missing provider-type mapping and known OpenAI mapping.
+- Release/CI gate fixes from the release expert review:
+  - GitHub Actions quality job now uses `make release-preflight GO=go VERSION=ci`, aligning remote CI with the local release gate script.
+  - GitHub Actions Docker smoke now captures `/health` and asserts the response body equals `{"status":"ok"}`.
+  - README Docker example now includes `--read-only` so the documented runtime path matches the CI and Mac mini smoke contract.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test ./internal/server ./internal/middleware` passed.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=b28cfb8-dirty BUILD_DATE=2026-06-20T00:00:00Z PORT=18088` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `238.32kB`.
+    - Image `sha256:599eac4601fbca4c33e55560c76af21158571e49f54397a0ef7ce31111ad7641`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: b28cfb8-dirty, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+  - `git diff --check` passed.
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/ci.yml` passed.
+- Autoreview:
+  - Security architecture reviewer confirmed the three reported should-fix findings were remediated and found no blocking security findings.
+  - Release/operations reviewer confirmed CI health assertion, release-preflight reuse, and README read-only contract were remediated and found no new should-fix findings.
+- Remaining gates before release-complete claim:
+  - Commit this batch.
+  - Push branch and verify GitHub Actions CI green on the final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
 ### Step 8 - Reproducible Release Gate Scripts
 
 - Added `scripts/release_preflight.sh`:

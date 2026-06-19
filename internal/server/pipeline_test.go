@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/yknothing/AegisLLM/internal/utils"
@@ -83,6 +84,39 @@ func TestPipelineClosesProviderAPIKeyAfterRequest(t *testing.T) {
 	}
 	if !bytes.Equal(rawSecret, make([]byte, len(rawSecret))) {
 		t.Fatal("provider API key buffer was not zeroed")
+	}
+}
+
+func TestRecoveryMiddlewareDoesNotLogPanicValueOrRequestSecrets(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	pipeline := &Pipeline{logger: logger}
+	pipeline.Use(RecoveryMiddleware(logger))
+	pipeline.Use(func(ctx *RequestContext, next func()) {
+		panic("secret prompt sk-test-token")
+	})
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/chat/completions",
+		strings.NewReader(`{"messages":[{"content":"secret prompt"}]}`),
+	)
+	req.Header.Set("Authorization", "Bearer sk-test-token")
+
+	recorder := httptest.NewRecorder()
+	pipeline.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusInternalServerError)
+	}
+	logOutput := logs.String()
+	for _, forbidden := range []string{"secret prompt", "sk-test-token", "Authorization", "messages"} {
+		if strings.Contains(logOutput, forbidden) {
+			t.Fatalf("panic recovery log leaked %q: %s", forbidden, logOutput)
+		}
+	}
+	if !strings.Contains(logOutput, `"panic_type":"string"`) {
+		t.Fatalf("panic recovery log = %s, want panic_type", logOutput)
 	}
 }
 

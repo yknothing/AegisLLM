@@ -46,20 +46,8 @@ jobs:
           go-version: '1.26.4'
           cache: true
 
-      - name: Test
-        run: go test ./...
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Race tests
-        run: go test -race ./...
-
-      - name: Lint
-        run: make lint
-
-      - name: Security scan
-        run: make security
+      - name: Release preflight
+        run: make release-preflight GO=go VERSION=ci
 
   docker:
     name: Docker smoke
@@ -101,12 +89,15 @@ jobs:
             -e AEGIS_JWT_KEY="$(openssl rand -hex 32)" \
             -v aegis-ci-data:/var/lib/aegis \
             aegis:ci >/dev/null
+          health=''
           for _ in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:18082/health; then
+            if health=$(curl -fsS http://127.0.0.1:18082/health); then
               break
             fi
             sleep 1
           done
+          test "$health" = '{"status":"ok"}'
+          printf 'health=%s\n' "$health"
           test "$(curl -sS -o /tmp/aegis-ci-unauth -w '%{http_code}' http://127.0.0.1:18082/v1/chat/completions)" = "401"
           docker inspect aegis-ci --format 'readonly={{.HostConfig.ReadonlyRootfs}} user={{.Config.User}}'
           test "$(docker inspect aegis-ci --format '{{.HostConfig.ReadonlyRootfs}}')" = "true"

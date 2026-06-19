@@ -98,6 +98,7 @@ The image includes `/etc/aegis/aegis.json` derived from `aegis.example.json` wit
 make docker VERSION=v0.2.0-rc-local
 
 docker run --rm \
+  --read-only \
   -e AEGIS_MASTER_KEY="$(openssl rand -hex 32)" \
   -e AEGIS_JWT_KEY="$(openssl rand -hex 64)" \
   -v aegis-data:/var/lib/aegis \
