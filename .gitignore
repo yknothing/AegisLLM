@@ -29,6 +29,7 @@ go.work.sum
 *.p12
 aegis.json
 aegis.db
+aegis.keys/
 *.db
 
 # Editor/IDE

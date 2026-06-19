@@ -22,7 +22,10 @@ func TestLoadParsesDurationStrings(t *testing.T) {
 		},
 		"kms": {
 			"mode": "local",
-			"local": { "master_key_env": "AEGIS_MASTER_KEY" }
+			"local": {
+				"master_key_env": "AEGIS_MASTER_KEY",
+				"key_store_path": "aegis.keys"
+			}
 		},
 		"auth": {
 			"jwt_signing_key_env": "AEGIS_JWT_KEY",
@@ -50,5 +53,8 @@ func TestLoadParsesDurationStrings(t *testing.T) {
 	}
 	if cfg.Server.MaxRequestBodySize != 1024 {
 		t.Fatalf("max body size = %d, want 1024", cfg.Server.MaxRequestBodySize)
+	}
+	if cfg.KMS.Local.KeyStorePath != "aegis.keys" {
+		t.Fatalf("key store path = %q, want aegis.keys", cfg.KMS.Local.KeyStorePath)
 	}
 }

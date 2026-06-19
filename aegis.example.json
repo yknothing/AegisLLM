@@ -16,7 +16,8 @@
   "kms": {
     "mode": "local",
     "local": {
-      "master_key_env": "AEGIS_MASTER_KEY"
+      "master_key_env": "AEGIS_MASTER_KEY",
+      "key_store_path": "aegis.keys"
     },
     "vault": {
       "address": "https://vault.internal:8200",

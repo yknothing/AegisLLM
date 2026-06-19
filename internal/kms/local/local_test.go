@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -123,4 +124,81 @@ func TestInvalidMasterKey(t *testing.T) {
 	}
 
 	os.Unsetenv(envVar)
+}
+
+func TestFileBackendPersistsEncryptedKeys(t *testing.T) {
+	masterKeyHex := hex.EncodeToString(make([]byte, 32))
+	const envVar = "TEST_AEGIS_FILE_BACKEND_KEY"
+	t.Setenv(envVar, masterKeyHex)
+
+	dir := t.TempDir()
+	backend, err := NewFileBackend(dir)
+	if err != nil {
+		t.Fatalf("NewFileBackend returned error: %v", err)
+	}
+
+	store, err := New(envVar, backend)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	ctx := context.Background()
+
+	plaintext := []byte("sk-file-backed-key")
+	if err := store.StoreKey(ctx, "openai-key-1", plaintext); err != nil {
+		t.Fatalf("StoreKey returned error: %v", err)
+	}
+	_ = store.Close()
+
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir returned error: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("file count = %d, want 1", len(files))
+	}
+	info, err := files[0].Info()
+	if err != nil {
+		t.Fatalf("Info returned error: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("file mode = %v, want 0600", info.Mode().Perm())
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, files[0].Name()))
+	if err != nil {
+		t.Fatalf("ReadFile returned error: %v", err)
+	}
+	if string(raw) == "sk-file-backed-key" {
+		t.Fatal("file backend stored plaintext")
+	}
+
+	reopened, err := New(envVar, backend)
+	if err != nil {
+		t.Fatalf("reopen New returned error: %v", err)
+	}
+	defer reopened.Close()
+
+	key, err := reopened.GetKey(ctx, "openai-key-1")
+	if err != nil {
+		t.Fatalf("GetKey returned error: %v", err)
+	}
+	defer key.Close()
+	if string(key.Bytes()) != "sk-file-backed-key" {
+		t.Fatalf("key = %q, want persisted plaintext", string(key.Bytes()))
+	}
+
+	keyIDs, err := reopened.ListKeyIDs(ctx)
+	if err != nil {
+		t.Fatalf("ListKeyIDs returned error: %v", err)
+	}
+	if len(keyIDs) != 1 || keyIDs[0] != "openai-key-1" {
+		t.Fatalf("key IDs = %#v, want openai-key-1", keyIDs)
+	}
+
+	if err := reopened.DeleteKey(ctx, "openai-key-1"); err != nil {
+		t.Fatalf("DeleteKey returned error: %v", err)
+	}
+	if _, err := reopened.GetKey(ctx, "openai-key-1"); err == nil {
+		t.Fatal("GetKey succeeded after DeleteKey")
+	}
 }

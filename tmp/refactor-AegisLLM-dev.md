@@ -49,3 +49,17 @@ Refactor until the architecture is coherent and evidence-backed. After each sign
   - `$HOME/.cache/codex-go/go1.26.4/bin/go vet ./...` passed.
   - `$HOME/.cache/codex-go/go1.26.4/bin/go test -race ./...` passed.
   - `git diff --check` passed.
+
+### Step 3 - Local KMS File Backend
+
+- Added a local encrypted file backend for KMS blobs. The backend stores only nonce+ciphertext+GCM tag under base64url-encoded filenames.
+- Added `kms.local.key_store_path` config and runtime wiring. Empty path keeps the in-memory backend for smoke tests.
+- Added tests for file permissions, persistence across store reopens, list/delete behavior, config parsing, and runtime backend selection.
+- Updated README and architecture docs to reflect that standalone validation can use an encrypted file KMS store.
+- Live-test: started the gateway with `key_store_path=tmp/aegis-smoke-keys`, verified `/health` = 200, valid JWT with missing provider key = 503, and key-store directory mode = 700.
+- Autoreview: checked that the new backend receives encrypted blobs only, uses encoded filenames, keeps runtime plaintext-key config out of scope, and is covered by persistence/permission tests.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test ./...` passed.
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go vet ./...` passed.
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test -race ./...` passed.
+  - `git diff --check` passed.

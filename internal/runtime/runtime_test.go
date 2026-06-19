@@ -1,6 +1,10 @@
 package runtime
 
 import (
+	"context"
+	"encoding/hex"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/yknothing/AegisLLM/internal/config"
@@ -99,5 +103,36 @@ func TestProviderRuntimeRejectsUnsupportedProviderType(t *testing.T) {
 
 	if _, _, _, err := providerRuntime(cfg); err == nil {
 		t.Fatal("providerRuntime accepted an unsupported provider type")
+	}
+}
+
+func TestNewKMSProviderUsesFileBackend(t *testing.T) {
+	masterKeyHex := hex.EncodeToString(make([]byte, 32))
+	const envVar = "TEST_AEGIS_RUNTIME_FILE_KMS_KEY"
+	t.Setenv(envVar, masterKeyHex)
+
+	dir := filepath.Join(t.TempDir(), "keys")
+	provider, err := newKMSProvider(config.KMSConfig{
+		Mode: "local",
+		Local: config.LocalKMS{
+			MasterKeyEnv: envVar,
+			KeyStorePath: dir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("newKMSProvider returned error: %v", err)
+	}
+	defer provider.Close()
+
+	if err := provider.StoreKey(context.Background(), "openai-key-1", []byte("sk-runtime-file-key")); err != nil {
+		t.Fatalf("StoreKey returned error: %v", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir returned error: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("file count = %d, want 1", len(entries))
 	}
 }

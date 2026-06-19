@@ -29,8 +29,8 @@ Every feature is a middleware plugin. The core is minimal and auditable.
 
 This repository currently provides the runtime framework and a minimal OpenAI-compatible gateway path:
 
-- Implemented baseline: safe logger, config loading, middleware composition, HS256 virtual-key validation, in-memory rate limiting, PII redaction, provider routing, local in-memory KMS backend, egress allowlist validation, and streaming proxy scaffolding.
-- Explicitly not production-ready yet: persistent key store, Admin API key issuance, Vault KMS, Redis rate limiter, quota enforcement, and non-OpenAI protocol transformations.
+- Implemented baseline: safe logger, config loading, middleware composition, HS256 virtual-key validation, in-memory rate limiting, PII redaction, provider routing, local encrypted file KMS backend, egress allowlist validation, and streaming proxy scaffolding.
+- Explicitly not production-ready yet: Admin API key issuance, Vault KMS, Redis rate limiter, quota enforcement, and non-OpenAI protocol transformations.
 - Fail-fast behavior: unsupported Vault KMS and Redis limiter modes are rejected instead of silently running without controls.
 
 ## Development Smoke
@@ -71,7 +71,7 @@ response = client.chat.completions.create(
 | OpenAI-compatible `/v1/chat/completions` path | Baseline framework implemented |
 | Virtual key auth | HS256 validation implemented; RS256 is planned |
 | Provider support | `openai` and OpenAI-compatible `deepseek` enabled; Anthropic/Gemini fail closed until adapters are implemented |
-| KMS | Local AES-GCM interface and in-memory backend implemented; persistent local store and Vault are planned |
+| KMS | Local AES-GCM interface with in-memory and encrypted file backends implemented; Vault is planned |
 | Rate limiting | In-memory RPM and concurrency baseline implemented; TPM and Redis are planned |
 | PII protection | Regex-based request redaction baseline implemented |
 | Cost management | Pricing/quota modules scaffolded; runtime enforcement is planned |
@@ -84,7 +84,7 @@ response = client.chat.completions.create(
 | Mode | Dependencies | Use Case |
 | :--- | :--- | :--- |
 | **Framework Smoke** | Local env vars + in-memory KMS | Development validation |
-| **Standalone** | Persistent local KMS store | Planned |
+| **Standalone** | Local env vars + encrypted file KMS store | Development and small-team validation |
 | **Cluster** | Redis + Vault + durable quota store | Planned |
 
 ## Security

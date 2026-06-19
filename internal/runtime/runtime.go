@@ -114,7 +114,15 @@ func NewServer(cfg *config.Config, logger *slog.Logger) (*server.Server, error) 
 func newKMSProvider(cfg config.KMSConfig) (kms.Provider, error) {
 	switch cfg.Mode {
 	case "local":
-		return local.New(cfg.Local.MasterKeyEnv, local.NewMemoryBackend())
+		backend := local.Backend(local.NewMemoryBackend())
+		if cfg.Local.KeyStorePath != "" {
+			fileBackend, err := local.NewFileBackend(cfg.Local.KeyStorePath)
+			if err != nil {
+				return nil, err
+			}
+			backend = fileBackend
+		}
+		return local.New(cfg.Local.MasterKeyEnv, backend)
 	case "vault":
 		return nil, fmt.Errorf("vault KMS backend is not implemented")
 	default:

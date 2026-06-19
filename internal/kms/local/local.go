@@ -50,6 +50,10 @@ type Backend interface {
 // The master key is read from the specified environment variable.
 // SECURITY: The env var value is immediately copied and the original is not retained.
 func New(masterKeyEnv string, backend Backend) (*Store, error) {
+	if backend == nil {
+		return nil, errors.New("local KMS backend is required")
+	}
+
 	masterKeyHex := os.Getenv(masterKeyEnv)
 	if masterKeyHex == "" {
 		return nil, fmt.Errorf("%w: env var %q is empty", kms.ErrInvalidMasterKey, masterKeyEnv)

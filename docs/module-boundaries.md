@@ -77,5 +77,5 @@ Invariants:
 | Add a Redis limiter | `internal/middleware/ratelimit.go`, runtime config mapping | Isolated |
 | Add RS256 virtual keys | `internal/middleware/auth.go`, config, tests | Isolated if auth interface stays stable |
 | Add Anthropic request conversion | `internal/middleware/adapter.go`, adapter tests | Isolated |
-| Move local KMS from memory to SQLite | `internal/kms/local`, runtime backend wiring | Isolated |
+| Move local KMS from file blobs to SQLite | `internal/kms/local`, runtime backend wiring | Isolated |
 | Change middleware order | ADR, `internal/runtime`, order tests | Requires architecture review |

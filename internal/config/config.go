@@ -56,6 +56,7 @@ type KMSConfig struct {
 // The master key MUST be provided via environment variable, never in config files.
 type LocalKMS struct {
 	MasterKeyEnv string `json:"master_key_env"` // Name of env var holding the master key
+	KeyStorePath string `json:"key_store_path"` // Directory for encrypted local key blobs
 }
 
 // VaultConfig configures HashiCorp Vault integration.
