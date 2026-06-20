@@ -2,7 +2,7 @@
 
 All notable changes to AegisLLM are documented here.
 
-## v0.2.0 - Release Candidate
+## v0.2.0 - 2026-06-21
 
 ### Security hardening
 

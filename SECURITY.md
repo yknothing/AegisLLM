@@ -59,13 +59,12 @@ Contributors MUST follow these rules:
 
 ## Supported Versions
 
-No stable version is supported yet. The current release candidate is `v0.2.0`,
-but it must not be treated as a supported release until the release branch has
-been pushed, GitHub Actions are green, and the `v0.2.0` tag has been created.
-The detailed release gates are tracked in
+The `v0.2.0` tag is the first supported AegisLLM release line. It is supported
+only when the tag points to a commit whose release branch was pushed, whose
+GitHub Actions run was green, and whose final release gates are recorded in
 [docs/release-plan-v0.2.0.md](docs/release-plan-v0.2.0.md).
 
 | Version | Supported |
 | :--- | :---: |
-| `v0.2.0` release candidate | No |
+| `v0.2.0` | Yes |
 | `v0.1.0` scaffold baseline | No |

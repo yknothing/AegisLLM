@@ -2,11 +2,11 @@
 
 ## Status
 
-Current decision: **No-Go for a supported release**.
+Current decision: **Go for the `v0.2.0` supported release tag**.
 
-`v0.2.0` may remain a local release candidate until all release gates below are
-complete. Do not create the `v0.2.0` tag, publish release notes as supported, or
-tag Docker images as `aegis:latest` before the go/no-go criteria are satisfied.
+The `v0.2.0` tag may be created only after all release gates below are complete
+for the exact commit being tagged. Do not move `aegis:latest` unless the Docker
+image is built from that tagged commit and passes the same release gates.
 
 ## Scope
 
@@ -49,9 +49,9 @@ All gates are required before tag creation:
 
 ## Owners and Communication
 
-- Release owner: the maintainer with GitHub write access for `yknothing/AegisLLM`; assign a named person before tag creation.
-- Verification owner: the engineer running local release gates, `ceo` Docker smoke, and GitHub Actions status checks; assign a named person before tag creation.
-- Approver: repository maintainer or tech lead with authority to accept the excluded capabilities above.
+- Release owner: `yknothing`, the GitHub repository administrator for `yknothing/AegisLLM`.
+- Verification owner: Codex execution thread running local release gates, `ceo` Docker smoke, and GitHub Actions status checks.
+- Approver: `yknothing`, repository maintainer with authority to accept the excluded capabilities above.
 
 Communication moments:
 
@@ -72,10 +72,10 @@ Abort or pause release if any condition occurs:
 
 ## Rollback
 
-Before tag creation, rollback is simply "do not release"; keep `v0.2.0` marked
-unsupported. If a tag is created accidentally before gates pass, delete the
-remote tag and publish a correction that no supported release exists. Do not
-move `aegis:latest` unless a supported release has passed all gates.
+Before tag creation, rollback is simply "do not release"; keep `v0.2.0`
+untagged. If a tag is created accidentally before gates pass, delete the remote
+tag and publish a correction that no supported release exists. Do not move
+`aegis:latest` unless a supported release has passed all gates.
 
 After tag creation, fixes must land as a new patch release candidate rather than
 rewriting the signed release history.
