@@ -46,6 +46,41 @@ func TestProviderRuntimeAcceptsExplicitEgressDomains(t *testing.T) {
 	}
 }
 
+func TestExampleConfigEgressMatchesEnabledRuntimeProviders(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+
+	cfg, err := config.Load(filepath.Join("..", "..", "aegis.example.json"))
+	if err != nil {
+		t.Fatalf("Load example config returned error: %v", err)
+	}
+	if _, _, _, err := providerRuntime(cfg); err != nil {
+		t.Fatalf("providerRuntime rejected example config: %v", err)
+	}
+
+	enabledHosts := make(map[string]struct{})
+	for _, provider := range cfg.Providers {
+		if !provider.Enabled {
+			t.Fatalf("example provider %q is disabled; keep future providers out of the current runtime example", provider.ID)
+		}
+		if !isSupportedProviderType(provider.Type) {
+			t.Fatalf("example provider %q type %q is not supported by v0.2.0 runtime", provider.ID, provider.Type)
+		}
+		host, err := providerHost(provider.BaseURL)
+		if err != nil {
+			t.Fatalf("example provider %q base_url rejected: %v", provider.ID, err)
+		}
+		enabledHosts[host] = struct{}{}
+	}
+
+	allowedHosts := make(map[string]struct{})
+	for _, host := range cfg.Egress.AllowedDomains {
+		allowedHosts[host] = struct{}{}
+	}
+	if !reflect.DeepEqual(allowedHosts, enabledHosts) {
+		t.Fatalf("example egress allowlist = %#v, want enabled provider hosts %#v", allowedHosts, enabledHosts)
+	}
+}
+
 func TestProviderRuntimeRejectsHTTPProvider(t *testing.T) {
 	cfg := &config.Config{
 		Providers: []config.Provider{

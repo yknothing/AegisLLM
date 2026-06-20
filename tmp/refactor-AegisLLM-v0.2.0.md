@@ -348,6 +348,36 @@ After each significant step:
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
 
+### Step 29 - Example Config Egress Truth Surface
+
+- Architecture/security finding:
+  - The example config and Docker default config still carried a disabled Anthropic provider placeholder and `api.anthropic.com` in the egress allowlist.
+  - Runtime skipped the disabled provider, so this was not a release blocker, but it weakened the `v0.2.0` truth surface: the default allowlist included a non-current provider host while the release scope only supports `openai` and OpenAI-compatible `deepseek`.
+- Fix:
+  - Removed the disabled Anthropic provider placeholder from `aegis.example.json`.
+  - Removed `api.anthropic.com` from the example/Docker default egress allowlist.
+  - Added `TestExampleConfigEgressMatchesEnabledRuntimeProviders` so the example config must contain only enabled runtime-supported providers and its egress allowlist must exactly match those enabled provider hosts.
+  - Updated `CHANGELOG.md` under `v0.2.0 - Release Candidate`.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test -count=1 ./internal/runtime ./internal/config` passed.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=6c20c45-example-egress-truth BUILD_DATE=2026-06-20T00:00:00Z PORT=18112` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `307.11kB`.
+    - Image `sha256:dacbfc4c7c7fd22b117f12d7747ed088b7a41856f2505478fb27c298c925f621`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: 6c20c45-example-egress-truth, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Autoreview:
+  - Architecture expert Gibbs found no release blocker or should-fix, confirmed the diff aligns with README/release-plan provider scope, and confirmed the regression test constrains only the example/Docker default truth surface rather than custom configs.
+  - Security expert Nash found no release blocker or should-fix, confirmed the Docker default allowlist is narrowed, and found no new leakage or fail-open surface.
+- Remaining gates before release-complete claim:
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
 ### Step 28 - Architecture Truth-Surface Follow-Up Cleanup
 
 - Architecture/security finding:

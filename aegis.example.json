@@ -35,19 +35,6 @@
       "priority": 1
     },
     {
-      "id": "anthropic-primary",
-      "name": "Anthropic Primary",
-      "type": "anthropic",
-      "base_url": "https://api.anthropic.com",
-      "api_key_id": "anthropic-key-1",
-      "models": ["claude-sonnet-4-20250514", "claude-haiku-3-5"],
-      "weight": 10,
-      "max_rpm": 0,
-      "max_tpm": 0,
-      "enabled": false,
-      "priority": 1
-    },
-    {
       "id": "deepseek-primary",
       "name": "DeepSeek Primary",
       "type": "deepseek",
@@ -79,7 +66,6 @@
   "egress": {
     "allowed_domains": [
       "api.openai.com",
-      "api.anthropic.com",
       "api.deepseek.com"
     ]
   }

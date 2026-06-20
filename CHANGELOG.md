@@ -31,6 +31,7 @@ All notable changes to AegisLLM are documented here.
 - Added a local encrypted file-backed KMS backend for standalone validation.
 - Added a runtime composition root that wires the middleware pipeline in the ADR-004 order.
 - Added Docker image defaults for `/etc/aegis/aegis.json` and `/var/lib/aegis`.
+- Removed the disabled Anthropic placeholder and unused `api.anthropic.com` egress entry from the example/Docker default config so the default allowlist matches enabled runtime providers.
 - Updated Docker builds to use target platform arguments so the compiled binary architecture matches the image architecture.
 - Added `.dockerignore` to keep VCS metadata, local secrets, key stores, coverage, and scratch files out of Docker build contexts.
 - Pinned Makefile-installed security tooling versions.
