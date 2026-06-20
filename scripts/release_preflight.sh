@@ -11,9 +11,9 @@ if [ "${ALLOW_DIRTY:-}" != "1" ] && [ -n "$(git status --porcelain)" ]; then
   exit 1
 fi
 
-"$GO_BIN" test ./...
+"$GO_BIN" test -count=1 ./...
 "$GO_BIN" vet ./...
-"$GO_BIN" test -race ./...
+"$GO_BIN" test -race -count=1 ./...
 make lint GO="$GO_BIN"
 make security GO="$GO_BIN"
 "$GO_BIN" run "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}" .github/workflows/ci.yml
@@ -29,5 +29,7 @@ fi
 latest_tags=$(make -n docker VERSION="$VERSION" DOCKER_TAG_LATEST=true)
 printf '%s\n' "$latest_tags" | grep -F -- "-t aegis:${VERSION}" >/dev/null
 printf '%s\n' "$latest_tags" | grep -F -- "-t aegis:latest" >/dev/null
+
+GO="$GO_BIN" VERSION="$VERSION" scripts/local_smoke.sh
 
 echo "release preflight passed"

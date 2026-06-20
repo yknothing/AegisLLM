@@ -38,13 +38,14 @@ Explicitly excluded:
 All gates are required before tag creation:
 
 1. Local worktree is clean on `codex/aegis-architecture-refactor`.
-2. `make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passes.
-3. `make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=<sha> BUILD_DATE=<utc-rfc3339> PORT=<free-port>` passes on `ssh ceo`.
-4. Branch is pushed to GitHub without rewriting the local clean commit sequence.
-5. GitHub Actions CI is green for the exact commit that will be tagged.
-6. `SECURITY.md` still says no stable version is supported before the tag.
-7. `CHANGELOG.md` and README describe the release candidate truthfully.
-8. Release owner, verifier, and approver are assigned by name before the tag.
+2. `make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passes with uncached Go tests and local process smoke.
+3. `make local-smoke GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local COMMIT=<sha> PORT=<free-port>` passes against the exact clean candidate SHA.
+4. `make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=<sha> BUILD_DATE=<utc-rfc3339> PORT=<free-port>` passes on `ssh ceo` against the exact clean candidate SHA.
+5. Branch is pushed to GitHub without rewriting the local clean commit sequence.
+6. GitHub Actions CI is green for the exact commit that will be tagged.
+7. `SECURITY.md` still says no stable version is supported before the tag.
+8. `CHANGELOG.md` and README describe the release candidate truthfully.
+9. Release owner, verifier, and approver are assigned by name before the tag.
 
 ## Owners and Communication
 

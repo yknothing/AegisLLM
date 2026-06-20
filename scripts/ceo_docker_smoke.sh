@@ -3,14 +3,33 @@ set -eu
 
 REMOTE_HOST=${REMOTE_HOST:-ceo}
 VERSION=${VERSION:-v0.2.0-docker-test}
-COMMIT=${COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo workspace)}
 BUILD_DATE=${BUILD_DATE:-2026-06-20T00:00:00Z}
 REMOTE_DOCKER_PATH='/Applications/Docker.app/Contents/Resources/bin:$PATH'
 
-if [ "${ALLOW_DIRTY:-}" != "1" ] && [ -n "$(git status --porcelain)" ]; then
+HEAD_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+COMMIT_PROVIDED=${COMMIT+x}
+GIT_STATUS=$(git status --porcelain 2>/dev/null || true)
+if [ "${ALLOW_DIRTY:-}" != "1" ] && [ -n "$GIT_STATUS" ]; then
   echo "ceo docker smoke requires a clean worktree; set ALLOW_DIRTY=1 to override" >&2
   git status --short >&2
   exit 1
+fi
+if [ -n "$GIT_STATUS" ]; then
+  if [ -z "${COMMIT_PROVIDED:-}" ] || [ "${COMMIT:-}" = "$HEAD_COMMIT" ]; then
+    COMMIT="workspace-${HEAD_COMMIT}"
+  fi
+  case "$COMMIT" in
+    workspace-"${HEAD_COMMIT}"*) ;;
+    *) echo "dirty ceo docker smoke COMMIT must start with workspace-${HEAD_COMMIT}" >&2; exit 1 ;;
+  esac
+else
+  if [ -z "${COMMIT_PROVIDED:-}" ]; then
+    COMMIT="$HEAD_COMMIT"
+  fi
+  if [ "$COMMIT" != "$HEAD_COMMIT" ]; then
+    echo "clean ceo docker smoke COMMIT must equal current HEAD ${HEAD_COMMIT}" >&2
+    exit 1
+  fi
 fi
 
 case "$REMOTE_HOST" in
@@ -99,7 +118,12 @@ docker cp "$cid:/aegis" "$bin_copy"
 docker rm "$cid" >/dev/null
 cid=''
 file "$bin_copy"
-docker run --rm "$IMAGE" --version
+version_output=$(docker run --rm "$IMAGE" --version)
+case "$version_output" in
+  *"commit: ${COMMIT}"*) ;;
+  *) echo "docker version output did not include expected commit ${COMMIT}: ${version_output}" >&2; exit 1 ;;
+esac
+printf '%s\n' "$version_output"
 
 echo "== readonly_runtime =="
 docker volume create "$VOLUME" >/dev/null

@@ -38,6 +38,12 @@ This repository currently provides the runtime framework and a minimal OpenAI-co
 ## Development Smoke
 
 ```bash
+make local-smoke GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local
+```
+
+For manual smoke testing:
+
+```bash
 # Generate a 256-bit master key for local KMS
 export AEGIS_MASTER_KEY=$(openssl rand -hex 32)
 export AEGIS_JWT_KEY=$(openssl rand -hex 64)

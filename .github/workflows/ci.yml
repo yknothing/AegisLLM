@@ -27,7 +27,7 @@ jobs:
           cache: true
 
       - name: Test
-        run: go test ./...
+        run: go test -count=1 ./...
 
       - name: Vet
         run: go vet ./...
@@ -73,6 +73,12 @@ jobs:
           test "$(docker image inspect aegis:ci --format '{{.Config.User}}')" = "nonroot:nonroot"
           test "$(docker image inspect aegis:ci --format '{{json .Config.Entrypoint}}')" = '["/aegis"]'
           test "$(docker image inspect aegis:ci --format '{{json .Config.Cmd}}')" = '["--config","/etc/aegis/aegis.json"]'
+          version_output="$(docker run --rm aegis:ci --version)"
+          case "$version_output" in
+            *"commit: ${GITHUB_SHA}"*) ;;
+            *) echo "version output did not include expected commit ${GITHUB_SHA}: ${version_output}" >&2; exit 1 ;;
+          esac
+          printf '%s\n' "$version_output"
 
       - name: Run read-only smoke
         run: |

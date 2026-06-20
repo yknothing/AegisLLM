@@ -51,8 +51,8 @@ All notable changes to AegisLLM are documented here.
 ### Required verification gates before tag
 
 - `make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local`
+- `make local-smoke GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local COMMIT=<candidate-sha> PORT=<free-port>`
 - `make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=<candidate-sha> BUILD_DATE=<utc-build-date> PORT=<free-port>`
 - GitHub Actions CI on the final pushed SHA before tag creation
 - `actionlint`
-- Local process `/health` smoke
 - Mac mini Docker build and read-only container `/health` smoke

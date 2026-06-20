@@ -387,6 +387,50 @@ After each significant step:
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
 
+### Step 35 - Release Evidence Gate Hardening
+
+- Release engineering finding:
+  - `ceo-docker-smoke` accepted arbitrary `COMMIT` strings, so Docker `--version` evidence was not bound to the current commit.
+  - `release-preflight` used cacheable Go test invocations, which weakened fresh release evidence.
+  - `CHANGELOG.md` required local process `/health` smoke, but there was no reusable `make local-smoke` gate.
+- Fix:
+  - Added `scripts/local_smoke.sh` and `make local-smoke` to build a temporary binary, run a temporary config/key-store, verify `--version` includes the expected commit marker, verify `/health`, and verify unauthenticated `/v1/chat/completions` returns `401`.
+  - Changed `release-preflight` to run `go test -count=1 ./...`, `go test -race -count=1 ./...`, and the new local smoke gate.
+  - Updated GitHub Actions Go 1.22 compatibility testing to use `go test -count=1 ./...`.
+  - Tightened `ceo-docker-smoke` and `local-smoke` commit evidence:
+    - clean worktree requires `COMMIT` to equal current `git rev-parse --short HEAD`;
+    - dirty `ALLOW_DIRTY=1` smoke uses or requires `workspace-<HEAD>` prefix instead of arbitrary labels.
+  - Added explicit Docker artifact version assertions:
+    - `ceo-docker-smoke` now fails if `docker run --rm "$IMAGE" --version` does not include `commit: ${COMMIT}`;
+    - CI Docker inspection now fails if the built image version does not include `commit: ${GITHUB_SHA}`.
+  - Updated README, CHANGELOG, and release plan so local smoke has a reproducible command.
+- Verification:
+  - `sh -n scripts/local_smoke.sh scripts/release_preflight.sh scripts/ceo_docker_smoke.sh` passed.
+  - `ALLOW_DIRTY=1 PORT=18121 make local-smoke GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed with `version=aegis v0.2.0-rc-local (commit: workspace-8ddde5f, built: 2026-06-20T15:06:07Z)`, `health={"status":"ok"}`, and `unauth_status=401`.
+  - `ALLOW_DIRTY=1 COMMIT=workspace PORT=18122 GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local scripts/local_smoke.sh` failed fast as expected with `dirty local smoke COMMIT must start with workspace-8ddde5f`.
+  - `ALLOW_DIRTY=1 COMMIT=workspace VERSION=v0.2.0-docker-test BUILD_DATE=2026-06-20T00:00:00Z PORT=18122 scripts/ceo_docker_smoke.sh` failed fast as expected with `dirty ceo docker smoke COMMIT must start with workspace-8ddde5f`.
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/ci.yml` passed.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed after the Docker artifact version assertion fix, including uncached package tests, uncached race tests, `golangci-lint`, `govulncheck`, `gosec`, actionlint, Docker tag checks, and local smoke output `version=aegis v0.2.0-rc-local (commit: workspace-8ddde5f, built: 2026-06-20T15:18:49Z)`, `health={"status":"ok"}`, `unauth_status=401`.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test BUILD_DATE=2026-06-20T00:00:00Z PORT=18127` passed on `ssh ceo` after the Docker artifact version assertion fix.
+  - `ceo-docker-smoke` evidence:
+    - host: `Mac-mini.local`;
+    - Docker version: `29.1.3`;
+    - Docker arch: `aarch64`;
+    - image id: `sha256:ee2676562f7be87ddffa101843b65da939536d7a10d45c69aee0413528a7910f`;
+    - version assertion output: `aegis v0.2.0-docker-test (commit: workspace-8ddde5f, built: 2026-06-20T00:00:00Z)`;
+    - `health={"status":"ok"}`;
+    - `unauth_status=401`;
+    - `readonly_runtime=true`;
+    - `user=nonroot:nonroot`.
+- Expert review input:
+  - Release/CI expert identified the three release evidence gate issues fixed in this step.
+  - Architecture/security expert identified additional next candidates: provider ID uniqueness, strict unknown config fields, and local KMS existing-directory permissions. These are not part of this batch to keep the change bounded.
+  - Final code-review and security-audit agents found one should-fix after the first implementation pass: Docker/CI had to assert image `--version` commit evidence rather than only print it. That should-fix was implemented and reverified by release preflight plus `ssh ceo` Docker smoke.
+- Remaining gates before release-complete claim:
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
 ### Step 33 - Bounded SSE Scanner Line Limit
 
 - Architecture/reliability finding:
