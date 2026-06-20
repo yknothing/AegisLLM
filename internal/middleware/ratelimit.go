@@ -46,6 +46,10 @@ func RateLimiter(cfg RateLimitConfig) server.Middleware {
 		initErr = errors.New("unsupported rate limiter backend: " + cfg.Backend)
 	}
 
+	return rateLimiter(cfg, limiter, initErr)
+}
+
+func rateLimiter(cfg RateLimitConfig, limiter Limiter, initErr error) server.Middleware {
 	return func(ctx *server.RequestContext, next func()) {
 		if initErr != nil {
 			ctx.Abort(http.StatusServiceUnavailable, rateLimitUnavailableJSON())
@@ -91,12 +95,6 @@ func RateLimiter(cfg RateLimitConfig) server.Middleware {
 		defer release()
 
 		next()
-
-		// Reserved hook for future TPM reconciliation.
-		totalTokens := ctx.InputTokens + ctx.OutputTokens
-		if totalTokens > 0 {
-			_ = limiter.RecordTokens(key, totalTokens, time.Minute)
-		}
 	}
 }
 
@@ -108,9 +106,6 @@ type Limiter interface {
 	// AcquireConcurrency attempts to acquire a concurrency slot.
 	// Returns true and a release function if successful.
 	AcquireConcurrency(key string, maxConc int) (acquired bool, release func())
-
-	// RecordTokens is reserved for future TPM tracking.
-	RecordTokens(key string, tokens int, window time.Duration) error
 }
 
 // --- In-Memory Limiter (Standalone Mode) ---
@@ -123,7 +118,6 @@ type memoryLimiter struct {
 
 type slidingWindow struct {
 	counts []timestampedCount
-	window time.Duration
 }
 
 type timestampedCount struct {
@@ -154,7 +148,7 @@ func (m *memoryLimiter) Allow(key, dimension string, limit int, window time.Dura
 	compositeKey := key + ":" + dimension
 	sw, ok := m.windows[compositeKey]
 	if !ok {
-		sw = &slidingWindow{window: window}
+		sw = &slidingWindow{}
 		m.windows[compositeKey] = sw
 	}
 
@@ -205,21 +199,6 @@ func (m *memoryLimiter) AcquireConcurrency(key string, maxConc int) (bool, func(
 	}
 
 	return true, release
-}
-
-func (m *memoryLimiter) RecordTokens(key string, tokens int, window time.Duration) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	compositeKey := key + ":tpm"
-	sw, ok := m.windows[compositeKey]
-	if !ok {
-		sw = &slidingWindow{window: window}
-		m.windows[compositeKey] = sw
-	}
-
-	sw.counts = append(sw.counts, timestampedCount{time: time.Now(), count: tokens})
-	return nil
 }
 
 // rateLimitErrorJSON creates a rate limit error response.

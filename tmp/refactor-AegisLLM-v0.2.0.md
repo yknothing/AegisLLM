@@ -348,6 +348,44 @@ After each significant step:
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
 
+### Step 23 - Reserved TPM Token Retention Removal
+
+- Security/architecture finding:
+  - Old `v0.2.0-rc` behavior still inherited a `v0.1.0`-style reserved TPM reconciliation hook.
+  - Even though non-zero TPM configuration and claims fail closed in `v0.2.0`, successful requests still appended `ctx.InputTokens + ctx.OutputTokens` into an in-memory `:tpm` window.
+  - That state had no enforcement path, no read path, and no eviction path because TPM enforcement is reserved, making it a no-benefit process-lifetime memory growth surface.
+- Fix:
+  - Removed the post-`next()` reserved TPM token-accounting hook.
+  - Removed `Limiter.RecordTokens`, the memory `:tpm` append implementation, and the unused `slidingWindow.window` field.
+  - Added a package-private `rateLimiter` injection point only for testing the existing middleware behavior.
+  - Added regression coverage proving that when `DefaultTPM=0` and `ctx.MaxTPM=0`, downstream `InputTokens`/`OutputTokens` updates do not cause any TPM limiter path; the runtime still executes only RPM and concurrency limiting.
+  - Updated `CHANGELOG.md` under `v0.2.0 - Release Candidate`.
+- New `v0.2.0` behavior:
+  - TPM remains reserved and non-zero TPM still fails closed.
+  - Token counts are still available as request metadata, but the rate limiter does not retain token-accounting state until TPM enforcement is actually implemented.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test ./internal/middleware` passed.
+  - `rg -n "RecordTokens|:tpm|Reserved hook" internal/middleware internal` returned no matches.
+  - `git diff --check` passed.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=290ab5f-tpm-token-retention-fix BUILD_DATE=2026-06-20T00:00:00Z PORT=18104` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `290.00kB`.
+    - Image `sha256:5325c73e328435ba24de8ead18e3188090a7c7ebf5487cd1fe5b1493d3997ad1`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: 290ab5f-tpm-token-retention-fix, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Autoreview:
+  - Security expert A found the old reserved TPM retention to be release-before-fix because it appended per-token-count records with no enforcement/read/eviction path; it recommended stopping token retention rather than adding a cap to an unimplemented feature.
+  - Architecture/security expert B found no release-blocking or should-fix issues after the fix, confirmed the `v0.2.0` old-to-new contract alignment, and judged the test injection point narrow enough because it remains package-private and does not expand the public API.
+  - Mainline self-review confirmed this removes the only `RecordTokens`/`:tpm` runtime path while preserving existing non-zero TPM fail-closed behavior.
+- Remaining gates before release-complete claim:
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
 ### Step 20 - Reserved Runtime Config Truth-Surface Tightening
 
 - Architecture finding:

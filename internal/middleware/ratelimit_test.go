@@ -8,10 +8,33 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yknothing/AegisLLM/internal/config"
 	"github.com/yknothing/AegisLLM/internal/server"
 )
+
+type recordingLimiter struct {
+	allowDimensions []string
+	concurrencyKeys []string
+}
+
+const (
+	tokenRetentionTestRPM            = 60
+	tokenRetentionTestMaxConcurrency = 1
+	tokenRetentionTestInputTokens    = 11
+	tokenRetentionTestOutputTokens   = 13
+)
+
+func (r *recordingLimiter) Allow(_ string, dimension string, _ int, _ time.Duration) (bool, error) {
+	r.allowDimensions = append(r.allowDimensions, dimension)
+	return true, nil
+}
+
+func (r *recordingLimiter) AcquireConcurrency(key string, _ int) (bool, func()) {
+	r.concurrencyKeys = append(r.concurrencyKeys, key)
+	return true, func() {}
+}
 
 func TestRateLimiterFailsClosedForTPMClaims(t *testing.T) {
 	ctx := &server.RequestContext{
@@ -38,6 +61,38 @@ func TestRateLimiterFailsClosedForTPMClaims(t *testing.T) {
 	}
 	if ctx.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d", ctx.StatusCode, http.StatusServiceUnavailable)
+	}
+}
+
+func TestRateLimiterDoesNotRetainTokenUsageWhileTPMReserved(t *testing.T) {
+	ctx := &server.RequestContext{
+		Request:      httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		VirtualKeyID: "vk_test",
+	}
+	limiter := &recordingLimiter{}
+
+	calledNext := false
+	rateLimiter(RateLimitConfig{
+		DefaultRPM:     tokenRetentionTestRPM,
+		DefaultTPM:     0,
+		DefaultMaxConc: tokenRetentionTestMaxConcurrency,
+	}, limiter, nil)(ctx, func() {
+		calledNext = true
+		ctx.InputTokens = tokenRetentionTestInputTokens
+		ctx.OutputTokens = tokenRetentionTestOutputTokens
+	})
+
+	if !calledNext {
+		t.Fatal("RateLimiter did not call next for a supported RPM/concurrency request")
+	}
+	if ctx.IsAborted() {
+		t.Fatalf("RateLimiter aborted request with status %d", ctx.StatusCode)
+	}
+	if len(limiter.allowDimensions) != 1 || limiter.allowDimensions[0] != "rpm" {
+		t.Fatalf("allow dimensions = %v, want only rpm", limiter.allowDimensions)
+	}
+	if len(limiter.concurrencyKeys) != 1 || limiter.concurrencyKeys[0] != "vk_test" {
+		t.Fatalf("concurrency keys = %v, want [vk_test]", limiter.concurrencyKeys)
 	}
 }
 
