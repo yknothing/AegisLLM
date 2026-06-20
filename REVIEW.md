@@ -37,10 +37,13 @@ The previous architecture review found several Redis-like gaps where documents, 
 
 ## Acceptance Evidence
 
-Run before claiming this remediation complete:
+Run before claiming local remediation complete:
 
 ```bash
-go test ./...
-go vet ./...
-go test -race ./...
+make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local
+make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=<candidate-sha> BUILD_DATE=<utc-build-date> PORT=<free-port>
 ```
+
+Do not claim a supported release until the branch is pushed, GitHub Actions are
+green on the final SHA, ownership is assigned in `docs/release-plan-v0.2.0.md`,
+and the `v0.2.0` tag is created.

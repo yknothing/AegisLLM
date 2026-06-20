@@ -9,7 +9,7 @@
 // SECURITY:
 //   - The admin API MUST be served on a separate port or behind mTLS
 //   - Admin endpoints require a separate admin token (not a Virtual Key)
-//   - All admin operations are audit-logged
+//   - Route-level audit logging must be implemented before mounting this scaffold
 //   - BYOK key submission must be the only path for user keys to enter the system once implemented
 //
 // Current runtime note: cmd/aegis does not mount this handler, and mutating
@@ -61,7 +61,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/keys/byok", h.authMiddleware(h.registerBYOK))
 	mux.HandleFunc("DELETE /admin/keys/byok/{id}", h.authMiddleware(h.deleteBYOK))
 	mux.HandleFunc("GET /admin/usage/{keyId}", h.authMiddleware(h.getUsage))
-	mux.HandleFunc("GET /admin/health", h.healthCheck)
+	mux.HandleFunc("GET /admin/health", h.authMiddleware(h.healthCheck))
 }
 
 // --- BYOK Endpoints ---

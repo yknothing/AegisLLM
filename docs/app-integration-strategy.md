@@ -24,8 +24,8 @@ The target hybrid model provides zero-friction onboarding while offering flexibi
 
 | Tier | Key Source | Quota | Model Access |
 | :--- | :--- | :--- | :--- |
-| Free | Server pool | Strict (e.g., 10 req/day) | Lightweight models only |
-| Pro (Subscription) | Server pool | Generous (per plan) | All models |
+| Free | Server pool | App-side or future Aegis quota | Lightweight OpenAI-compatible models |
+| Pro (Subscription) | Server pool | App-side or future Aegis quota | Configured OpenAI-compatible models |
 | BYOK | Reserved | Reserved | Future control-plane target |
 
 ### Request Flow
@@ -64,7 +64,7 @@ The App client sends a Virtual Key in the `Authorization: Bearer vk_xxx` header.
   "iss": "aegis",
   "key_source": "pool",
   "pool_group": "default",
-  "models": ["gpt-4o", "gpt-4o-mini", "claude-sonnet-4-20250514"],
+  "models": ["gpt-4o", "gpt-4o-mini", "deepseek-v3"],
   "rpm": 60,
   "tpm": 0,
   "budget": 0,
@@ -92,6 +92,8 @@ Future BYOK tokens are reserved until server-side owner/provider binding exists.
 ```
 
 Current runtime accepts non-zero virtual-key `rpm` claims for per-key request limiting. Provider config `max_rpm` and `max_tpm` values are reserved and must be `0` until provider-level throttle and TPM enforcement are implemented. Virtual-key `tpm` and `budget` claims are also reserved and must be `0` until TPM and quota enforcement are implemented.
+
+Current `v0.2.0` routing supports configured `openai` and OpenAI-compatible `deepseek` providers only. Do not issue virtual keys for Anthropic or Gemini models until their protocol adapters are implemented and enabled.
 
 ## Future BYOK Workflow
 

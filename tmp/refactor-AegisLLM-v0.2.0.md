@@ -348,6 +348,44 @@ After each significant step:
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
 
+### Step 28 - Architecture Truth-Surface Follow-Up Cleanup
+
+- Architecture/security finding:
+  - After the Redis necessity review, two architecture experts checked for similar over-commitment patterns in the current `v0.2.0` truth surface.
+  - No release blocker was found, but residual should-fix mismatches remained in integration examples, subscription templates, Router comments, Admin scaffold comments/routes, CLI godoc, Vault scaffold comments, dependency policy, and release evidence wording.
+- Fix:
+  - Changed app integration examples so current pool-mode JWTs only show OpenAI-compatible `openai`/`deepseek` model names.
+  - Changed tier quota wording to `App-side or future Aegis quota` so `v0.2.0` does not imply plan/day quota enforcement.
+  - Removed Claude/Gemini and wildcard model grants from default subscription templates until their adapters are enabled, and added a regression test.
+  - Narrowed Router comments to same-model priority routing with weight as a deterministic tie-breaker; cross-model fallback and probabilistic weighted balancing remain unimplemented.
+  - Required admin token auth for reserved `GET /admin/health`, removed the false "all admin operations are audit-logged" scaffold claim, and added route-level tests.
+  - Reworded the CLI package comment so cost control is described as planned architecture, not current enforcement.
+  - Clarified Vault scaffold comments so unimplemented methods are marked as reserved implementation points.
+  - Clarified dependency policy: runtime/module dependencies are pinned by Go modules and committed in `go.sum` when present; release tools are pinned by explicit `go run module@version` entries and Go checksum verification.
+  - Updated `REVIEW.md` and `CHANGELOG.md` so release evidence is represented as required gates before tag creation, not final completed evidence.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test -count=1 ./internal/admin ./internal/subscription ./internal/middleware ./internal/runtime ./internal/config ./internal/kms/vault` passed.
+  - `git diff --check` passed.
+  - Targeted `rg` found no remaining misleading current-runtime references for Claude/Gemini templates, quota day/plan enforcement, Router weighted load/fallback chains, all-admin-audit logging, current cost control, or old changelog verification wording. The remaining Claude/Gemini match is the subscription regression test that rejects them.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=9b8d7a8-truth-surface-cleanup-final BUILD_DATE=2026-06-20T00:00:00Z PORT=18111` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `306.03kB`.
+    - Image `sha256:28168b95d1fc719ec22e5c8c194bbe5a5e5a06f425ff0c2d36e62664c2b5a584`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: 9b8d7a8-truth-surface-cleanup-final, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Autoreview:
+  - Architecture expert Archimedes found no release blocker after the patch and confirmed all four architecture should-fix items were closed: unsupported model exposure, quota wording, Router comment scope, and dependency/release-gate policy.
+  - Security expert Halley found no release blocker after the patch and confirmed the Admin/cost-control should-fix items were closed.
+  - Halley then identified two residual should-fix wording issues in Vault scaffold comments and `CHANGELOG.md` verification heading; both were fixed and the follow-up review confirmed no remaining blocker or should-fix.
+- Remaining gates before release-complete claim:
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
 ### Step 27 - Router Baseline Test Evidence
 
 - Release-quality finding:

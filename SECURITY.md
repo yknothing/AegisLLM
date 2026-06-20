@@ -52,7 +52,8 @@ Contributors MUST follow these rules:
 ## Dependency Policy
 
 - Minimize external dependencies (prefer Go standard library)
-- All dependencies must be pinned to exact versions in `go.sum`
+- Runtime/module dependencies must be pinned by Go modules and committed in `go.sum` when present
+- Release gate tools invoked through `go run module@version` must use explicit versions in `Makefile` or release scripts and are verified through the Go module checksum database
 - Regular `govulncheck` scans for known vulnerabilities
 - No dependencies with known supply chain attack history
 

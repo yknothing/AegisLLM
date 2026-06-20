@@ -1,10 +1,10 @@
 // Package middleware - router.go implements intelligent routing with circuit breaker.
 //
 // DESIGN:
-//   - Routes requests to the optimal provider based on model, priority, and health
+//   - Routes requests to a healthy provider that supports the requested model
+//   - Uses priority ordering, with weight as a deterministic tie-breaker
 //   - Implements Circuit Breaker pattern for fault tolerance
-//   - Supports multi-level fallback chains (e.g., gpt-4o → claude-sonnet → deepseek)
-//   - Weighted load balancing across multiple keys for the same provider
+//   - Does not perform cross-model fallback or probabilistic weighted balancing
 //
 // SECURITY:
 //   - Only routes to pre-configured providers (no open redirect)
@@ -32,7 +32,7 @@ type ProviderChannel struct {
 	KeyID    string // Reference to KMS-stored key
 	Models   []string
 	Weight   int
-	Priority int // Lower = higher priority for fallback
+	Priority int // Lower = higher priority for same-model routing
 	Enabled  bool
 }
 
@@ -115,7 +115,8 @@ func newRouterTable(channels []ProviderChannel) *routerTable {
 }
 
 // Route finds the best available channel for the given model.
-// Strategy: priority-based with circuit breaker health check.
+// Strategy: same-model priority routing with weight as a deterministic tie-breaker
+// and circuit breaker health checks.
 func (rt *routerTable) Route(model string) *ProviderChannel {
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()

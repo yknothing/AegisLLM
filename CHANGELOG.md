@@ -12,7 +12,7 @@ All notable changes to AegisLLM are documented here.
 - Removed the old `v0.1.0` scaffold-style Redis, Vault, quota, and store defaults from the example config and rejected reserved Redis URL, Vault config, quota backend, quota DSN, quota default-budget, and store config fields in the `v0.2.0` runtime truth surface.
 - Changed virtual-key model authorization to fail closed when the `models` claim is missing or empty. Use explicit `"*"` for all-model access.
 - Enforced a minimum HS256 JWT signing-key length, maximum virtual-key lifetime from `auth.token_expiry`, and generic authentication failure responses.
-- Hardened the reserved Admin API scaffold so admin token failures return a generic response and provided-token comparisons reach a fixed-length hash comparison path.
+- Hardened the reserved Admin API scaffold so admin token failures return a generic response, provided-token comparisons reach a fixed-length hash comparison path, and the scaffold health route also requires the admin token.
 - Rejected reserved `key_source="byok"` virtual keys until server-side BYOK owner/provider binding exists.
 - Rejected negative rate-limit configuration values instead of treating them as unlimited.
 - Tightened proxy egress validation to require HTTPS, enforced TLS 1.3 for upstream connections, and changed upstream request header forwarding to a minimal allowlist.
@@ -42,15 +42,13 @@ All notable changes to AegisLLM are documented here.
 - Documented current runtime capabilities versus planned capabilities across README, architecture docs, ADRs, and integration notes.
 - Clarified local KMS memory-zeroing and egress allowlist residual risks without claiming impossible Go runtime guarantees.
 - Recorded that Admin API issuance, Vault KMS, Redis rate limiting, quota/TPM enforcement, RS256, and non-OpenAI protocol adapters remain planned work.
+- Aligned subscription templates, app integration examples, Router comments, Vault scaffold comments, and release evidence docs with the current `v0.2.0` runtime truth surface.
 
-### Verification evidence
+### Required verification gates before tag
 
-- `go test ./...`
-- `go vet ./...`
-- `go test -race ./...`
-- `golangci-lint`
-- `govulncheck`
-- `gosec`
+- `make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local`
+- `make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=<candidate-sha> BUILD_DATE=<utc-build-date> PORT=<free-port>`
+- GitHub Actions CI on the final pushed SHA before tag creation
 - `actionlint`
 - Local process `/health` smoke
 - Mac mini Docker build and read-only container `/health` smoke

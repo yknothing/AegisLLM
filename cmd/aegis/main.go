@@ -1,7 +1,8 @@
 // Package main is the entry point for the Aegis LLM Gateway.
 //
 // Aegis is a security-first LLM API gateway that provides unified access,
-// key management, rate limiting, and cost control for multiple LLM providers.
+// key management, rate limiting, and planned cost-control architecture for
+// multiple LLM providers.
 package main
 
 import (

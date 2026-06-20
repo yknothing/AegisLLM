@@ -5,7 +5,7 @@
 //   - Keys are fetched on-demand from Vault and held only in memory
 //   - Vault token is loaded from environment variable
 //   - Supports Vault's built-in key rotation and audit logging
-//   - Network communication uses TLS (enforced by Vault client)
+//   - Network communication must use TLS once the Vault client exists
 //
 // This backend is not wired into the current runtime. Production use requires
 // implementing the Vault HTTP client, failure-mode tests, and runtime wiring.
@@ -22,7 +22,7 @@ import (
 	"github.com/yknothing/AegisLLM/internal/utils"
 )
 
-// Client implements kms.Provider using HashiCorp Vault.
+// Client is the reserved HashiCorp Vault kms.Provider scaffold.
 type Client struct {
 	mu      sync.RWMutex
 	address string
@@ -38,7 +38,8 @@ type Config struct {
 }
 
 // New creates a new Vault KMS client.
-// SECURITY: The Vault token is read from env and stored securely in memory.
+// SECURITY: The Vault token is copied from env into a client-owned byte slice
+// and zeroed on Close. The process environment string itself is not zeroed.
 func New(cfg Config) (*Client, error) {
 	if cfg.Address == "" {
 		return nil, errors.New("vault address is required")
@@ -59,8 +60,8 @@ func New(cfg Config) (*Client, error) {
 	}, nil
 }
 
-// GetKey retrieves a decrypted API key from Vault.
-// SECURITY: The caller MUST call Close() on the returned SecureBytes.
+// GetKey is the reserved implementation point for retrieving a decrypted API key
+// from Vault. It is not implemented in v0.2.0.
 func (c *Client) GetKey(ctx context.Context, _ string) (*utils.SecureBytes, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -79,8 +80,8 @@ func (c *Client) GetKey(ctx context.Context, _ string) (*utils.SecureBytes, erro
 	return nil, errors.New("vault backend not yet implemented")
 }
 
-// StoreKey writes an API key to Vault.
-// SECURITY: The input plaintext is zeroed after transmission.
+// StoreKey is the reserved implementation point for writing an API key to Vault.
+// SECURITY: The current scaffold zeroes the input plaintext before returning.
 func (c *Client) StoreKey(ctx context.Context, _ string, plaintext []byte) error {
 	defer utils.MemZero(plaintext)
 
@@ -91,19 +92,22 @@ func (c *Client) StoreKey(ctx context.Context, _ string, plaintext []byte) error
 	return errors.New("vault backend not yet implemented")
 }
 
-// DeleteKey removes a key from Vault.
+// DeleteKey is the reserved implementation point for deleting a key from Vault.
+// It is not implemented in v0.2.0.
 func (c *Client) DeleteKey(ctx context.Context, _ string) error {
 	// Reserved implementation point: DELETE {address}/v1/{path}/{keyID}.
 	return errors.New("vault backend not yet implemented")
 }
 
-// RotateKey triggers Vault's built-in key versioning.
+// RotateKey is the reserved implementation point for triggering Vault-backed key
+// rotation. It is not implemented in v0.2.0.
 func (c *Client) RotateKey(ctx context.Context, _ string) error {
-	// Vault handles rotation natively through its versioned KV store
+	// Planned behavior: use Vault's native versioned KV rotation.
 	return errors.New("vault backend not yet implemented")
 }
 
-// ListKeyIDs returns all key identifiers stored in Vault.
+// ListKeyIDs is the reserved implementation point for listing key identifiers in
+// Vault. It is not implemented in v0.2.0.
 func (c *Client) ListKeyIDs(ctx context.Context) ([]string, error) {
 	// Reserved implementation point: LIST {address}/v1/{path}.
 	return nil, errors.New("vault backend not yet implemented")

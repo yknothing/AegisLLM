@@ -36,13 +36,14 @@ type Template struct {
 
 // DefaultTemplates returns the standard tier configurations.
 // Current runtime-compatible templates keep TPM and BudgetUSD at 0 because
-// non-zero values are rejected until enforcement exists. BYOK is reserved and
-// intentionally omitted until owner/provider binding exists.
+// non-zero values are rejected until enforcement exists. They also include only
+// OpenAI-compatible model names for providers enabled by the v0.2.0 runtime.
+// BYOK is reserved and intentionally omitted until owner/provider binding exists.
 func DefaultTemplates() map[Tier]Template {
 	return map[Tier]Template{
 		TierFree: {
 			Tier:           TierFree,
-			Models:         []string{"gpt-4o-mini", "gemini-2.5-flash", "deepseek-v3"},
+			Models:         []string{"gpt-4o-mini", "deepseek-v3"},
 			RPM:            10,
 			TPM:            0,
 			MaxConcurrency: 2,
@@ -52,7 +53,7 @@ func DefaultTemplates() map[Tier]Template {
 		},
 		TierPro: {
 			Tier:           TierPro,
-			Models:         []string{"gpt-4o", "gpt-4o-mini", "claude-sonnet-4-20250514", "claude-haiku-3-5", "gemini-2.5-pro", "gemini-2.5-flash", "deepseek-v3", "deepseek-r1"},
+			Models:         []string{"gpt-4o", "gpt-4o-mini", "deepseek-v3", "deepseek-r1"},
 			RPM:            60,
 			TPM:            0,
 			MaxConcurrency: 10,
@@ -62,7 +63,7 @@ func DefaultTemplates() map[Tier]Template {
 		},
 		TierEnterprise: {
 			Tier:           TierEnterprise,
-			Models:         []string{"*"}, // All models
+			Models:         []string{"gpt-4o", "gpt-4o-mini", "gpt-4.1", "deepseek-v3", "deepseek-r1"},
 			RPM:            300,
 			TPM:            0,
 			MaxConcurrency: 50,

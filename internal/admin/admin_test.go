@@ -68,6 +68,32 @@ func TestAdminAuthRejectsFailuresWithGenericMessage(t *testing.T) {
 	}
 }
 
+func TestAdminHealthRequiresAdminToken(t *testing.T) {
+	handler := NewHandler(&recordingKMS{}, slog.New(slog.NewTextHandler(io.Discard, nil)), []byte(adminTestToken))
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/health", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/admin/health", nil)
+	req.Header.Set(adminTokenHeader, adminTestToken)
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("authenticated status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if !strings.Contains(rec.Body.String(), `"service":"aegis-admin"`) {
+		t.Fatalf("body = %s, want admin health payload", rec.Body.String())
+	}
+}
+
 func TestConstantTimeEqualHandlesLengthMismatch(t *testing.T) {
 	if !constantTimeEqual([]byte(adminTestToken), []byte(adminTestToken)) {
 		t.Fatal("constantTimeEqual rejected equal tokens")
