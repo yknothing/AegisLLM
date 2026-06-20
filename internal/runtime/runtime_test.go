@@ -68,6 +68,50 @@ func TestProviderRuntimeRejectsHTTPProvider(t *testing.T) {
 	}
 }
 
+func TestProviderRuntimeRejectsImplicitEgressSubdomain(t *testing.T) {
+	cfg := &config.Config{
+		Providers: []config.Provider{
+			{
+				ID:       "openai-primary",
+				Type:     "openai",
+				BaseURL:  "https://tenant.api.openai.com",
+				APIKeyID: "openai-key-1",
+				Models:   []string{"gpt-4o-mini"},
+				Enabled:  true,
+			},
+		},
+		Egress: config.EgressConfig{
+			AllowedDomains: []string{"api.openai.com"},
+		},
+	}
+
+	if _, _, _, err := providerRuntime(cfg); err == nil {
+		t.Fatal("providerRuntime accepted an implicit egress subdomain")
+	}
+}
+
+func TestProviderRuntimeAllowsExplicitEgressWildcardSubdomain(t *testing.T) {
+	cfg := &config.Config{
+		Providers: []config.Provider{
+			{
+				ID:       "openai-primary",
+				Type:     "openai",
+				BaseURL:  "https://api.openai.com",
+				APIKeyID: "openai-key-1",
+				Models:   []string{"gpt-4o-mini"},
+				Enabled:  true,
+			},
+		},
+		Egress: config.EgressConfig{
+			AllowedDomains: []string{"*.openai.com"},
+		},
+	}
+
+	if _, _, _, err := providerRuntime(cfg); err != nil {
+		t.Fatalf("providerRuntime rejected explicit wildcard subdomain: %v", err)
+	}
+}
+
 func TestProviderRuntimeRequiresExplicitEgressAllowlist(t *testing.T) {
 	cfg := &config.Config{
 		Providers: []config.Provider{

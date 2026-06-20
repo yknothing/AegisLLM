@@ -10,7 +10,7 @@ Accepted baseline for the current framework build-out.
 | --- | --- | --- | --- | --- | --- |
 | Security | A client sends an unauthenticated or forged virtual key request | Reject before body processing, routing, KMS, or proxy work | No provider egress and no KMS lookup before auth success | 1 | `SECURITY.md`, ADR-001 |
 | Secret handling | A provider key is needed for one upstream request | Fetch from KMS only after routing, hold in request scope, close after proxy returns | No plaintext provider key in config, logs, or long-lived caches | 2 | ADR-002, ADR-003 |
-| Egress control | A configured provider URL or transformed target is malicious | Validate normalized URL host against an allowlist before outbound request | Exact host or subdomain match only; empty allowlist fails closed | 3 | `AGENTS.md`, `SECURITY.md` |
+| Egress control | A configured provider URL or transformed target is malicious | Validate normalized URL host against an allowlist before outbound request | Exact host by default; subdomains require explicit `*.` wildcard; wildcard allows nested subdomains but not the apex; empty allowlist fails closed | 3 | `AGENTS.md`, `SECURITY.md` |
 | Pipeline integrity | A new middleware is added | Preserve ADR-004 order unless a new ADR changes it | Composition tests cover middleware order | 4 | ADR-004 |
 | Maintainability | Provider, KMS, or limiter implementation changes | Change the implementation behind a stable interface without changing server microkernel | `internal/server` does not import concrete middleware packages | 5 | Module design assumption |
 | MVP operability | Standalone users run a local gateway | Local KMS, in-memory limiter, and strict config validation start without external services | `go test ./...` and example config load pass in a Go toolchain | 6 | README deployment modes |
@@ -84,6 +84,6 @@ Container deployments must provide `AEGIS_MASTER_KEY`, `AEGIS_JWT_KEY`, and a wr
 | --- | --- | --- |
 | Pipeline order test | ADR-004 order is preserved | Every PR touching runtime or middleware |
 | Example config load test | `aegis.example.json` parses and validates with required env vars | Every config change |
-| Egress validation tests | Empty allowlist fails closed; host matching is exact/suffix-safe | Every proxy change |
+| Egress validation tests | Empty allowlist fails closed; host matching is exact by default and wildcard-only for subdomains | Every proxy change |
 | Secret handling tests | KMS StoreKey zeroes plaintext and SecureBytes closes after use | Every KMS change |
 | Auth tests | Invalid, expired, wrong issuer, and bad signature JWTs fail closed | Every auth change |

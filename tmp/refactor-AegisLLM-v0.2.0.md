@@ -382,6 +382,37 @@ After each significant step:
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
 
+### Step 21 - Exact Egress Host Allowlist Matching
+
+- Security finding:
+  - Runtime startup validation and proxy request validation both used suffix matching for `egress.allowed_domains`.
+  - An exact-looking entry such as `api.openai.com` therefore also allowed `tenant.api.openai.com`, which widened the outbound trust boundary unless operators knew about the implicit suffix behavior.
+- Fix:
+  - Added `internal/egress` as the shared host matching boundary for runtime and proxy validation.
+  - Changed egress matching to exact-host by default.
+  - Kept deliberate subdomain support through explicit `*.` wildcard entries, e.g. `*.openai.com`.
+  - Updated architecture design, security policy, and changelog to describe exact-host and explicit-wildcard semantics.
+  - Added regression coverage for exact host matching, implicit subdomain rejection, explicit wildcard acceptance, normalized host/URL entries, and substring bypass rejection.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test ./internal/egress ./internal/proxy ./internal/runtime` passed.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=dd8bed9-exact-egress BUILD_DATE=2026-06-20T00:00:00Z PORT=18098` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `282.65kB`.
+    - Image `sha256:84d685f9bb202fce2c1a45c4cf99ad3abd1542db149dfdf4f0283e33817c5f3b`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: dd8bed9-exact-egress, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Autoreview:
+  - Security architecture expert A confirmed the old implicit suffix match was a release-before-fix issue and that exact-host default plus explicit `*.` wildcard is the correct release contract; it requested threat-model/module-boundary documentation, which was added.
+  - Architecture compatibility expert B confirmed no blocking findings, no breakage to `aegis.example.json`, runtime assembly, or `ceo` Docker smoke; it recommended README/ARCHITECTURE discoverability text, which was added.
+- Remaining gates before release-complete claim:
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
 ### Step 11 - Release Plan and Go/No-Go Runbook
 
 - Added `docs/release-plan-v0.2.0.md` as the public release-management artifact for `v0.2.0`.

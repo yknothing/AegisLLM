@@ -10,9 +10,9 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
-	"strings"
 
 	"github.com/yknothing/AegisLLM/internal/config"
+	"github.com/yknothing/AegisLLM/internal/egress"
 	"github.com/yknothing/AegisLLM/internal/kms"
 	"github.com/yknothing/AegisLLM/internal/kms/local"
 	"github.com/yknothing/AegisLLM/internal/middleware"
@@ -296,7 +296,7 @@ func providerRuntime(cfg *config.Config) ([]middleware.ProviderChannel, map[stri
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("provider %q: %w", p.ID, err)
 		}
-		if !hostAllowed(host, cfg.Egress.AllowedDomains) {
+		if !egress.HostAllowed(host, cfg.Egress.AllowedDomains) {
 			return nil, nil, nil, fmt.Errorf("provider %q: base_url host %q is not in egress.allowed_domains", p.ID, host)
 		}
 
@@ -343,22 +343,4 @@ func isSupportedProviderType(providerType string) bool {
 	default:
 		return false
 	}
-}
-
-func hostAllowed(host string, allowedDomains []string) bool {
-	host = normalizeHost(host)
-	for _, allowed := range allowedDomains {
-		allowed = normalizeHost(allowed)
-		if allowed == "" {
-			continue
-		}
-		if host == allowed || strings.HasSuffix(host, "."+allowed) {
-			return true
-		}
-	}
-	return false
-}
-
-func normalizeHost(host string) string {
-	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
 }

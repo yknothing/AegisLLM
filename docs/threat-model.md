@@ -29,7 +29,7 @@ flowchart LR
 | Client body to provider | Oversized prompt or PII leakage | Bounded body reads, configurable PII mode, no body logging |
 | Router to KMS | User asks for an unauthorized model to reach a different provider key | Model permission check before provider and key selection |
 | KMS to request context | Provider key remains in memory after request | `SecureBytes.Close()` at KMS, proxy, and pipeline cleanup boundaries |
-| Gateway to provider | SSRF or exfiltration via malicious URL | Parse URL and validate normalized host against allowlist; fail closed |
+| Gateway to provider | SSRF or exfiltration via malicious URL | Parse URL and validate normalized host against exact/wildcard allowlist; fail closed |
 | Logs and errors | Secret or content disclosure | Safe audit logger, metadata-only audit fields, generic client-facing errors |
 | Future admin API | BYOK key submission or deletion by unauthorized caller | Separate listener or mTLS, admin token comparison, request size limits, audit metadata |
 
@@ -37,7 +37,7 @@ flowchart LR
 
 - Go strings used for HTTP headers can retain provider keys until garbage collection. The runtime must minimize lifetime and avoid additional copies, but cannot guarantee immediate zeroing of header strings.
 - Local KMS zeroes Store-owned key byte slices on Close, but Go AES/GCM internals may retain key schedule material that Aegis cannot explicitly zero.
-- The egress allowlist constrains normal proxy execution to configured provider hosts. It is not a containment boundary for a fully compromised process or malicious configuration.
+- The egress allowlist constrains normal proxy execution to configured provider hosts. Exact entries do not imply subdomains; `*.` wildcard entries allow nested subdomains but not the apex. The allowlist is not a containment boundary for a fully compromised process or malicious configuration.
 - Local in-memory KMS backend is for smoke tests and development. File-backed local KMS persists encrypted blobs for standalone validation, while Vault-grade operational controls remain future work.
 - HS256 JWT validation is the minimal no-dependency baseline. RS256 requires a separate reviewed key loading and rotation design.
 - Provider-specific protocol adapters are framework-level only until each adapter has contract tests against real provider formats.

@@ -8,11 +8,13 @@ flowchart TD
   runtime --> server["internal/server"]
   runtime --> middleware["internal/middleware"]
   runtime --> kms["internal/kms"]
+  runtime --> egress["internal/egress"]
   runtime --> proxy["internal/proxy"]
   runtime --> config["internal/config"]
   middleware --> server
   middleware --> kms
   middleware --> proxy
+  proxy --> egress
   proxy --> utils["internal/utils"]
   kms --> utils
 ```
@@ -30,6 +32,7 @@ Exports:
   - Purpose: build middleware in ADR-004 order and return a runnable server.
   - Errors: missing signing key, invalid KMS config, invalid provider config.
   - Invariant: all provider egress hosts are allowlisted before proxy middleware is created.
+  - Invariant: egress host matching uses `internal/egress`; exact entries match only exact hosts and subdomains require explicit `*.` wildcard entries.
 
 ### `internal/server`
 
@@ -68,6 +71,7 @@ Exports:
 
 Invariants:
 - Egress host must pass allowlist validation.
+- Exact egress entries match only exact hosts; wildcard entries such as `*.example.com` allow nested subdomains but not the apex host.
 - Request and response bodies are streamed, not logged.
 - Hop-by-hop and client credential headers are stripped before upstream forwarding.
 

@@ -19,13 +19,13 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/yknothing/AegisLLM/internal/egress"
 	"github.com/yknothing/AegisLLM/internal/utils"
 )
 
@@ -255,41 +255,16 @@ func (e *Engine) validateEgress(targetURL string) error {
 	if parsed.Scheme != "https" {
 		return fmt.Errorf("target URL must use https")
 	}
-	host := normalizeHost(parsed.Hostname())
+	host := egress.NormalizeHost(parsed.Hostname())
 	if host == "" {
 		return fmt.Errorf("target URL has no host")
 	}
 
-	for _, domain := range e.config.AllowedDomains {
-		allowed := normalizeAllowedDomain(domain)
-		if allowed == "" {
-			continue
-		}
-		if host == allowed || strings.HasSuffix(host, "."+allowed) {
-			return nil
-		}
+	if egress.HostAllowed(host, e.config.AllowedDomains) {
+		return nil
 	}
 
 	return fmt.Errorf("domain not in egress allowlist: %s", host)
-}
-
-func normalizeAllowedDomain(domain string) string {
-	if strings.Contains(domain, "://") {
-		parsed, err := url.Parse(domain)
-		if err == nil {
-			domain = parsed.Hostname()
-		}
-	}
-	return normalizeHost(domain)
-}
-
-func normalizeHost(host string) string {
-	host = strings.TrimSpace(strings.ToLower(host))
-	host = strings.TrimSuffix(host, ".")
-	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
-		host = parsedHost
-	}
-	return host
 }
 
 // copyHeaders copies the minimal safe client headers needed by provider APIs.

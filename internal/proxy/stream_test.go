@@ -27,6 +27,26 @@ func TestValidateEgressMatchesNormalizedHost(t *testing.T) {
 	}
 }
 
+func TestValidateEgressRejectsImplicitSubdomain(t *testing.T) {
+	engine := NewEngine(StreamConfig{
+		AllowedDomains: []string{"api.openai.com"},
+	})
+
+	if err := engine.validateEgress("https://tenant.api.openai.com/v1/chat/completions"); err == nil {
+		t.Fatal("validateEgress accepted implicit subdomain without wildcard")
+	}
+}
+
+func TestValidateEgressAllowsExplicitWildcardSubdomain(t *testing.T) {
+	engine := NewEngine(StreamConfig{
+		AllowedDomains: []string{"*.openai.com"},
+	})
+
+	if err := engine.validateEgress("https://api.openai.com/v1/chat/completions"); err != nil {
+		t.Fatalf("validateEgress rejected explicit wildcard subdomain: %v", err)
+	}
+}
+
 func TestValidateEgressRejectsSubstringBypass(t *testing.T) {
 	engine := NewEngine(StreamConfig{
 		AllowedDomains: []string{"api.openai.com"},

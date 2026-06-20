@@ -32,7 +32,7 @@ Sensitive byte slices owned by Aegis, such as decrypted API keys and JWT signing
 
 ### 5. Egress Filtering
 
-The streaming proxy engine validates configured outbound provider requests against a domain allowlist. This prevents normal proxy execution from reaching non-allowlisted hosts; it is not a containment boundary for a fully compromised process or configuration.
+The streaming proxy engine validates configured outbound provider requests against a domain allowlist. Exact host entries match only that host. Subdomains require an explicit `*.` wildcard entry; `*.example.com` allows nested subdomains but not the `example.com` apex. This prevents normal proxy execution from reaching non-allowlisted hosts; it is not a containment boundary for a fully compromised process or configuration.
 
 ### 6. Minimal Attack Surface
 

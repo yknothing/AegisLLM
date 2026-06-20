@@ -120,7 +120,7 @@ Security is Aegis's highest priority. See [SECURITY.md](SECURITY.md) for:
 **Key security properties:**
 - API keys never exist in plaintext at rest
 - Memory is zeroed after credential use
-- Egress filtering constrains configured provider requests to allowlisted hosts
+- Egress filtering constrains configured provider requests to allowlisted hosts; plain entries are exact hosts and `*.example.com` is required for subdomains
 - No shell or package manager in production image
 
 ## Project Structure

@@ -71,6 +71,8 @@ The default standalone profile needs:
 
 Container smoke runs can use the bundled `/etc/aegis/aegis.json`. Production container deployments should mount `/etc/aegis/aegis.json` explicitly and must provide a writable `/var/lib/aegis` volume when using file-backed local KMS.
 
+`egress.allowed_domains` entries are exact hosts by default. Use an explicit `*.` entry, such as `*.example.com`, when subdomain egress is intended.
+
 ## Source Of Truth
 
 Use these files as the current architecture source of truth:
