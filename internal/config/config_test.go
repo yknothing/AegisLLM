@@ -326,6 +326,34 @@ func TestLoadRejectsNegativeRateLimitValues(t *testing.T) {
 			wantErr: "rate_limit.default_rpm must not be negative",
 		},
 		{
+			name: "disabled default_rpm",
+			config: `{
+					"kms": {
+						"mode": "local",
+						"local": {"master_key_env": "AEGIS_MASTER_KEY"}
+					},
+					"providers": [
+						{
+							"id": "openai-primary",
+							"name": "OpenAI Primary",
+							"type": "openai",
+							"base_url": "https://api.openai.com",
+							"api_key_id": "openai-key-1",
+							"models": ["gpt-4o-mini"],
+							"enabled": true
+						}
+					],
+					"rate_limit": {
+						"enabled": false,
+						"backend": "memory",
+						"default_rpm": -1
+					},
+					"quota": {"enabled": false},
+					"egress": {"allowed_domains": ["api.openai.com"]}
+				}`,
+			wantErr: "rate_limit.default_rpm must not be negative",
+		},
+		{
 			name: "default_max_concurrency",
 			config: `{
 				"kms": {
@@ -380,6 +408,14 @@ func TestLoadRejectsUnsupportedRuntimeBackends(t *testing.T) {
 				"enabled": true,
 				"backend": "redis"
 			}`,
+			wantErr: "redis rate limiter backend is not implemented",
+		},
+		{
+			name: "disabled redis",
+			config: `"rate_limit": {
+					"enabled": false,
+					"backend": "redis"
+				}`,
 			wantErr: "redis rate limiter backend is not implemented",
 		},
 		{

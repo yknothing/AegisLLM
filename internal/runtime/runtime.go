@@ -167,26 +167,24 @@ func validateRuntimeConfig(cfg *config.Config) error {
 	if cfg.Quota.Enabled {
 		return fmt.Errorf("quota enforcement is not implemented; set quota.enabled=false")
 	}
-	if cfg.RateLimit.Enabled {
-		switch cfg.RateLimit.Backend {
-		case "memory":
-		case "redis":
-			return fmt.Errorf("redis rate limiter backend is not implemented")
-		default:
-			return fmt.Errorf("unsupported rate_limit backend: %q", cfg.RateLimit.Backend)
-		}
-		if cfg.RateLimit.DefaultRPM < 0 {
-			return fmt.Errorf("rate_limit.default_rpm must not be negative")
-		}
-		if cfg.RateLimit.DefaultTPM < 0 {
-			return fmt.Errorf("rate_limit.default_tpm must not be negative")
-		}
-		if cfg.RateLimit.DefaultMaxConcurrency < 0 {
-			return fmt.Errorf("rate_limit.default_max_concurrency must not be negative")
-		}
-		if cfg.RateLimit.DefaultTPM > 0 {
-			return fmt.Errorf("rate_limit.default_tpm is reserved; TPM enforcement is not implemented")
-		}
+	switch cfg.RateLimit.Backend {
+	case "memory":
+	case "redis":
+		return fmt.Errorf("redis rate limiter backend is not implemented")
+	default:
+		return fmt.Errorf("unsupported rate_limit backend: %q", cfg.RateLimit.Backend)
+	}
+	if cfg.RateLimit.DefaultRPM < 0 {
+		return fmt.Errorf("rate_limit.default_rpm must not be negative")
+	}
+	if cfg.RateLimit.DefaultTPM < 0 {
+		return fmt.Errorf("rate_limit.default_tpm must not be negative")
+	}
+	if cfg.RateLimit.DefaultMaxConcurrency < 0 {
+		return fmt.Errorf("rate_limit.default_max_concurrency must not be negative")
+	}
+	if cfg.RateLimit.DefaultTPM > 0 {
+		return fmt.Errorf("rate_limit.default_tpm is reserved; TPM enforcement is not implemented")
 	}
 	for _, p := range cfg.Providers {
 		if !p.Enabled {

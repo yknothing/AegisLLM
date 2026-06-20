@@ -557,3 +557,32 @@ After each significant step:
   - Restore an approved GitHub write credential path.
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
+### Step 17 - Reserved Rate-Limit Config Guardrail Tightening
+
+- Architecture finding:
+  - Documentation and release notes said Redis and non-zero TPM rate-limit controls fail fast.
+  - Config/runtime validation only rejected those fields when `rate_limit.enabled=true`, so a disabled rate-limit block could still carry reserved or invalid settings without being rejected.
+- Fix:
+  - Moved `rate_limit.backend`, `default_rpm`, `default_tpm`, and `default_max_concurrency` validation outside the `enabled` gate in both config and runtime validation.
+  - Kept middleware registration controlled by `rate_limit.enabled`; this change only tightens accepted configuration truth.
+  - Added config/runtime tests for disabled Redis, disabled default TPM, disabled unknown backend, and disabled negative RPM.
+  - Updated `CHANGELOG.md` under `v0.2.0 - Release Candidate`.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test ./internal/config ./internal/runtime` passed.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=a93c72f-rate-limit-guardrail BUILD_DATE=2026-06-20T00:00:00Z PORT=18091` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `264.93kB`.
+    - Image `sha256:fc8066d4930d302a8d5bec6e28e046670d70dfd3f985cec5457e263cf4df0ca2`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: a93c72f-rate-limit-guardrail, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Autoreview:
+  - Self-review confirmed this closes the Redis-like mismatch where a reserved dependency could remain in accepted config merely because the feature was disabled.
+- Remaining gates before release-complete claim:
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.

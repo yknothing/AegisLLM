@@ -355,26 +355,24 @@ func (c *Config) validate() error {
 		return errors.New("egress.allowed_domains must contain at least one host")
 	}
 
-	if c.RateLimit.Enabled {
-		switch c.RateLimit.Backend {
-		case "memory":
-		case "redis":
-			return errors.New("redis rate limiter backend is not implemented")
-		default:
-			return fmt.Errorf("unsupported rate_limit backend: %q", c.RateLimit.Backend)
-		}
-		if c.RateLimit.DefaultRPM < 0 {
-			return errors.New("rate_limit.default_rpm must not be negative")
-		}
-		if c.RateLimit.DefaultTPM < 0 {
-			return errors.New("rate_limit.default_tpm must not be negative")
-		}
-		if c.RateLimit.DefaultMaxConcurrency < 0 {
-			return errors.New("rate_limit.default_max_concurrency must not be negative")
-		}
-		if c.RateLimit.DefaultTPM > 0 {
-			return errors.New("rate_limit.default_tpm is reserved; TPM enforcement is not implemented")
-		}
+	switch c.RateLimit.Backend {
+	case "memory":
+	case "redis":
+		return errors.New("redis rate limiter backend is not implemented")
+	default:
+		return fmt.Errorf("unsupported rate_limit backend: %q", c.RateLimit.Backend)
+	}
+	if c.RateLimit.DefaultRPM < 0 {
+		return errors.New("rate_limit.default_rpm must not be negative")
+	}
+	if c.RateLimit.DefaultTPM < 0 {
+		return errors.New("rate_limit.default_tpm must not be negative")
+	}
+	if c.RateLimit.DefaultMaxConcurrency < 0 {
+		return errors.New("rate_limit.default_max_concurrency must not be negative")
+	}
+	if c.RateLimit.DefaultTPM > 0 {
+		return errors.New("rate_limit.default_tpm is reserved; TPM enforcement is not implemented")
 	}
 
 	if c.Quota.Enabled {

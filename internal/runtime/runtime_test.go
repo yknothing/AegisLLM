@@ -203,24 +203,32 @@ func TestNewServerRejectsUnsupportedRuntimeControls(t *testing.T) {
 		{
 			name: "unknown rate limit backend",
 			mutate: func(cfg *config.Config) {
-				cfg.RateLimit.Enabled = true
+				cfg.RateLimit.Enabled = false
 				cfg.RateLimit.Backend = "memcached"
 			},
 			wantErr: `unsupported rate_limit backend: "memcached"`,
 		},
 		{
-			name: "default TPM",
+			name: "disabled redis rate limit backend",
 			mutate: func(cfg *config.Config) {
-				cfg.RateLimit.Enabled = true
+				cfg.RateLimit.Enabled = false
+				cfg.RateLimit.Backend = "redis"
+			},
+			wantErr: "redis rate limiter backend is not implemented",
+		},
+		{
+			name: "disabled default TPM",
+			mutate: func(cfg *config.Config) {
+				cfg.RateLimit.Enabled = false
 				cfg.RateLimit.Backend = "memory"
 				cfg.RateLimit.DefaultTPM = 1000
 			},
 			wantErr: "TPM enforcement is not implemented",
 		},
 		{
-			name: "negative default RPM",
+			name: "disabled negative default RPM",
 			mutate: func(cfg *config.Config) {
-				cfg.RateLimit.Enabled = true
+				cfg.RateLimit.Enabled = false
 				cfg.RateLimit.Backend = "memory"
 				cfg.RateLimit.DefaultRPM = -1
 			},
