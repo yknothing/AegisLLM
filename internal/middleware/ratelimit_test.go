@@ -24,6 +24,8 @@ const (
 	tokenRetentionTestMaxConcurrency = 1
 	tokenRetentionTestInputTokens    = 11
 	tokenRetentionTestOutputTokens   = 13
+	memoryLimiterTestRPM             = 1
+	memoryLimiterTestMaxConcurrency  = 1
 )
 
 func (r *recordingLimiter) Allow(_ string, dimension string, _ int, _ time.Duration) (bool, error) {
@@ -93,6 +95,105 @@ func TestRateLimiterDoesNotRetainTokenUsageWhileTPMReserved(t *testing.T) {
 	}
 	if len(limiter.concurrencyKeys) != 1 || limiter.concurrencyKeys[0] != "vk_test" {
 		t.Fatalf("concurrency keys = %v, want [vk_test]", limiter.concurrencyKeys)
+	}
+}
+
+func TestRateLimiterEnforcesRPMWithMemoryLimiter(t *testing.T) {
+	middleware := RateLimiter(RateLimitConfig{
+		Backend:    "memory",
+		DefaultRPM: memoryLimiterTestRPM,
+	})
+
+	firstCtx := &server.RequestContext{
+		Request:      httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		VirtualKeyID: "vk_test",
+	}
+	firstCalledNext := false
+	middleware(firstCtx, func() {
+		firstCalledNext = true
+	})
+	if !firstCalledNext {
+		t.Fatal("RateLimiter did not call next for the first request")
+	}
+	if firstCtx.IsAborted() {
+		t.Fatalf("first request aborted with status %d", firstCtx.StatusCode)
+	}
+
+	secondCtx := &server.RequestContext{
+		Request:      httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		VirtualKeyID: "vk_test",
+	}
+	secondCalledNext := false
+	middleware(secondCtx, func() {
+		secondCalledNext = true
+	})
+	if secondCalledNext {
+		t.Fatal("RateLimiter called next after the memory RPM limit was exhausted")
+	}
+	if !secondCtx.IsAborted() {
+		t.Fatal("RateLimiter did not abort the request after the memory RPM limit was exhausted")
+	}
+	if secondCtx.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("second status = %d, want %d", secondCtx.StatusCode, http.StatusTooManyRequests)
+	}
+}
+
+func TestRateLimiterEnforcesDefaultConcurrencyWithMemoryLimiter(t *testing.T) {
+	middleware := RateLimiter(RateLimitConfig{
+		Backend:        "memory",
+		DefaultMaxConc: memoryLimiterTestMaxConcurrency,
+	})
+
+	firstCtx := &server.RequestContext{
+		Request:      httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		VirtualKeyID: "vk_test",
+	}
+	enteredFirst := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstDone := make(chan bool, 1)
+
+	go func() {
+		middleware(firstCtx, func() {
+			close(enteredFirst)
+			<-releaseFirst
+		})
+		firstDone <- firstCtx.IsAborted()
+	}()
+
+	select {
+	case <-enteredFirst:
+	case firstAborted := <-firstDone:
+		t.Fatalf("first request finished before holding the concurrency slot; aborted=%v status=%d", firstAborted, firstCtx.StatusCode)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the first request to hold the concurrency slot")
+	}
+
+	secondCtx := &server.RequestContext{
+		Request:      httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		VirtualKeyID: "vk_test",
+	}
+	secondCalledNext := false
+	middleware(secondCtx, func() {
+		secondCalledNext = true
+	})
+	if secondCalledNext {
+		t.Fatal("RateLimiter called next after the memory concurrency limit was exhausted")
+	}
+	if !secondCtx.IsAborted() {
+		t.Fatal("RateLimiter did not abort the request after the memory concurrency limit was exhausted")
+	}
+	if secondCtx.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("second status = %d, want %d", secondCtx.StatusCode, http.StatusTooManyRequests)
+	}
+
+	close(releaseFirst)
+	select {
+	case firstAborted := <-firstDone:
+		if firstAborted {
+			t.Fatalf("first request aborted with status %d", firstCtx.StatusCode)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the first request to release the concurrency slot")
 	}
 }
 

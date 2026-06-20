@@ -348,6 +348,37 @@ After each significant step:
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
 
+### Step 30 - Rate-Limit Baseline Behavior Evidence
+
+- Architecture finding:
+  - `v0.2.0` docs and README claim an implemented in-memory request/concurrency rate-limiting baseline.
+  - Existing tests covered reserved TPM fail-closed behavior and unsupported backend sanitization, but did not directly prove real `memoryLimiter` RPM overflow or default-concurrency overflow behavior.
+- Fix:
+  - Added `TestRateLimiterEnforcesRPMWithMemoryLimiter`.
+  - Added `TestRateLimiterEnforcesDefaultConcurrencyWithMemoryLimiter`.
+  - Both tests use the public `RateLimiter` constructor with the real `memory` backend and the same `VirtualKeyID`, proving the second request is rejected with `429` once RPM or concurrency is exhausted.
+  - Runtime code was not changed.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test -count=1 ./internal/middleware` passed.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed, including package tests, race tests, `golangci-lint`, `govulncheck`, and `gosec`.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=7073078-ratelimit-baseline-tests BUILD_DATE=2026-06-20T00:00:00Z PORT=18113` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `310.26kB`.
+    - Image `sha256:0eeeeca76c63efa8030ad251c9131b5cf1c120c72c625b6430d72c2e6d1c3595`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: 7073078-ratelimit-baseline-tests, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Autoreview:
+  - Architecture expert found no blocking or should-fix issues and judged the new tests sufficient for the `in-memory request/concurrency rate limiting baseline implemented` release claim.
+  - Security expert found no blocking or should-fix issues, no material race/deadlock/flaky risk, and recommended committing the batch.
+  - Security expert also ran `$HOME/.cache/codex-go/go1.26.4/bin/go test -race -count=10 -run 'TestRateLimiterEnforces(RPM|DefaultConcurrency)WithMemoryLimiter' ./internal/middleware`, which passed.
+- Remaining gates before release-complete claim:
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
 ### Step 29 - Example Config Egress Truth Surface
 
 - Architecture/security finding:
