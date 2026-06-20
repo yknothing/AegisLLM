@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/yknothing/AegisLLM/internal/egress"
+	"github.com/yknothing/AegisLLM/internal/requestid"
 	"github.com/yknothing/AegisLLM/internal/utils"
 )
 
@@ -68,7 +69,10 @@ var allowedResponseHeaders = map[string]struct{}{
 	"X-Ratelimit-Remaining-Requests": {},
 	"X-Ratelimit-Reset-Tokens":       {},
 	"X-Ratelimit-Reset-Requests":     {},
-	"X-Request-Id":                   {},
+}
+
+var renamedResponseHeaders = map[string]string{
+	http.CanonicalHeaderKey(requestid.Header): requestid.UpstreamHeader,
 }
 
 // NewEngine creates a new streaming proxy engine.
@@ -287,11 +291,19 @@ func copyHeaders(dst, src http.Header) {
 // reflected downstream by default.
 func copyResponseHeaders(dst, src http.Header) {
 	for key, values := range src {
-		if _, allowed := allowedResponseHeaders[http.CanonicalHeaderKey(key)]; !allowed {
-			continue
+		canonicalKey := http.CanonicalHeaderKey(key)
+		targetKey, renamed := renamedResponseHeaders[canonicalKey]
+		if !renamed {
+			if _, allowed := allowedResponseHeaders[canonicalKey]; !allowed {
+				continue
+			}
+			targetKey = key
 		}
 		for _, v := range values {
-			dst.Add(key, v)
+			if renamed && !requestid.Safe(v) {
+				continue
+			}
+			dst.Add(targetKey, v)
 		}
 	}
 }

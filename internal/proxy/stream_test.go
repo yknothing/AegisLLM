@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/yknothing/AegisLLM/internal/requestid"
 )
 
 func TestValidateEgressRequiresAllowlist(t *testing.T) {
@@ -146,7 +148,7 @@ func TestForwardResponseAllowsOnlySafeUpstreamHeaders(t *testing.T) {
 		StatusCode: http.StatusOK,
 		Header: http.Header{
 			"Content-Type":                       []string{"application/json"},
-			"X-Request-Id":                       []string{"req-upstream"},
+			"X-Request-Id":                       []string{"req-upstream", "bad/upstream", strings.Repeat("a", requestid.MaxLength+1)},
 			"RateLimit-Remaining":                []string{"60"},
 			"X-Ratelimit-Remaining-Requests":     []string{"59"},
 			"Retry-After":                        []string{"1"},
@@ -226,8 +228,11 @@ func TestForwardResponseAllowsOnlySafeUpstreamHeaders(t *testing.T) {
 	if got := result.Header.Get("Content-Type"); got != "application/json" {
 		t.Fatalf("content type = %q, want application/json", got)
 	}
-	if got := result.Header.Get("X-Request-Id"); got != "req-upstream" {
-		t.Fatalf("request id = %q, want req-upstream", got)
+	if got := result.Header.Get("X-Request-Id"); got != "" {
+		t.Fatalf("gateway request id was overwritten by upstream value: %q", got)
+	}
+	if got := result.Header.Values("X-Upstream-Request-Id"); len(got) != 1 || got[0] != "req-upstream" {
+		t.Fatalf("upstream request ids = %v, want only safe upstream id", got)
 	}
 	if got := result.Header.Get("RateLimit-Remaining"); got != "60" {
 		t.Fatalf("generic remaining limit = %q, want 60", got)

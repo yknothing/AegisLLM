@@ -10,13 +10,13 @@
 package server
 
 import (
-	cryptoRand "crypto/rand"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/yknothing/AegisLLM/internal/config"
+	"github.com/yknothing/AegisLLM/internal/requestid"
 	"github.com/yknothing/AegisLLM/internal/utils"
 )
 
@@ -167,12 +167,11 @@ func RecoveryMiddleware(logger *slog.Logger) Middleware {
 // RequestIDMiddleware assigns a unique request ID for tracing.
 func RequestIDMiddleware() Middleware {
 	return func(ctx *RequestContext, next func()) {
-		// Use existing X-Request-ID or generate one
-		reqID := ctx.Request.Header.Get("X-Request-ID")
-		if reqID == "" {
-			reqID = generateRequestID()
+		reqID := ctx.Request.Header.Get(requestid.Header)
+		if !requestid.Safe(reqID) {
+			reqID = requestid.Generate()
 		}
-		ctx.Writer.Header().Set("X-Request-ID", reqID)
+		ctx.Writer.Header().Set(requestid.Header, reqID)
 		next()
 	}
 }
@@ -197,15 +196,4 @@ func AuditMiddleware(logger *slog.Logger) Middleware {
 			// NEVER: "body", "prompt", "completion", "headers"
 		)
 	}
-}
-
-// generateRequestID creates a unique identifier for request tracing.
-// SECURITY: Uses crypto/rand for unpredictable IDs (prevents enumeration attacks).
-func generateRequestID() string {
-	b := make([]byte, 16)
-	if _, err := cryptoRand.Read(b); err != nil {
-		// Fallback should never happen, but don't panic
-		return fmt.Sprintf("req_%d", time.Now().UnixNano())
-	}
-	return fmt.Sprintf("req_%x", b)
 }

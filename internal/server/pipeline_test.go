@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"io"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yknothing/AegisLLM/internal/requestid"
 	"github.com/yknothing/AegisLLM/internal/utils"
 )
 
@@ -117,6 +119,83 @@ func TestRecoveryMiddlewareDoesNotLogPanicValueOrRequestSecrets(t *testing.T) {
 	}
 	if !strings.Contains(logOutput, `"panic_type":"string"`) {
 		t.Fatalf("panic recovery log = %s, want panic_type", logOutput)
+	}
+}
+
+func TestRequestIDMiddlewarePreservesSafeClientRequestID(t *testing.T) {
+	pipeline := testPipeline()
+	pipeline.Use(RequestIDMiddleware())
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set(requestid.Header, "client_req-123.OK:trace")
+	recorder := httptest.NewRecorder()
+
+	pipeline.ServeHTTP(recorder, req)
+
+	if got := recorder.Header().Get(requestid.Header); got != "client_req-123.OK:trace" {
+		t.Fatalf("request id = %q, want safe client value", got)
+	}
+}
+
+func TestRequestIDMiddlewareUsesParsedHTTPHeaderValue(t *testing.T) {
+	pipeline := testPipeline()
+	pipeline.Use(RequestIDMiddleware())
+	rawRequest := strings.Join([]string{
+		"POST /v1/chat/completions HTTP/1.1",
+		"Host: example.test",
+		"X-Request-ID:   parsed-safe-id",
+		"Content-Length: 0",
+		"",
+		"",
+	}, "\r\n")
+	req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(rawRequest)))
+	if err != nil {
+		t.Fatalf("ReadRequest returned error: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+
+	pipeline.ServeHTTP(recorder, req)
+
+	if got := recorder.Header().Get(requestid.Header); got != "parsed-safe-id" {
+		t.Fatalf("request id = %q, want parsed header value", got)
+	}
+}
+
+func TestRequestIDMiddlewareRegeneratesUnsafeClientRequestID(t *testing.T) {
+	tests := []struct {
+		name string
+		id   string
+	}{
+		{name: "empty", id: ""},
+		{name: "raw header map leading space", id: " client-req"},
+		{name: "trailing space", id: "client-req "},
+		{name: "line feed", id: "client\nreq"},
+		{name: "carriage return", id: "client\rreq"},
+		{name: "tab", id: "client\treq"},
+		{name: "separator", id: "client/req"},
+		{name: "non ascii", id: "client-请求"},
+		{name: "too long", id: strings.Repeat("a", requestid.MaxLength+1)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pipeline := testPipeline()
+			pipeline.Use(RequestIDMiddleware())
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			req.Header.Set(requestid.Header, tt.id)
+			recorder := httptest.NewRecorder()
+
+			pipeline.ServeHTTP(recorder, req)
+
+			got := recorder.Header().Get(requestid.Header)
+			if got == tt.id {
+				t.Fatalf("request id preserved unsafe value %q", got)
+			}
+			if !strings.HasPrefix(got, "req_") || !requestid.Safe(got) {
+				t.Fatalf("regenerated request id = %q, want safe generated id", got)
+			}
+		})
 	}
 }
 

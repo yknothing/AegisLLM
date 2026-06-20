@@ -382,6 +382,39 @@ After each significant step:
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
 
+### Step 22 - Request ID Header Echo Hardening
+
+- Security finding:
+  - `RequestIDMiddleware` accepted and echoed any client-supplied `X-Request-ID` value.
+  - This created an avoidable response-header and trace-metadata trust boundary risk for oversized, malformed, control-character, whitespace-padded, or non-ASCII request IDs.
+- Fix:
+  - Added a strict request ID acceptance boundary in shared `internal/requestid`.
+  - Safe client request IDs are preserved only when they are non-empty, at most 128 bytes, trimmed, and contain only ASCII letters, digits, `-`, `_`, `.`, or `:`.
+  - Unsafe values are replaced with generated `req_...` IDs.
+  - Mapped safe upstream provider request IDs to `X-Upstream-Request-Id` instead of appending them to the gateway `X-Request-ID` response header.
+  - Added regression tests for common safe ID formats, unsafe ID rejection, parsed HTTP header behavior, safe client ID preservation, unsafe client ID regeneration, and safe-only upstream request ID mapping.
+  - Updated changelog under `v0.2.0 - Release Candidate`.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test ./internal/requestid ./internal/server ./internal/proxy` passed.
+  - `git diff --check` passed.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=c884a7b-request-id-shared BUILD_DATE=2026-06-20T00:00:00Z PORT=18101` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `288.74kB`.
+    - Image `sha256:d6787ff078060a7074d8415a70e2c077dabe0337b106340327bb1033420f71e3`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: c884a7b-request-id-shared, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Autoreview:
+  - Security architecture expert A initially found no blocking issue in client `X-Request-ID` validation, and identified the upstream `X-Request-Id` response-header collision risk. The final review confirmed no blocking or should-fix findings after upstream IDs were mapped to `X-Upstream-Request-Id` and filtered with the shared request ID safety contract.
+  - Code review expert B initially found no blocking issue, and requested clearer parsed-header test coverage plus progress evidence. The final review confirmed the shared `internal/requestid` contract, parsed HTTP header test, raw header-map test naming, and upstream safe-only mapping have no remaining blocking or should-fix findings.
+- Remaining gates before release-complete claim:
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
 ### Step 21 - Exact Egress Host Allowlist Matching
 
 - Security finding:
