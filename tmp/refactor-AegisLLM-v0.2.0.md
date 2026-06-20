@@ -348,6 +348,38 @@ After each significant step:
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
 
+### Step 25 - PII Redaction Baseline Test Evidence
+
+- Release-quality finding:
+  - `v0.2.0` documents regex-based PII request redaction as an implemented baseline, but the middleware package did not have dedicated tests for redact/detect/block/body-limit behavior.
+  - This was a release evidence gap rather than a runtime behavior change.
+- Fix:
+  - Added `internal/middleware/redaction_test.go`.
+  - Covered `ModeRedact` replacing an email before `next()`.
+  - Covered `ModeDetect` preserving the original body while still allowing the request through.
+  - Covered `ModeBlock` aborting when PII is detected.
+  - Covered oversized request bodies aborting with `413`.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test ./internal/middleware` passed.
+  - `git diff --check` passed.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=1450032-pii-redaction-tests BUILD_DATE=2026-06-20T00:00:00Z PORT=18106` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `295.22kB`.
+    - Image `sha256:f69b4bdfffdcf686af7faa0d5a976b0b9c027ea9d485de98fef9b762f29954c9`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: 1450032-pii-redaction-tests, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Autoreview:
+  - Mainline self-review confirmed this is SUT behavior coverage only: the tests call the real `PIIRedaction` middleware and do not mock the scanner.
+  - The initial attempt to assert private `RequestContext.abortBody` indirectly was removed because it would not have proven the real middleware output path.
+- Remaining gates before release-complete claim:
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
 ### Step 24 - Audit Virtual-Key ID Log Boundary
 
 - Security/truth-surface finding:
