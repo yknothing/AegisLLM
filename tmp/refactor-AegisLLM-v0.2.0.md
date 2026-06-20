@@ -348,6 +348,43 @@ After each significant step:
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
 
+### Step 31 - Per-Key Concurrency Claim and Ceiling Semantics
+
+- Architecture/security finding:
+  - `subscription.Template` exposed tier-level `MaxConcurrency`, but the runtime JWT schema did not have a `max_concurrency` claim and auth always set `ctx.MaxConcurrency = 0`.
+  - This left a truth-surface gap: docs/templates implied per-tier concurrency while runtime only enforced the global default concurrency.
+  - Initial autoreview also found two blocking concurrency risks after adding the claim:
+    - `memoryLimiter` cached the first seen per-key concurrency max in the tracker, so later stricter limits for the same `kid` would not apply.
+    - A large positive `max_concurrency` claim could bypass a stricter non-zero `default_max_concurrency`.
+- Fix:
+  - Added optional `max_concurrency` support to `VirtualKeyClaims`.
+  - Auth now populates `ctx.MaxConcurrency` from the signed claim.
+  - Negative `max_concurrency` claims fail closed.
+  - RateLimiter now treats non-zero `default_max_concurrency` as a deployment-wide ceiling; signed per-key claims can tighten but cannot widen it.
+  - `memoryLimiter` no longer caches the first seen concurrency max; it evaluates the current request limit each acquisition.
+  - Added regression coverage for auth claim propagation, negative claim rejection, per-key context concurrency enforcement, sticky-tracker tightening, and default ceiling behavior.
+  - Updated README, app integration notes, ADRs, subscription comments, and CHANGELOG to describe default/per-key concurrency and ceiling semantics.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test -count=1 ./internal/middleware ./internal/subscription` passed.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed, including package tests, race tests, `golangci-lint`, `govulncheck`, and `gosec`.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=d1ed069-max-concurrency-ceiling BUILD_DATE=2026-06-20T00:00:00Z PORT=18115` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `316.31kB`.
+    - Image `sha256:77a98a5c55b0d034e9bfd97347e2cc3e102047fe2929a266b9593fc92752b0e3`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: d1ed069-max-concurrency-ceiling, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Autoreview:
+  - First architecture/security review found the sticky-tracker max and oversized-claim/default-ceiling problems; both were fixed before commit.
+  - Follow-up architecture review found no blocking or should-fix issues and recommended submission.
+  - Follow-up security review confirmed both prior blocking findings were closed, found no new blocking or should-fix issues, and recommended submission.
+- Remaining gates before release-complete claim:
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
 ### Step 30 - Rate-Limit Baseline Behavior Evidence
 
 - Architecture finding:

@@ -76,7 +76,7 @@ func rateLimiter(cfg RateLimitConfig, limiter Limiter, initErr error) server.Mid
 		}
 		maxConcurrency := cfg.DefaultMaxConc
 		if ctx.MaxConcurrency > 0 {
-			maxConcurrency = ctx.MaxConcurrency
+			maxConcurrency = effectiveMaxConcurrency(cfg.DefaultMaxConc, ctx.MaxConcurrency)
 		}
 
 		// Check RPM limit
@@ -127,7 +127,6 @@ type timestampedCount struct {
 
 type concurrencyTracker struct {
 	current int
-	max     int
 }
 
 func newMemoryLimiter() *memoryLimiter {
@@ -183,11 +182,11 @@ func (m *memoryLimiter) AcquireConcurrency(key string, maxConc int) (bool, func(
 
 	ct, ok := m.conc[key]
 	if !ok {
-		ct = &concurrencyTracker{max: maxConc}
+		ct = &concurrencyTracker{}
 		m.conc[key] = ct
 	}
 
-	if ct.current >= ct.max {
+	if ct.current >= maxConc {
 		return false, nil
 	}
 
@@ -199,6 +198,20 @@ func (m *memoryLimiter) AcquireConcurrency(key string, maxConc int) (bool, func(
 	}
 
 	return true, release
+}
+
+func effectiveMaxConcurrency(defaultMax, keyMax int) int {
+	// A non-zero default is both fallback and deployment-wide ceiling.
+	if keyMax <= 0 {
+		return defaultMax
+	}
+	if defaultMax <= 0 {
+		return keyMax
+	}
+	if keyMax < defaultMax {
+		return keyMax
+	}
+	return defaultMax
 }
 
 // rateLimitErrorJSON creates a rate limit error response.

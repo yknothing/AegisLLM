@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,6 +27,7 @@ const (
 	tokenRetentionTestOutputTokens   = 13
 	memoryLimiterTestRPM             = 1
 	memoryLimiterTestMaxConcurrency  = 1
+	memoryLimiterTestHigherDefault   = 2
 )
 
 func (r *recordingLimiter) Allow(_ string, dimension string, _ int, _ time.Duration) (bool, error) {
@@ -148,9 +150,102 @@ func TestRateLimiterEnforcesDefaultConcurrencyWithMemoryLimiter(t *testing.T) {
 		Request:      httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
 		VirtualKeyID: "vk_test",
 	}
+	secondCtx := &server.RequestContext{
+		Request:      httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		VirtualKeyID: "vk_test",
+	}
+
+	assertSecondConcurrentRequestRejected(t, middleware, firstCtx, secondCtx)
+}
+
+func TestRateLimiterUsesContextConcurrencyWithMemoryLimiter(t *testing.T) {
+	middleware := RateLimiter(RateLimitConfig{
+		Backend:        "memory",
+		DefaultMaxConc: memoryLimiterTestHigherDefault,
+	})
+
+	firstCtx := &server.RequestContext{
+		Request:        httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		VirtualKeyID:   "vk_test",
+		MaxConcurrency: memoryLimiterTestMaxConcurrency,
+	}
+	secondCtx := &server.RequestContext{
+		Request:        httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		VirtualKeyID:   "vk_test",
+		MaxConcurrency: memoryLimiterTestMaxConcurrency,
+	}
+
+	assertSecondConcurrentRequestRejected(t, middleware, firstCtx, secondCtx)
+}
+
+func TestRateLimiterAppliesStricterContextConcurrencyAfterTrackerExists(t *testing.T) {
+	middleware := RateLimiter(RateLimitConfig{
+		Backend:        "memory",
+		DefaultMaxConc: memoryLimiterTestHigherDefault,
+	})
+
+	warmCtx := &server.RequestContext{
+		Request:      httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		VirtualKeyID: "vk_test",
+	}
+	warmCalledNext := false
+	middleware(warmCtx, func() {
+		warmCalledNext = true
+	})
+	if !warmCalledNext {
+		t.Fatal("RateLimiter did not call next for the tracker warm-up request")
+	}
+	if warmCtx.IsAborted() {
+		t.Fatalf("warm-up request aborted with status %d", warmCtx.StatusCode)
+	}
+
+	firstCtx := &server.RequestContext{
+		Request:        httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		VirtualKeyID:   "vk_test",
+		MaxConcurrency: memoryLimiterTestMaxConcurrency,
+	}
+	secondCtx := &server.RequestContext{
+		Request:        httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		VirtualKeyID:   "vk_test",
+		MaxConcurrency: memoryLimiterTestMaxConcurrency,
+	}
+
+	assertSecondConcurrentRequestRejected(t, middleware, firstCtx, secondCtx)
+}
+
+func TestRateLimiterCapsContextConcurrencyAtDefaultWithMemoryLimiter(t *testing.T) {
+	middleware := RateLimiter(RateLimitConfig{
+		Backend:        "memory",
+		DefaultMaxConc: memoryLimiterTestMaxConcurrency,
+	})
+
+	firstCtx := &server.RequestContext{
+		Request:        httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		VirtualKeyID:   "vk_test",
+		MaxConcurrency: memoryLimiterTestHigherDefault,
+	}
+	secondCtx := &server.RequestContext{
+		Request:        httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		VirtualKeyID:   "vk_test",
+		MaxConcurrency: memoryLimiterTestHigherDefault,
+	}
+
+	assertSecondConcurrentRequestRejected(t, middleware, firstCtx, secondCtx)
+}
+
+func assertSecondConcurrentRequestRejected(t *testing.T, middleware server.Middleware, firstCtx, secondCtx *server.RequestContext) {
+	t.Helper()
+
 	enteredFirst := make(chan struct{})
 	releaseFirst := make(chan struct{})
 	firstDone := make(chan bool, 1)
+	var releaseFirstOnce sync.Once
+	releaseFirstRequest := func() {
+		releaseFirstOnce.Do(func() {
+			close(releaseFirst)
+		})
+	}
+	defer releaseFirstRequest()
 
 	go func() {
 		middleware(firstCtx, func() {
@@ -168,10 +263,6 @@ func TestRateLimiterEnforcesDefaultConcurrencyWithMemoryLimiter(t *testing.T) {
 		t.Fatal("timed out waiting for the first request to hold the concurrency slot")
 	}
 
-	secondCtx := &server.RequestContext{
-		Request:      httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
-		VirtualKeyID: "vk_test",
-	}
 	secondCalledNext := false
 	middleware(secondCtx, func() {
 		secondCalledNext = true
@@ -186,7 +277,7 @@ func TestRateLimiterEnforcesDefaultConcurrencyWithMemoryLimiter(t *testing.T) {
 		t.Fatalf("second status = %d, want %d", secondCtx.StatusCode, http.StatusTooManyRequests)
 	}
 
-	close(releaseFirst)
+	releaseFirstRequest()
 	select {
 	case firstAborted := <-firstDone:
 		if firstAborted {

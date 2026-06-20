@@ -75,7 +75,7 @@ response = client.chat.completions.create(
 | Virtual key auth | HS256 validation implemented; RS256 is planned |
 | Provider support | `openai` and OpenAI-compatible `deepseek` enabled; Anthropic/Gemini fail closed until adapters are implemented |
 | KMS | Local AES-GCM interface with in-memory and encrypted file backends implemented; Vault is planned |
-| Rate limiting | In-memory RPM and concurrency baseline implemented; non-zero TPM, Redis backend, and `redis_url` fail fast until implemented |
+| Rate limiting | In-memory RPM and default/per-key concurrency baseline implemented; non-zero `default_max_concurrency` is a deployment ceiling; non-zero TPM, Redis backend, and `redis_url` fail fast until implemented |
 | PII protection | Regex-based request redaction baseline implemented |
 | Cost management | Pricing/quota modules scaffolded; `quota.enabled=true` and reserved quota backend/DSN/default-budget fields are rejected until runtime enforcement exists |
 | Admin API / BYOK | Handler scaffold exists but is not mounted by the main gateway; mutating/query endpoints fail closed with `501`, and `key_source="byok"` virtual keys are rejected until owner/provider binding exists |

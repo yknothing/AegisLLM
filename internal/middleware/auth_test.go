@@ -5,25 +5,34 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yknothing/AegisLLM/internal/server"
 )
 
 var testSigningKey = []byte("0123456789abcdef0123456789abcdef")
 
-const testTokenMaxTTL = 24 * time.Hour
+const (
+	testTokenMaxTTL           = 24 * time.Hour
+	testTokenMaxConcurrency   = 3
+	testContextMaxConcurrency = 2
+)
 
 func TestValidateTokenHS256(t *testing.T) {
 	key := testSigningKey
 	token := signTestToken(t, key, VirtualKeyClaims{
-		KeyID:     "vk_test",
-		Subject:   "user_1",
-		Models:    []string{"gpt-4o-mini"},
-		KeySource: "pool",
-		IssuedAt:  time.Now().Add(-time.Minute).Unix(),
-		ExpiresAt: time.Now().Add(time.Hour).Unix(),
-		Issuer:    "aegis",
+		KeyID:          "vk_test",
+		Subject:        "user_1",
+		Models:         []string{"gpt-4o-mini"},
+		MaxConcurrency: testTokenMaxConcurrency,
+		KeySource:      "pool",
+		IssuedAt:       time.Now().Add(-time.Minute).Unix(),
+		ExpiresAt:      time.Now().Add(time.Hour).Unix(),
+		Issuer:         "aegis",
 	})
 
 	claims, err := validateToken(token, key, "aegis", testTokenMaxTTL)
@@ -32,6 +41,9 @@ func TestValidateTokenHS256(t *testing.T) {
 	}
 	if claims.KeyID != "vk_test" {
 		t.Fatalf("key id = %q, want vk_test", claims.KeyID)
+	}
+	if claims.MaxConcurrency != testTokenMaxConcurrency {
+		t.Fatalf("max concurrency = %d, want %d", claims.MaxConcurrency, testTokenMaxConcurrency)
 	}
 }
 
@@ -207,6 +219,12 @@ func TestValidateTokenRejectsNegativeLimitClaims(t *testing.T) {
 				MaxTPM: -1,
 			},
 		},
+		{
+			name: "concurrency",
+			claims: VirtualKeyClaims{
+				MaxConcurrency: -1,
+			},
+		},
 	}
 
 	key := testSigningKey
@@ -268,6 +286,42 @@ func TestAuthFailureJSONUsesSingleClientFacingMessage(t *testing.T) {
 	}
 	if !strings.Contains(got, "invalid or expired virtual key") {
 		t.Fatalf("auth failure JSON = %s, want generic virtual key failure", got)
+	}
+}
+
+func TestAuthPopulatesConcurrencyClaim(t *testing.T) {
+	key := testSigningKey
+	token := signTestToken(t, key, VirtualKeyClaims{
+		KeyID:          "vk_test",
+		KeySource:      "pool",
+		Models:         []string{"gpt-4o-mini"},
+		MaxConcurrency: testContextMaxConcurrency,
+		IssuedAt:       time.Now().Add(-time.Minute).Unix(),
+		ExpiresAt:      time.Now().Add(time.Hour).Unix(),
+		Issuer:         "aegis",
+	})
+	ctx := &server.RequestContext{
+		Request: httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+	}
+	ctx.Request.Header.Set("Authorization", "Bearer "+token)
+
+	calledNext := false
+	Auth(AuthConfig{
+		SigningKey: key,
+		Issuer:     "aegis",
+		Expiry:     testTokenMaxTTL,
+	})(ctx, func() {
+		calledNext = true
+	})
+
+	if !calledNext {
+		t.Fatal("Auth did not call next for a valid token")
+	}
+	if ctx.IsAborted() {
+		t.Fatalf("Auth aborted valid token with status %d", ctx.StatusCode)
+	}
+	if ctx.MaxConcurrency != testContextMaxConcurrency {
+		t.Fatalf("ctx.MaxConcurrency = %d, want %d", ctx.MaxConcurrency, testContextMaxConcurrency)
 	}
 }
 

@@ -4,7 +4,7 @@
 Accepted
 
 ## Implementation Status
-Current runtime enforces request-per-minute and concurrency limits in the Rate Limit step. Token-per-minute limits are reserved; non-zero TPM configuration or claims fail closed until TPM preflight and reconciliation logic exists.
+Current runtime enforces request-per-minute and default/per-key concurrency limits in the Rate Limit step. Token-per-minute limits are reserved; non-zero TPM configuration or claims fail closed until TPM preflight and reconciliation logic exists.
 
 ## Context
 Aegis processes every request through a chain of middleware. The order of these middleware is security-critical: placing rate limiting before authentication would allow unauthenticated clients to consume rate limit capacity, while placing KMS key injection before routing would mean we don't know which key to fetch.
@@ -17,7 +17,7 @@ The middleware pipeline will execute in this strict order:
 2. Request ID   → Assign tracing identifier
 3. Audit Log    → Record metadata (post-request, never content)
 4. Auth         → Validate Virtual Key, reject unauthorized
-5. Rate Limit   → Enforce RPM/concurrency limits; reject unsupported TPM limits
+5. Rate Limit   → Enforce RPM/default or per-key concurrency limits; reject unsupported TPM limits
 6. PII Redact   → Scan and sanitize request body
 7. Router       → Select provider and model
 8. KMS Inject   → Fetch and inject real API key
@@ -33,7 +33,7 @@ The ordering follows the principle of **"fail fast, fail cheap"**:
 | :--- | :--- | :--- |
 | 1-3 | Infrastructure | Must always run (even for rejected requests) |
 | 4 | Auth | Reject unauthorized requests before any expensive work |
-| 5 | Rate Limit | Prevent request/concurrency abuse before processing content; fail closed for unsupported TPM controls |
+| 5 | Rate Limit | Prevent request-rate and default/per-key concurrency abuse before processing content; fail closed for unsupported TPM controls |
 | 6 | PII | Sanitize before content leaves the gateway |
 | 7 | Router | Must know the target before fetching keys |
 | 8 | KMS | Fetch key only after routing decision is final |

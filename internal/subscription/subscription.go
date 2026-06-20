@@ -36,9 +36,12 @@ type Template struct {
 
 // DefaultTemplates returns the standard tier configurations.
 // Current runtime-compatible templates keep TPM and BudgetUSD at 0 because
-// non-zero values are rejected until enforcement exists. They also include only
-// OpenAI-compatible model names for providers enabled by the v0.2.0 runtime.
-// BYOK is reserved and intentionally omitted until owner/provider binding exists.
+// non-zero values are rejected until enforcement exists. MaxConcurrency maps to
+// the runtime `max_concurrency` virtual-key claim when an external issuer uses
+// these templates; a non-zero deployment default remains the runtime ceiling.
+// The templates include only OpenAI-compatible model names for providers
+// enabled by the v0.2.0 runtime. BYOK is reserved and intentionally omitted
+// until owner/provider binding exists.
 func DefaultTemplates() map[Tier]Template {
 	return map[Tier]Template{
 		TierFree: {

@@ -52,18 +52,19 @@ type RevocationStore interface {
 
 // VirtualKeyClaims represents the JWT payload for an Aegis virtual key.
 type VirtualKeyClaims struct {
-	KeyID     string   `json:"kid"`
-	Subject   string   `json:"sub"`                   // Owner identifier
-	Models    []string `json:"models"`                // Allowed models
-	MaxRPM    int      `json:"rpm"`                   // Per-key rate limit (0 = unlimited)
-	MaxTPM    int      `json:"tpm"`                   // Per-key token limit (0 = unlimited)
-	BudgetUSD float64  `json:"budget"`                // Monthly budget in USD (0 = unlimited)
-	KeySource string   `json:"key_source"`            // Runtime: "pool"; reserved: "byok"
-	BYOKKeyID string   `json:"byok_key_id,omitempty"` // Reserved until BYOK binding exists
-	PoolGroup string   `json:"pool_group,omitempty"`  // Pool group for server-hosted keys
-	IssuedAt  int64    `json:"iat"`
-	ExpiresAt int64    `json:"exp"`
-	Issuer    string   `json:"iss"`
+	KeyID          string   `json:"kid"`
+	Subject        string   `json:"sub"`                   // Owner identifier
+	Models         []string `json:"models"`                // Allowed models
+	MaxRPM         int      `json:"rpm"`                   // Per-key rate limit (0 = unlimited)
+	MaxTPM         int      `json:"tpm"`                   // Per-key token limit (0 = unlimited)
+	MaxConcurrency int      `json:"max_concurrency"`       // Per-key concurrent requests (0 = default)
+	BudgetUSD      float64  `json:"budget"`                // Monthly budget in USD (0 = unlimited)
+	KeySource      string   `json:"key_source"`            // Runtime: "pool"; reserved: "byok"
+	BYOKKeyID      string   `json:"byok_key_id,omitempty"` // Reserved until BYOK binding exists
+	PoolGroup      string   `json:"pool_group,omitempty"`  // Pool group for server-hosted keys
+	IssuedAt       int64    `json:"iat"`
+	ExpiresAt      int64    `json:"exp"`
+	Issuer         string   `json:"iss"`
 }
 
 // Auth creates the authentication middleware.
@@ -113,7 +114,7 @@ func Auth(cfg AuthConfig) server.Middleware {
 		ctx.BYOKKeyID = claims.BYOKKeyID
 		ctx.MaxRPM = claims.MaxRPM
 		ctx.MaxTPM = claims.MaxTPM
-		ctx.MaxConcurrency = 0
+		ctx.MaxConcurrency = claims.MaxConcurrency
 
 		next()
 	}
@@ -222,6 +223,9 @@ func validateToken(token string, signingKey []byte, expectedIssuer string, maxTo
 	}
 	if claims.MaxTPM > 0 {
 		return nil, fmt.Errorf("TPM enforcement is not implemented")
+	}
+	if claims.MaxConcurrency < 0 {
+		return nil, fmt.Errorf("concurrency limit must not be negative")
 	}
 
 	return &claims, nil
