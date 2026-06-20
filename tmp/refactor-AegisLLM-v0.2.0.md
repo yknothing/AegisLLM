@@ -348,6 +348,46 @@ After each significant step:
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
 
+### Step 26 - Reserved Admin Scaffold Auth Hardening
+
+- Security/truth-surface finding:
+  - The main `v0.2.0` gateway does not mount Admin API routes, but the reserved `internal/admin` scaffold still ships in the repository.
+  - Admin auth failures returned different client messages for missing versus invalid tokens.
+  - The scaffold comparison helper returned before `crypto/subtle.ConstantTimeCompare` when lengths differed.
+- Fix:
+  - Added shared admin auth constants for the token header and generic failure message.
+  - Changed missing and incorrect admin token responses to the same `admin authentication failed` message.
+  - Changed provided-token comparison to hash both inputs with SHA-256, compare the fixed-length digests with `subtle.ConstantTimeCompare`, and preserve exact-length equality in the final result.
+  - Added tests for missing, same-length wrong, short wrong, nil, and equal token cases.
+  - Preserved the current fail-closed BYOK scaffold behavior: authenticated BYOK registration still returns `501` and does not store submitted keys.
+  - Updated `CHANGELOG.md` under `v0.2.0 - Release Candidate`.
+- New `v0.2.0` behavior:
+  - Admin API remains excluded from the main gateway runtime and is still not mounted by `cmd/aegis`.
+  - If the scaffold is exercised directly in tests or future wiring, admin auth failure categories are not reflected to clients.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test ./internal/admin` passed.
+  - `rg -n "admin token required|invalid admin token|ConstantTimeEq|int32\\(len|admin authentication failed|X-Admin-Token" internal/admin CHANGELOG.md SECURITY.md docs` confirmed the old client-facing auth failure messages were removed and only the new generic message remains.
+  - `git diff --check` passed.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=c35c858-admin-auth-scaffold BUILD_DATE=2026-06-20T00:00:00Z PORT=18107` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `296.73kB`.
+    - Image `sha256:1e146c6f4293e0de87185c9ba851f64b6261a123b8eea03a19877aeb9213c529`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: c35c858-admin-auth-scaffold, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Autoreview:
+  - Architecture/security expert Hooke found no release-blocking or should-fix findings.
+  - Hooke confirmed `cmd/aegis` still uses `runtime.NewServer`, the server mux still mounts only `/v1/` and `/health`, and no runtime/cmd code imports `internal/admin` or calls `RegisterRoutes`.
+  - Hooke judged the fixed-length hash comparison conservative but not over-designed for the scaffold, and found no safety regression.
+  - Mainline self-review corrected the changelog wording to avoid claiming missing-token requests enter the comparison path.
+- Remaining gates before release-complete claim:
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
 ### Step 25 - PII Redaction Baseline Test Evidence
 
 - Release-quality finding:

@@ -12,12 +12,14 @@ import (
 	"github.com/yknothing/AegisLLM/internal/utils"
 )
 
+const adminTestToken = "admin-token"
+
 func TestRegisterBYOKFailsClosed(t *testing.T) {
 	kms := &recordingKMS{}
-	handler := NewHandler(kms, slog.New(slog.NewTextHandler(io.Discard, nil)), []byte("admin-token"))
+	handler := NewHandler(kms, slog.New(slog.NewTextHandler(io.Discard, nil)), []byte(adminTestToken))
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/keys/byok", strings.NewReader(`{"user_id":"u1","provider":"openai","api_key":"sk-test"}`))
-	req.Header.Set("X-Admin-Token", "admin-token")
+	req.Header.Set(adminTokenHeader, adminTestToken)
 	rec := httptest.NewRecorder()
 
 	handler.authMiddleware(handler.registerBYOK)(rec, req)
@@ -30,16 +32,54 @@ func TestRegisterBYOKFailsClosed(t *testing.T) {
 	}
 }
 
-func TestAdminAuthRejectsMissingToken(t *testing.T) {
-	handler := NewHandler(&recordingKMS{}, slog.New(slog.NewTextHandler(io.Discard, nil)), []byte("admin-token"))
+func TestAdminAuthRejectsFailuresWithGenericMessage(t *testing.T) {
+	handler := NewHandler(&recordingKMS{}, slog.New(slog.NewTextHandler(io.Discard, nil)), []byte(adminTestToken))
 
-	req := httptest.NewRequest(http.MethodPost, "/admin/keys/byok", strings.NewReader(`{}`))
-	rec := httptest.NewRecorder()
+	tests := []struct {
+		name  string
+		token string
+	}{
+		{name: "missing"},
+		{name: "wrong same length", token: "wrong-token"},
+		{name: "wrong short", token: "bad"},
+	}
 
-	handler.authMiddleware(handler.registerBYOK)(rec, req)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/admin/keys/byok", strings.NewReader(`{}`))
+			if tt.token != "" {
+				req.Header.Set(adminTokenHeader, tt.token)
+			}
+			rec := httptest.NewRecorder()
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+			handler.authMiddleware(handler.registerBYOK)(rec, req)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+			}
+			body := rec.Body.String()
+			if !strings.Contains(body, adminAuthFailedError) {
+				t.Fatalf("body = %s, want generic auth failure", body)
+			}
+			if strings.Contains(body, "required") || strings.Contains(body, "invalid") {
+				t.Fatalf("body disclosed auth failure category: %s", body)
+			}
+		})
+	}
+}
+
+func TestConstantTimeEqualHandlesLengthMismatch(t *testing.T) {
+	if !constantTimeEqual([]byte(adminTestToken), []byte(adminTestToken)) {
+		t.Fatal("constantTimeEqual rejected equal tokens")
+	}
+	for _, token := range [][]byte{
+		[]byte("wrong-token"),
+		[]byte("bad"),
+		nil,
+	} {
+		if constantTimeEqual(token, []byte(adminTestToken)) {
+			t.Fatalf("constantTimeEqual accepted %q", token)
+		}
 	}
 }
 

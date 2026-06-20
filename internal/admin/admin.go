@@ -18,12 +18,18 @@
 package admin
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 
 	"github.com/yknothing/AegisLLM/internal/kms"
+)
+
+const (
+	adminTokenHeader     = "X-Admin-Token"
+	adminAuthFailedError = "admin authentication failed"
 )
 
 // Handler provides the admin API endpoints.
@@ -120,15 +126,14 @@ func (h *Handler) healthCheck(w http.ResponseWriter, r *http.Request) {
 // SECURITY: Uses constant-time comparison to prevent timing attacks.
 func (h *Handler) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token := r.Header.Get("X-Admin-Token")
+		token := r.Header.Get(adminTokenHeader)
 		if token == "" {
-			writeError(w, http.StatusUnauthorized, "admin token required")
+			writeError(w, http.StatusUnauthorized, adminAuthFailedError)
 			return
 		}
 
-		// Constant-time comparison
 		if !constantTimeEqual([]byte(token), h.adminToken) {
-			writeError(w, http.StatusUnauthorized, "invalid admin token")
+			writeError(w, http.StatusUnauthorized, adminAuthFailedError)
 			return
 		}
 
@@ -136,12 +141,14 @@ func (h *Handler) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// constantTimeEqual performs a constant-time byte comparison.
+// constantTimeEqual performs a fixed-length hash comparison so mismatched
+// input lengths do not bypass the constant-time compare path.
 func constantTimeEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	return subtle.ConstantTimeCompare(a, b) == 1
+	aHash := sha256.Sum256(a)
+	bHash := sha256.Sum256(b)
+	sameLength := len(a) == len(b)
+	sameHash := subtle.ConstantTimeCompare(aHash[:], bHash[:]) == 1
+	return sameLength && sameHash
 }
 
 // --- Helpers ---
