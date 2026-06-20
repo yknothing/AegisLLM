@@ -21,6 +21,49 @@ After each significant step:
 
 ## Step Log
 
+### Final Release Evidence - v0.2.0
+
+- Final release commit:
+  - short SHA: `aece329`;
+  - full SHA: `aece3298720d210f5dd242aebd72ac71af4b2aff`;
+  - commit message: `docs: finalize v0.2.0 release status`.
+- Release ownership:
+  - release owner: `yknothing`;
+  - verification owner: Codex execution thread running local release gates, `ssh ceo` Docker smoke, and GitHub Actions status checks;
+  - approver: `yknothing`.
+- Local verification on the final release commit:
+  - `make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed.
+  - `make local-smoke GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local COMMIT=aece329 PORT=18131` passed with `version=aegis v0.2.0-rc-local (commit: aece329, built: 2026-06-20T16:27:42Z)`, `health={"status":"ok"}`, and `unauth_status=401`.
+- Mac mini Docker verification on `ssh ceo`:
+  - `make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=aece329 BUILD_DATE=2026-06-20T16:27:42Z PORT=18132` passed.
+  - host: `Mac-mini.local`;
+  - Docker version: `29.1.3`;
+  - Docker arch: `aarch64`;
+  - image id: `sha256:1533bb17ac46b6bf4372fd66b1cf0a62e813703b3caa41b0820ce9ca5cea939f`;
+  - version assertion output: `aegis v0.2.0-docker-test (commit: aece329, built: 2026-06-20T16:27:42Z)`;
+  - `health={"status":"ok"}`;
+  - `unauth_status=401`;
+  - `readonly=true`;
+  - `user=nonroot:nonroot`.
+- Remote GitHub verification:
+  - branch push succeeded: `codex/aegis-architecture-refactor` from `3420792` to `aece329`;
+  - remote branch: `refs/heads/codex/aegis-architecture-refactor` points to `aece3298720d210f5dd242aebd72ac71af4b2aff`;
+  - GitHub Actions run: `27877115839`;
+  - run URL: `https://github.com/yknothing/AegisLLM/actions/runs/27877115839`;
+  - run `headSha`: `aece3298720d210f5dd242aebd72ac71af4b2aff`;
+  - conclusion: `success`;
+  - jobs passed: `Go 1.22 compatibility`, `Quality gates`, and `Docker smoke`.
+- Release tag:
+  - local annotated tag object: `da28c521dc726ec603583f38ac9d9d8d18b1f79e`;
+  - local peeled tag target: `aece3298720d210f5dd242aebd72ac71af4b2aff`;
+  - remote annotated tag object: `da28c521dc726ec603583f38ac9d9d8d18b1f79e`;
+  - remote peeled tag target: `aece3298720d210f5dd242aebd72ac71af4b2aff`.
+- Known non-blocking CI annotations:
+  - GitHub Actions reported Node.js 20 deprecation warnings for pinned official actions.
+  - `actions/setup-go` cache restore warned that `go.sum` was absent; the workflow still completed successfully.
+- Post-tag note:
+  - This final evidence record is committed after the `v0.2.0` tag so the tag remains pointed at the verified release commit.
+
 ### Step 0 - Baseline Capture
 
 - Created progress tracker.
