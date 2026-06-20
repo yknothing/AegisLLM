@@ -161,6 +161,9 @@ func runtimeMiddlewareOptions(
 }
 
 func validateRuntimeConfig(cfg *config.Config) error {
+	if err := config.ValidateServerConfig(cfg.Server); err != nil {
+		return err
+	}
 	if cfg.Auth.TokenExpiry <= 0 {
 		return fmt.Errorf("auth.token_expiry must be positive")
 	}

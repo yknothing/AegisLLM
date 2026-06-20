@@ -50,6 +50,16 @@ type Server struct {
 // New creates a new Aegis server with the configured middleware pipeline.
 // Accepts functional options for dependency injection and extensibility.
 func New(cfg *config.Config, logger *slog.Logger, opts ...Option) (*Server, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config is nil")
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if err := config.ValidateServerConfig(cfg.Server); err != nil {
+		return nil, err
+	}
+
 	srv := &Server{
 		cfg:    cfg,
 		logger: logger,

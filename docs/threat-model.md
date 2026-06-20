@@ -26,7 +26,7 @@ flowchart LR
 | Boundary | Abuse Path | Required Control |
 | --- | --- | --- |
 | Client to `/v1/*` | Missing, forged, expired, or replayed virtual key | JWT signature, issuer, expiry, and revocation checks before body processing |
-| Client body to provider | Oversized prompt or PII leakage | Bounded body reads, configurable PII mode, no body logging |
+| Client body to provider | Oversized prompt or PII leakage | Bounded body reads with capped configuration, configurable PII mode, no body logging |
 | Router to KMS | User asks for an unauthorized model to reach a different provider key | Model permission check before provider and key selection |
 | KMS to request context | Provider key remains in memory after request | `SecureBytes.Close()` at KMS, proxy, and pipeline cleanup boundaries |
 | Gateway to provider | SSRF or exfiltration via malicious URL | Parse URL and validate normalized host against exact/wildcard allowlist; fail closed |

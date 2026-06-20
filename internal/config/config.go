@@ -25,6 +25,13 @@ type Config struct {
 	Egress    EgressConfig    `json:"egress"`
 }
 
+const (
+	// DefaultMaxRequestBodySize is the standalone runtime request-body limit.
+	DefaultMaxRequestBodySize int64 = 10 << 20
+	// MaxRequestBodySizeLimit is the largest accepted configured body limit.
+	MaxRequestBodySizeLimit int64 = 64 << 20
+)
+
 // ServerConfig defines the HTTP server settings.
 type ServerConfig struct {
 	Address            string        `json:"address"`
@@ -320,7 +327,7 @@ func defaultConfig() *Config {
 			ReadTimeout:        30 * time.Second,
 			WriteTimeout:       120 * time.Second, // Long timeout for streaming
 			ShutdownTimeout:    15 * time.Second,
-			MaxRequestBodySize: 10 << 20,
+			MaxRequestBodySize: DefaultMaxRequestBodySize,
 		},
 		KMS: KMSConfig{
 			Mode: "local",
@@ -346,20 +353,43 @@ func defaultConfig() *Config {
 	}
 }
 
-// validate checks the configuration for logical errors and security issues.
-func (c *Config) validate() error {
-	if c.Server.Address == "" {
+// ValidateServerConfig checks server runtime bounds and TLS settings.
+func ValidateServerConfig(server ServerConfig) error {
+	if server.Address == "" {
 		return errors.New("server address must not be empty")
 	}
-	if c.Server.TLS.Enabled {
-		if c.Server.TLS.CertFile == "" || c.Server.TLS.KeyFile == "" {
+	if server.ReadTimeout <= 0 {
+		return errors.New("server.read_timeout must be positive")
+	}
+	if server.WriteTimeout <= 0 {
+		return errors.New("server.write_timeout must be positive")
+	}
+	if server.ShutdownTimeout <= 0 {
+		return errors.New("server.shutdown_timeout must be positive")
+	}
+	if server.MaxRequestBodySize <= 0 {
+		return errors.New("server.max_request_body_size must be positive")
+	}
+	if server.MaxRequestBodySize > MaxRequestBodySizeLimit {
+		return fmt.Errorf("server.max_request_body_size must not exceed %d", MaxRequestBodySizeLimit)
+	}
+	if server.TLS.Enabled {
+		if server.TLS.CertFile == "" || server.TLS.KeyFile == "" {
 			return errors.New("server TLS requires cert_file and key_file")
 		}
-		switch c.Server.TLS.MinVersion {
+		switch server.TLS.MinVersion {
 		case "", "1.3", "TLS1.3", "tls1.3":
 		default:
 			return errors.New("server.tls.min_version currently supports only TLS 1.3")
 		}
+	}
+	return nil
+}
+
+// validate checks the configuration for logical errors and security issues.
+func (c *Config) validate() error {
+	if err := ValidateServerConfig(c.Server); err != nil {
+		return err
 	}
 	if c.Auth.TokenExpiry <= 0 {
 		return errors.New("auth.token_expiry must be positive")

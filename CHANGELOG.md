@@ -7,6 +7,7 @@ All notable changes to AegisLLM are documented here.
 ### Security hardening
 
 - Added fail-fast validation for reserved runtime controls: Vault KMS, Redis rate limiter, quota enforcement, provider TPM, provider RPM, default TPM, and unsupported provider adapters.
+- Added fail-fast validation for out-of-range server runtime bounds: read timeout, write timeout, shutdown timeout, and max request body size with an explicit 64 MiB configuration ceiling.
 - Added `max_concurrency` virtual-key claim support so subscription-tier concurrency limits can be enforced by the in-memory rate limiter; negative concurrency claims fail closed, and non-zero default concurrency remains the deployment ceiling.
 - Validated reserved and invalid rate-limit fields even when rate limiting is disabled, so disabled Redis/TPM settings cannot remain in accepted configs.
 - Removed reserved TPM token-accounting state from the `v0.2.0` runtime so token counts are not retained until TPM enforcement is implemented.

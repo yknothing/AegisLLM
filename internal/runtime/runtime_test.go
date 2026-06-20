@@ -273,6 +273,69 @@ func TestNewServerRejectsUnsupportedRuntimeControls(t *testing.T) {
 			wantErr: "auth.token_expiry must be positive",
 		},
 		{
+			name: "zero read timeout",
+			mutate: func(cfg *config.Config) {
+				cfg.Server.ReadTimeout = 0
+			},
+			wantErr: "server.read_timeout must be positive",
+		},
+		{
+			name: "negative read timeout",
+			mutate: func(cfg *config.Config) {
+				cfg.Server.ReadTimeout = -1
+			},
+			wantErr: "server.read_timeout must be positive",
+		},
+		{
+			name: "zero write timeout",
+			mutate: func(cfg *config.Config) {
+				cfg.Server.WriteTimeout = 0
+			},
+			wantErr: "server.write_timeout must be positive",
+		},
+		{
+			name: "negative write timeout",
+			mutate: func(cfg *config.Config) {
+				cfg.Server.WriteTimeout = -1
+			},
+			wantErr: "server.write_timeout must be positive",
+		},
+		{
+			name: "zero shutdown timeout",
+			mutate: func(cfg *config.Config) {
+				cfg.Server.ShutdownTimeout = 0
+			},
+			wantErr: "server.shutdown_timeout must be positive",
+		},
+		{
+			name: "negative shutdown timeout",
+			mutate: func(cfg *config.Config) {
+				cfg.Server.ShutdownTimeout = -1
+			},
+			wantErr: "server.shutdown_timeout must be positive",
+		},
+		{
+			name: "zero max request body size",
+			mutate: func(cfg *config.Config) {
+				cfg.Server.MaxRequestBodySize = 0
+			},
+			wantErr: "server.max_request_body_size must be positive",
+		},
+		{
+			name: "negative max request body size",
+			mutate: func(cfg *config.Config) {
+				cfg.Server.MaxRequestBodySize = -1
+			},
+			wantErr: "server.max_request_body_size must be positive",
+		},
+		{
+			name: "max request body size above maximum",
+			mutate: func(cfg *config.Config) {
+				cfg.Server.MaxRequestBodySize = config.MaxRequestBodySizeLimit + 1
+			},
+			wantErr: "server.max_request_body_size must not exceed",
+		},
+		{
 			name: "quota",
 			mutate: func(cfg *config.Config) {
 				cfg.Quota.Enabled = true
@@ -443,6 +506,13 @@ func TestRuntimeMiddlewareOrder(t *testing.T) {
 
 func minimalRuntimeConfig() *config.Config {
 	return &config.Config{
+		Server: config.ServerConfig{
+			Address:            ":0",
+			ReadTimeout:        30 * time.Second,
+			WriteTimeout:       120 * time.Second,
+			ShutdownTimeout:    15 * time.Second,
+			MaxRequestBodySize: config.DefaultMaxRequestBodySize,
+		},
 		KMS: config.KMSConfig{
 			Mode: "local",
 			Local: config.LocalKMS{

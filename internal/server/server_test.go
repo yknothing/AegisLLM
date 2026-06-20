@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,6 +26,55 @@ const (
 	testCACertTTL       = time.Hour
 	testCASerialNumber  = 1
 )
+
+func TestNewRejectsInvalidServerBounds(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*config.ServerConfig)
+		wantErr string
+	}{
+		{
+			name: "zero read timeout",
+			mutate: func(serverCfg *config.ServerConfig) {
+				serverCfg.ReadTimeout = 0
+			},
+			wantErr: "server.read_timeout must be positive",
+		},
+		{
+			name: "negative write timeout",
+			mutate: func(serverCfg *config.ServerConfig) {
+				serverCfg.WriteTimeout = -1
+			},
+			wantErr: "server.write_timeout must be positive",
+		},
+		{
+			name: "zero shutdown timeout",
+			mutate: func(serverCfg *config.ServerConfig) {
+				serverCfg.ShutdownTimeout = 0
+			},
+			wantErr: "server.shutdown_timeout must be positive",
+		},
+		{
+			name: "body size above maximum",
+			mutate: func(serverCfg *config.ServerConfig) {
+				serverCfg.MaxRequestBodySize = config.MaxRequestBodySizeLimit + 1
+			},
+			wantErr: "server.max_request_body_size must not exceed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{Server: testValidServerConfig()}
+			tt.mutate(&cfg.Server)
+
+			_, err := New(cfg, slog.Default())
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("New error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
 
 func TestBuildTLSConfigWithoutCAUsesTLS13WithoutClientCert(t *testing.T) {
 	srv := testServerWithTLS(config.TLSConfig{Enabled: true})
@@ -78,6 +128,16 @@ func TestBuildTLSConfigRejectsInvalidCAFile(t *testing.T) {
 
 	if _, err := srv.buildTLSConfig(); err == nil {
 		t.Fatal("buildTLSConfig accepted an invalid CA file")
+	}
+}
+
+func testValidServerConfig() config.ServerConfig {
+	return config.ServerConfig{
+		Address:            ":0",
+		ReadTimeout:        30 * time.Second,
+		WriteTimeout:       120 * time.Second,
+		ShutdownTimeout:    15 * time.Second,
+		MaxRequestBodySize: config.DefaultMaxRequestBodySize,
 	}
 }
 

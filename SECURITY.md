@@ -46,7 +46,7 @@ Contributors MUST follow these rules:
 2. **Always zero secrets**: Call `utils.MemZero()` or `SecureBytes.Close()` after using credentials
 3. **No plaintext keys in config**: Use KMS key IDs (`api_key_id`), never raw API keys
 4. **Constant-time comparison**: Use `crypto/subtle` for token/signature validation
-5. **Input validation**: Reject oversized payloads, validate all user input
+5. **Input validation**: Reject oversized payloads, cap request-body limits, validate all user input
 6. **No open redirects**: The proxy only contacts pre-configured provider URLs
 
 ## Dependency Policy

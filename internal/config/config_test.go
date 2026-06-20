@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -271,6 +272,94 @@ func TestLoadRejectsNonPositiveAuthTokenExpiry(t *testing.T) {
 			_, err := Load(path)
 			if err == nil || !strings.Contains(err.Error(), "auth.token_expiry must be positive") {
 				t.Fatalf("Load error = %v, want auth.token_expiry failure", err)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidServerBounds(t *testing.T) {
+	tests := []struct {
+		name    string
+		server  string
+		wantErr string
+	}{
+		{
+			name:    "zero read timeout",
+			server:  serverBoundsConfig("0s", "120s", "15s", DefaultMaxRequestBodySize),
+			wantErr: "server.read_timeout must be positive",
+		},
+		{
+			name:    "negative read timeout",
+			server:  serverBoundsConfig("-1s", "120s", "15s", DefaultMaxRequestBodySize),
+			wantErr: "server.read_timeout must be positive",
+		},
+		{
+			name:    "zero write timeout",
+			server:  serverBoundsConfig("30s", "0s", "15s", DefaultMaxRequestBodySize),
+			wantErr: "server.write_timeout must be positive",
+		},
+		{
+			name:    "negative write timeout",
+			server:  serverBoundsConfig("30s", "-1s", "15s", DefaultMaxRequestBodySize),
+			wantErr: "server.write_timeout must be positive",
+		},
+		{
+			name:    "zero shutdown timeout",
+			server:  serverBoundsConfig("30s", "120s", "0s", DefaultMaxRequestBodySize),
+			wantErr: "server.shutdown_timeout must be positive",
+		},
+		{
+			name:    "negative shutdown timeout",
+			server:  serverBoundsConfig("30s", "120s", "-1s", DefaultMaxRequestBodySize),
+			wantErr: "server.shutdown_timeout must be positive",
+		},
+		{
+			name:    "zero body size",
+			server:  serverBoundsConfig("30s", "120s", "15s", 0),
+			wantErr: "server.max_request_body_size must be positive",
+		},
+		{
+			name:    "negative body size",
+			server:  serverBoundsConfig("30s", "120s", "15s", -1),
+			wantErr: "server.max_request_body_size must be positive",
+		},
+		{
+			name:    "body size above maximum",
+			server:  serverBoundsConfig("30s", "120s", "15s", MaxRequestBodySizeLimit+1),
+			wantErr: "server.max_request_body_size must not exceed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+			path := writeConfig(t, `{
+				"server": {
+					"address": ":9090",
+					`+tt.server+`
+				},
+				"kms": {
+					"mode": "local",
+					"local": {"master_key_env": "AEGIS_MASTER_KEY"}
+				},
+				"providers": [
+					{
+						"id": "openai-primary",
+						"name": "OpenAI Primary",
+						"type": "openai",
+						"base_url": "https://api.openai.com",
+						"api_key_id": "openai-key-1",
+						"models": ["gpt-4o-mini"],
+						"enabled": true
+					}
+				],
+				"quota": {"enabled": false},
+				"egress": {"allowed_domains": ["api.openai.com"]}
+			}`)
+
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Load error = %v, want %q", err, tt.wantErr)
 			}
 		})
 	}
@@ -627,4 +716,11 @@ func writeConfig(t *testing.T, data string) string {
 		t.Fatalf("write config: %v", err)
 	}
 	return path
+}
+
+func serverBoundsConfig(readTimeout, writeTimeout, shutdownTimeout string, maxRequestBodySize int64) string {
+	return fmt.Sprintf(`"read_timeout": %q,
+		"write_timeout": %q,
+		"shutdown_timeout": %q,
+		"max_request_body_size": %d`, readTimeout, writeTimeout, shutdownTimeout, maxRequestBodySize)
 }

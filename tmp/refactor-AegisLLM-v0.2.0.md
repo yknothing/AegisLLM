@@ -348,6 +348,45 @@ After each significant step:
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
 
+### Step 34 - Server Runtime Bound Validation
+
+- Architecture/security finding:
+  - `server.read_timeout`, `server.write_timeout`, `server.shutdown_timeout`, and `server.max_request_body_size` were documented as explicit runtime bounds but were not validated as positive values.
+  - A non-positive body-size limit could fall back to middleware defaults, and a non-positive timeout could weaken the server/proxy runtime boundary instead of failing configuration early.
+  - Security autoreview also found that `server.New` could bypass the runtime validation layer, and that `max_request_body_size` needed an explicit upper bound because body reads use `io.ReadAll(io.LimitReader(..., limit+1))`.
+- Fix:
+  - Added shared `config.ValidateServerConfig` validation for server read, write, shutdown, and max-body bounds.
+  - Reused that validation from `internal/config`, `internal/runtime`, and `internal/server.New` so direct server construction cannot bypass the boundary.
+  - Added an explicit 64 MiB `server.max_request_body_size` configuration ceiling and rejected larger limits before body reads.
+  - Added middleware defense-in-depth so direct calls to `readAndReplaceBody` reject configured limits above the shared maximum before evaluating `limit+1`.
+  - Added config/runtime/server/middleware regression coverage for zero, negative, and oversized server bounds.
+  - Updated `CHANGELOG.md`, `SECURITY.md`, and `docs/threat-model.md`.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test -count=1 ./internal/config ./internal/runtime` passed before the autoreview follow-up fix.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed before the autoreview follow-up fix.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=9df2e39-server-bound-validation BUILD_DATE=2026-06-20T00:00:00Z PORT=18119` passed on `ssh ceo` before the autoreview follow-up fix.
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test -count=1 ./internal/config ./internal/runtime ./internal/server ./internal/middleware` passed after the autoreview follow-up fix.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed after the autoreview follow-up fix, including package tests, race tests, `golangci-lint`, `govulncheck`, and `gosec`.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=9df2e39-server-bound-validation BUILD_DATE=2026-06-20T00:00:00Z PORT=18120` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `330.32kB`.
+    - Image `sha256:35e69a2276644f34371abd4f7c6d4f96329149b654e30e42857da2aff4c6d7cb`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: 9df2e39-server-bound-validation, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+  - `git diff --check` and `gofmt -l` passed with no output.
+- Autoreview:
+  - Architecture/release-boundary reviewer found no blocking or should-fix issues in the initial positive-bound validation patch.
+  - Security reviewer found two should-fix issues: `server.New` could still bypass server-bound validation, and `max_request_body_size` needed an upper bound plus overflow-safe body-read handling. Both are now addressed in this step.
+  - Final architecture autoreview found no blocking, should-fix, or nit findings and confirmed both prior should-fix items are closed.
+  - Final security audit found no blocking, should-fix, or nit findings and confirmed the body-limit overflow/oversized-configuration path is fail-closed before `limit+1`.
+- Remaining gates before release-complete claim:
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
 ### Step 33 - Bounded SSE Scanner Line Limit
 
 - Architecture/reliability finding:

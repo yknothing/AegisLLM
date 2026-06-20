@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
+	"github.com/yknothing/AegisLLM/internal/config"
 )
 
-const defaultMaxRequestBodySize int64 = 10 << 20
+const defaultMaxRequestBodySize int64 = config.DefaultMaxRequestBodySize
 
 var errRequestBodyTooLarge = errors.New("request body too large")
 
@@ -18,6 +20,9 @@ func readAndReplaceBody(r *http.Request, limit int64) ([]byte, error) {
 	}
 	if limit <= 0 {
 		limit = defaultMaxRequestBodySize
+	}
+	if limit > config.MaxRequestBodySizeLimit {
+		return nil, errRequestBodyTooLarge
 	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
