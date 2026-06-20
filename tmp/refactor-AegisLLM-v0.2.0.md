@@ -586,3 +586,33 @@ After each significant step:
   - Restore an approved GitHub write credential path.
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
+### Step 18 - Upstream Response Header Allowlist
+
+- Security finding:
+  - Non-streaming upstream response header forwarding used a blocklist.
+  - Although known unsafe headers were stripped, unknown provider debug, tenant, CORS, auth-challenge, proxy, or account headers could still be reflected to clients.
+- Fix:
+  - Replaced response-header blocklist with an explicit allowlist.
+  - Current client response contract allows content type, upstream request IDs, generic/rich rate-limit metadata, OpenAI processing/version metadata, and `Retry-After`.
+  - Added regression coverage proving `Set-Cookie`, hop-by-hop, proxy auth, upstream auth challenge, CORS, debug, provider-account, internal-request, and upstream policy headers are stripped.
+  - Updated `CHANGELOG.md` under `v0.2.0 - Release Candidate`.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test ./internal/proxy` passed.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=0d64aa0-response-header-allowlist BUILD_DATE=2026-06-20T00:00:00Z PORT=18092` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `267.86kB`.
+    - Image `sha256:98a0dc8cc210da50121cbb98309f6b91f346dcf19a2133a8b7455d3261e59e60`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: 0d64aa0-response-header-allowlist, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Autoreview:
+  - Self-review confirmed response headers are now allowlisted and no `blockedResponseHeaders` path remains.
+  - Scope check confirmed streaming responses still set their own SSE headers and non-streaming body forwarding remains streaming `io.Copy` without full buffering.
+- Remaining gates before release-complete claim:
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.

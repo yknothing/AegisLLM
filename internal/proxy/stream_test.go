@@ -118,24 +118,45 @@ func TestCopyHeadersAllowsOnlySafeProviderRequestHeaders(t *testing.T) {
 	}
 }
 
-func TestForwardResponseStripsUnsafeUpstreamHeaders(t *testing.T) {
+func TestForwardResponseAllowsOnlySafeUpstreamHeaders(t *testing.T) {
 	engine := NewEngine(StreamConfig{
 		AllowedDomains: []string{"api.openai.com"},
 	})
 	resp := &http.Response{
 		StatusCode: http.StatusOK,
 		Header: http.Header{
-			"Content-Type":        []string{"application/json"},
-			"X-Request-Id":        []string{"req-upstream"},
-			"Set-Cookie":          []string{"session=upstream"},
-			"Connection":          []string{"close"},
-			"Transfer-Encoding":   []string{"chunked"},
-			"Proxy-Authenticate":  []string{"Basic realm=\"upstream\""},
-			"Proxy-Authorization": []string{"Bearer upstream"},
-			"Keep-Alive":          []string{"timeout=5"},
-			"Te":                  []string{"trailers"},
-			"Trailer":             []string{"Expires"},
-			"Upgrade":             []string{"websocket"},
+			"Content-Type":                       []string{"application/json"},
+			"X-Request-Id":                       []string{"req-upstream"},
+			"RateLimit-Remaining":                []string{"60"},
+			"X-Ratelimit-Remaining-Requests":     []string{"59"},
+			"Retry-After":                        []string{"1"},
+			"Set-Cookie":                         []string{"session=upstream"},
+			"Connection":                         []string{"close"},
+			"Transfer-Encoding":                  []string{"chunked"},
+			"Proxy-Authenticate":                 []string{"Basic realm=\"upstream\""},
+			"Proxy-Authorization":                []string{"Bearer upstream"},
+			"Keep-Alive":                         []string{"timeout=5"},
+			"Te":                                 []string{"trailers"},
+			"Trailer":                            []string{"Expires"},
+			"Upgrade":                            []string{"websocket"},
+			"OpenAI-Organization":                []string{"org-upstream"},
+			"X-Provider-Account":                 []string{"provider-account"},
+			"X-Debug-Trace":                      []string{"debug-context"},
+			"WWW-Authenticate":                   []string{"Bearer realm=\"upstream\""},
+			"Server":                             []string{"upstream-server"},
+			"Access-Control-Allow-Credentials":   []string{"true"},
+			"Access-Control-Allow-Origin":        []string{"https://upstream.example"},
+			"Access-Control-Expose-Headers":      []string{"Set-Cookie"},
+			"Content-Security-Policy":            []string{"default-src 'none'"},
+			"Strict-Transport-Security":          []string{"max-age=31536000"},
+			"X-Accel-Redirect":                   []string{"/internal/secret"},
+			"X-Amzn-Trace-Id":                    []string{"Root=1-trace"},
+			"X-Internal-Request-Id":              []string{"internal-req"},
+			"X-Openai-Assistance-Conversation":   []string{"conversation"},
+			"X-Openai-Organization":              []string{"org-upstream"},
+			"X-Openai-Project":                   []string{"proj-upstream"},
+			"X-RateLimit-Policy":                 []string{"internal-policy"},
+			"X-Upstream-Authorization-Challenge": []string{"challenge"},
 		},
 		Body: io.NopCloser(strings.NewReader(`{"ok":true}`)),
 	}
@@ -159,6 +180,24 @@ func TestForwardResponseStripsUnsafeUpstreamHeaders(t *testing.T) {
 		"Te",
 		"Trailer",
 		"Upgrade",
+		"OpenAI-Organization",
+		"X-Provider-Account",
+		"X-Debug-Trace",
+		"WWW-Authenticate",
+		"Server",
+		"Access-Control-Allow-Credentials",
+		"Access-Control-Allow-Origin",
+		"Access-Control-Expose-Headers",
+		"Content-Security-Policy",
+		"Strict-Transport-Security",
+		"X-Accel-Redirect",
+		"X-Amzn-Trace-Id",
+		"X-Internal-Request-Id",
+		"X-Openai-Assistance-Conversation",
+		"X-Openai-Organization",
+		"X-Openai-Project",
+		"X-RateLimit-Policy",
+		"X-Upstream-Authorization-Challenge",
 	} {
 		if got := result.Header.Get(header); got != "" {
 			t.Fatalf("forwardResponse copied unsafe header %s=%q", header, got)
@@ -169,6 +208,15 @@ func TestForwardResponseStripsUnsafeUpstreamHeaders(t *testing.T) {
 	}
 	if got := result.Header.Get("X-Request-Id"); got != "req-upstream" {
 		t.Fatalf("request id = %q, want req-upstream", got)
+	}
+	if got := result.Header.Get("RateLimit-Remaining"); got != "60" {
+		t.Fatalf("generic remaining limit = %q, want 60", got)
+	}
+	if got := result.Header.Get("X-Ratelimit-Remaining-Requests"); got != "59" {
+		t.Fatalf("remaining requests = %q, want 59", got)
+	}
+	if got := result.Header.Get("Retry-After"); got != "1" {
+		t.Fatalf("retry after = %q, want 1", got)
 	}
 	body, err := io.ReadAll(result.Body)
 	if err != nil {

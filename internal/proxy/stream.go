@@ -54,16 +54,21 @@ var allowedRequestHeaders = map[string]struct{}{
 	"User-Agent":   {},
 }
 
-var blockedResponseHeaders = map[string]struct{}{
-	"Connection":          {},
-	"Keep-Alive":          {},
-	"Proxy-Authenticate":  {},
-	"Proxy-Authorization": {},
-	"Set-Cookie":          {},
-	"Te":                  {},
-	"Trailer":             {},
-	"Transfer-Encoding":   {},
-	"Upgrade":             {},
+var allowedResponseHeaders = map[string]struct{}{
+	"Content-Type":                   {},
+	"Openai-Processing-Ms":           {},
+	"Openai-Version":                 {},
+	"Ratelimit-Limit":                {},
+	"Ratelimit-Remaining":            {},
+	"Ratelimit-Reset":                {},
+	"Retry-After":                    {},
+	"X-Ratelimit-Limit-Tokens":       {},
+	"X-Ratelimit-Limit-Requests":     {},
+	"X-Ratelimit-Remaining-Tokens":   {},
+	"X-Ratelimit-Remaining-Requests": {},
+	"X-Ratelimit-Reset-Tokens":       {},
+	"X-Ratelimit-Reset-Requests":     {},
+	"X-Request-Id":                   {},
 }
 
 // NewEngine creates a new streaming proxy engine.
@@ -301,12 +306,13 @@ func copyHeaders(dst, src http.Header) {
 	}
 }
 
-// copyResponseHeaders copies safe upstream response headers to the client.
-// SECURITY: Upstream hop-by-hop and credential-bearing headers are not part of
-// the gateway's client contract and must not be reflected downstream.
+// copyResponseHeaders copies only the upstream response headers in Aegis's
+// client contract. SECURITY: This is an allowlist so provider cookies, auth
+// challenges, proxy metadata, debug headers, and tenant/account headers are not
+// reflected downstream by default.
 func copyResponseHeaders(dst, src http.Header) {
 	for key, values := range src {
-		if _, blocked := blockedResponseHeaders[http.CanonicalHeaderKey(key)]; blocked {
+		if _, allowed := allowedResponseHeaders[http.CanonicalHeaderKey(key)]; !allowed {
 			continue
 		}
 		for _, v := range values {
