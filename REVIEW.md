@@ -21,7 +21,7 @@ The previous architecture review found several Redis-like gaps where documents, 
 | TPM | Default and example TPM values are zero; provider `max_tpm`, `rate_limit.default_tpm`, and JWT `tpm` fail closed |
 | Redis | Redis remains reserved and fails fast during config/runtime validation |
 | Vault | Vault remains reserved and fails fast during config/runtime validation; docs now say reserved, not implemented |
-| Admin / BYOK | Docs now state the handler scaffold is not mounted by the main gateway |
+| Admin / BYOK | Docs now state the handler scaffold is not mounted by the main gateway, and `key_source="byok"` fails closed until owner/provider binding exists |
 | Provider adapters | Docs and comments now state only OpenAI-compatible OpenAI/DeepSeek are current runtime paths |
 | Docker | Image includes non-secret example config and a nonroot-owned `/var/lib/aegis`; README documents required mounts |
 | Stale docs | Root architecture/review documents replaced with current runtime truth |

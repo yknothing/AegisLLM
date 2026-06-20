@@ -37,6 +37,10 @@ const (
 	// MinJWTSigningKeyBytes is the minimum HS256 signing-key length accepted by runtime.
 	MinJWTSigningKeyBytes = 32
 	maxClockSkew          = 60 * time.Second
+
+	// KeySourcePool is the only key source supported by the v0.2.0 runtime.
+	KeySourcePool = "pool"
+	keySourceBYOK = "byok"
 )
 
 // RevocationStore checks if a virtual key has been revoked.
@@ -54,8 +58,8 @@ type VirtualKeyClaims struct {
 	MaxRPM    int      `json:"rpm"`                   // Per-key rate limit (0 = unlimited)
 	MaxTPM    int      `json:"tpm"`                   // Per-key token limit (0 = unlimited)
 	BudgetUSD float64  `json:"budget"`                // Monthly budget in USD (0 = unlimited)
-	KeySource string   `json:"key_source"`            // "pool" or "byok"
-	BYOKKeyID string   `json:"byok_key_id,omitempty"` // KMS key ID for BYOK users
+	KeySource string   `json:"key_source"`            // Runtime: "pool"; reserved: "byok"
+	BYOKKeyID string   `json:"byok_key_id,omitempty"` // Reserved until BYOK binding exists
 	PoolGroup string   `json:"pool_group,omitempty"`  // Pool group for server-hosted keys
 	IssuedAt  int64    `json:"iat"`
 	ExpiresAt int64    `json:"exp"`
@@ -192,13 +196,17 @@ func validateToken(token string, signingKey []byte, expectedIssuer string, maxTo
 		return nil, fmt.Errorf("invalid issuer")
 	}
 	if claims.KeySource == "" {
-		claims.KeySource = "pool"
+		claims.KeySource = KeySourcePool
 	}
-	if claims.KeySource != "pool" && claims.KeySource != "byok" {
+	switch claims.KeySource {
+	case KeySourcePool:
+		if claims.BYOKKeyID != "" {
+			return nil, fmt.Errorf("byok_key_id is reserved for unsupported BYOK mode")
+		}
+	case keySourceBYOK:
+		return nil, fmt.Errorf("BYOK key source is not implemented")
+	default:
 		return nil, fmt.Errorf("invalid key source")
-	}
-	if claims.KeySource == "byok" && claims.BYOKKeyID == "" {
-		return nil, fmt.Errorf("missing BYOK key id")
 	}
 	if claims.MaxRPM < 0 {
 		return nil, fmt.Errorf("RPM limit must not be negative")

@@ -1,6 +1,6 @@
 // Package admin provides the administrative API scaffold for Aegis.
 //
-// The admin API is intended to be a separate HTTP handler group that manages:
+// The admin API is a planned separate HTTP handler group that manages:
 //   - Virtual Key issuance and revocation
 //   - BYOK key registration and deletion
 //   - Usage and quota queries
@@ -10,7 +10,11 @@
 //   - The admin API MUST be served on a separate port or behind mTLS
 //   - Admin endpoints require a separate admin token (not a Virtual Key)
 //   - All admin operations are audit-logged
-//   - BYOK key submission is the ONLY path for user keys to enter the system
+//   - BYOK key submission must be the only path for user keys to enter the system once implemented
+//
+// Current runtime note: cmd/aegis does not mount this handler, and mutating
+// endpoints fail closed with 501 until issuance, storage, revocation, and audit
+// are implemented atomically.
 package admin
 
 import (

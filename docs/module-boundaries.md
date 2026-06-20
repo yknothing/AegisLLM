@@ -55,7 +55,7 @@ Exports:
 Invariants:
 - Auth runs before any body scanning or KMS access.
 - Router validates model permission before KMS key resolution.
-- KMS key resolution fails closed when provider or BYOK key IDs are absent.
+- KMS key resolution is pool-only in `v0.2.0` and fails closed for reserved BYOK key sources until owner/provider binding exists.
 - Adapter may rewrite request body and target path, but must not log body content.
 
 ### `internal/proxy`

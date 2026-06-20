@@ -32,8 +32,8 @@ Architecture truth surface: `v0.2.0`, superseding the `v0.1.0` scaffold baseline
 This repository currently provides the runtime framework and a minimal OpenAI-compatible gateway path:
 
 - Implemented baseline: safe logger, config loading, middleware composition, HS256 virtual-key validation, in-memory rate limiting, PII redaction, provider routing, local encrypted file KMS backend, egress allowlist validation, and streaming proxy scaffolding.
-- Explicitly not production-ready yet: Admin API key issuance, Vault KMS, Redis rate limiter, quota/TPM enforcement, and non-OpenAI protocol transformations.
-- Fail-fast behavior: unsupported Vault KMS, Redis limiter, quota enforcement, and non-zero TPM configuration are rejected instead of silently running without controls.
+- Explicitly not production-ready yet: Admin API key issuance, BYOK key-source runtime, Vault KMS, Redis rate limiter, quota/TPM enforcement, and non-OpenAI protocol transformations.
+- Fail-fast behavior: unsupported BYOK key source, Vault KMS, Redis limiter, quota enforcement, and non-zero TPM configuration are rejected instead of silently running without controls.
 
 ## Development Smoke
 
@@ -78,7 +78,7 @@ response = client.chat.completions.create(
 | Rate limiting | In-memory RPM and concurrency baseline implemented; non-zero TPM and Redis fail fast until implemented |
 | PII protection | Regex-based request redaction baseline implemented |
 | Cost management | Pricing/quota modules scaffolded; `quota.enabled=true` is rejected until runtime enforcement exists |
-| Admin API / BYOK | Handler scaffold exists but is not mounted by the main gateway; mutating/query endpoints fail closed with `501` |
+| Admin API / BYOK | Handler scaffold exists but is not mounted by the main gateway; mutating/query endpoints fail closed with `501`, and `key_source="byok"` virtual keys are rejected until owner/provider binding exists |
 | Streaming proxy | SSE forwarding baseline implemented; token counting is heuristic |
 | mTLS | Server TLS implemented; mTLS requires `ca_file`; `min_version` is currently fixed to TLS 1.3 |
 

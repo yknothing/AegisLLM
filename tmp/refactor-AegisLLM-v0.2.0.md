@@ -523,3 +523,37 @@ After each significant step:
   - Restore an approved GitHub write credential path.
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
+### Step 16 - BYOK Runtime Fail-Closed Boundary
+
+- Security finding:
+  - `key_source="byok"` trusted the JWT-provided `byok_key_id` directly in KMS key resolution.
+  - Without server-side owner/provider binding, a valid BYOK token could route a user-owned provider key to the wrong allowlisted provider.
+- Fix:
+  - Changed auth validation so the `v0.2.0` runtime accepts only pool key-source tokens.
+  - Rejected `key_source="byok"` and rejected pool tokens that carry `byok_key_id`.
+  - Added KMS defense-in-depth so any non-pool key source resolves to no key before KMS lookup.
+  - Removed the reserved BYOK template from default subscription templates.
+  - Updated README, architecture docs, ADRs, app integration notes, release plan, review notes, changelog, and package comments so BYOK is consistently described as future/reserved until owner/provider binding exists.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test ./internal/middleware ./internal/server ./internal/subscription ./internal/admin` passed.
+  - `rg` found no remaining text claiming current runtime BYOK support; remaining hits describe `future`, `reserved`, `planned`, or fail-closed behavior.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=3506120-byok-fail-closed BUILD_DATE=2026-06-20T00:00:00Z PORT=18090` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `263.75kB`.
+    - Image `sha256:07350b7e4621155f9e358827d463d55854a2b810d08b39eab282681ae94cb21a`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: 3506120-byok-fail-closed, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Autoreview:
+  - Attempted two final read-only architecture/security expert reviews for this dirty patch, but both subagents failed with usage-limit errors before producing evidence, so they are not counted as validation.
+  - Mainline security self-review traced auth -> router -> KMS -> proxy and confirmed `key_source="byok"` now fails during token validation and KMS no longer trusts `ctx.BYOKKeyID` for non-pool sources.
+  - Mainline architecture self-review searched for stale BYOK-current-runtime claims and found remaining hits describe BYOK as `future`, `reserved`, `planned`, or fail-closed.
+  - Scope check confirmed pool key-source tokens still resolve through provider-to-pool KMS mapping, while reserved BYOK templates are no longer emitted by default subscription templates.
+- Remaining gates before release-complete claim:
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.

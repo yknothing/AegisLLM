@@ -25,6 +25,7 @@ Included in `v0.2.0`:
 Explicitly excluded:
 
 - Production Admin API key issuance, revocation, and storage flows.
+- BYOK key-source runtime before owner/provider binding exists.
 - Vault KMS runtime backend.
 - Redis/distributed rate limiting.
 - Quota, budget, and TPM enforcement.

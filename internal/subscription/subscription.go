@@ -7,7 +7,7 @@
 //
 // This package will bridge the gap between the app's billing system and
 // Aegis's technical access control. Current runtime does not yet mount the
-// admin API or enforce TPM/budget controls.
+// admin API, accept BYOK key-source tokens, or enforce TPM/budget controls.
 package subscription
 
 import "time"
@@ -31,12 +31,13 @@ type Template struct {
 	MaxConcurrency int           // Max concurrent requests
 	BudgetUSD      float64       // Monthly budget in USD (0 = unlimited)
 	TokenExpiry    time.Duration // Virtual Key validity period
-	KeySource      string        // "pool" or "byok"
+	KeySource      string        // Runtime: "pool"; reserved: "byok"
 }
 
 // DefaultTemplates returns the standard tier configurations.
 // Current runtime-compatible templates keep TPM and BudgetUSD at 0 because
-// non-zero values are rejected until enforcement exists.
+// non-zero values are rejected until enforcement exists. BYOK is reserved and
+// intentionally omitted until owner/provider binding exists.
 func DefaultTemplates() map[Tier]Template {
 	return map[Tier]Template{
 		TierFree: {
@@ -69,21 +70,11 @@ func DefaultTemplates() map[Tier]Template {
 			TokenExpiry:    90 * 24 * time.Hour,
 			KeySource:      "pool",
 		},
-		TierBYOK: {
-			Tier:           TierBYOK,
-			Models:         []string{"*"},
-			RPM:            0, // Unlimited
-			TPM:            0,
-			MaxConcurrency: 0,
-			BudgetUSD:      0, // User's responsibility
-			TokenExpiry:    365 * 24 * time.Hour,
-			KeySource:      "byok",
-		},
 	}
 }
 
 // GetTemplate returns the template for a given tier.
-// Returns the Free template if the tier is not recognized.
+// Returns the Free template if the tier is not recognized or reserved.
 func GetTemplate(tier Tier) Template {
 	templates := DefaultTemplates()
 	if t, ok := templates[tier]; ok {

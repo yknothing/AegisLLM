@@ -52,6 +52,7 @@ These are architecture targets, not current runtime capabilities:
 | Quota / budget enforcement | `quota.enabled=true` fails fast |
 | Vault KMS | `kms.mode="vault"` fails fast |
 | Admin API / BYOK control plane | Handler scaffold exists; not mounted by main gateway |
+| BYOK key source | `key_source="byok"` virtual keys fail closed until owner/provider binding exists |
 | RS256 virtual keys | Reserved pending reviewed key loading and rotation |
 | Anthropic/Gemini adapters | Runtime rejects unsupported provider types |
 

@@ -150,6 +150,40 @@ func TestValidateTokenRejectsReservedBudgetAndTPMClaims(t *testing.T) {
 	}
 }
 
+func TestValidateTokenRejectsReservedBYOKKeySource(t *testing.T) {
+	key := testSigningKey
+	token := signTestToken(t, key, VirtualKeyClaims{
+		KeyID:     "vk_test",
+		KeySource: keySourceBYOK,
+		BYOKKeyID: "user-456-openai",
+		Models:    []string{"gpt-4o-mini"},
+		IssuedAt:  time.Now().Add(-time.Minute).Unix(),
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		Issuer:    "aegis",
+	})
+
+	if _, err := validateToken(token, key, "aegis", testTokenMaxTTL); err == nil {
+		t.Fatal("validateToken accepted reserved BYOK key source")
+	}
+}
+
+func TestValidateTokenRejectsBYOKKeyIDInPoolToken(t *testing.T) {
+	key := testSigningKey
+	token := signTestToken(t, key, VirtualKeyClaims{
+		KeyID:     "vk_test",
+		KeySource: KeySourcePool,
+		BYOKKeyID: "user-456-openai",
+		Models:    []string{"gpt-4o-mini"},
+		IssuedAt:  time.Now().Add(-time.Minute).Unix(),
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		Issuer:    "aegis",
+	})
+
+	if _, err := validateToken(token, key, "aegis", testTokenMaxTTL); err == nil {
+		t.Fatal("validateToken accepted a pool token carrying byok_key_id")
+	}
+}
+
 func TestValidateTokenRejectsNegativeLimitClaims(t *testing.T) {
 	tests := []struct {
 		name   string

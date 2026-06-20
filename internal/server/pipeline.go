@@ -35,8 +35,8 @@ type RequestContext struct {
 	VirtualKeyID   string
 	Permissions    []string
 	Budget         float64
-	KeySource      string // "pool" or "byok" (from JWT claims)
-	BYOKKeyID      string // KMS key ID for BYOK users (from JWT claims)
+	KeySource      string // Runtime: "pool"; reserved: "byok"
+	BYOKKeyID      string // Reserved until BYOK owner/provider binding exists
 	MaxRPM         int
 	MaxTPM         int
 	MaxConcurrency int
