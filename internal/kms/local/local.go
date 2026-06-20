@@ -5,7 +5,7 @@
 //   - Each stored key gets a unique random nonce (12 bytes)
 //   - Authenticated encryption prevents tampering (GCM tag)
 //   - Decrypted keys are returned as SecureBytes for caller-managed zeroing
-//   - Master key is held in memory with mlock attempt (best-effort)
+//   - Master key byte slice is zeroed on Close
 //
 // THREAT MODEL:
 //   - Protects against: database theft, config file exposure, log leakage
@@ -49,7 +49,9 @@ type Backend interface {
 
 // New creates a new local KMS store.
 // The master key is read from the specified environment variable.
-// SECURITY: The env var value is immediately copied and the original is not retained.
+// SECURITY: The env var value is copied into a byte slice owned by Store. The
+// process environment string is controlled by the OS/runtime and is not zeroed
+// by this function.
 func New(masterKeyEnv string, backend Backend) (*Store, error) {
 	if backend == nil {
 		return nil, errors.New("local KMS backend is required")
@@ -163,7 +165,9 @@ func (s *Store) ListKeyIDs(ctx context.Context) ([]string, error) {
 	return s.backend.List()
 }
 
-// Close zeroes the master key and releases resources.
+// Close zeroes Store's master key byte slice and releases resources. The Go
+// AES/GCM implementation may keep internal key schedule material that this
+// package cannot explicitly zero.
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

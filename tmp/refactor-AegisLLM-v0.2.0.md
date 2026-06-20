@@ -616,3 +616,35 @@ After each significant step:
   - Restore an approved GitHub write credential path.
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
+### Step 19 - KMS Memory and Egress Truth-Surface Tightening
+
+- Architecture/security finding:
+  - Local KMS comments claimed a best-effort `mlock` attempt that the implementation does not perform.
+  - `SECURITY.md` described memory zeroing and egress filtering with stronger guarantees than Go strings, crypto internals, and process/config compromise allow.
+- Fix:
+  - Removed the unsupported `mlock` claim.
+  - Clarified that local KMS zeroes Store-owned master-key bytes, while Go AES/GCM internals may retain key schedule material that Aegis cannot explicitly zero.
+  - Clarified that environment strings are not zeroed by local KMS loading.
+  - Reworded memory-zeroing and egress-filtering security text to describe the actual runtime boundary.
+  - Added matching residual risks to `docs/threat-model.md`.
+  - Updated `CHANGELOG.md` under `v0.2.0 - Release Candidate`.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test ./internal/kms/local` passed.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=3f44e49-kms-egress-truth-final BUILD_DATE=2026-06-20T00:00:00Z PORT=18093` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `268.75kB`.
+    - Image `sha256:35804d7e6a04fac4fb1d41c973bc816197cd1076f19b27aa2672357ca3663ff3`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: 3f44e49-kms-egress-truth-final, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Autoreview:
+  - Self-review confirmed the change is a truth-surface narrowing only; no runtime behavior changed.
+  - Searched for remaining `mlock` and overbroad egress/memory claims and found the prior high-risk wording removed from the touched surfaces.
+- Remaining gates before release-complete claim:
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.

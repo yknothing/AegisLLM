@@ -28,11 +28,11 @@ HS256 virtual-key signing material must be at least 32 bytes. Aegis rejects shor
 
 ### 4. Memory Zeroing
 
-Sensitive data (decrypted API keys, JWT signing material) is explicitly overwritten with zeros after use via `utils.MemZero()`. This prevents credential recovery from memory dumps.
+Sensitive byte slices owned by Aegis, such as decrypted API keys and JWT signing material, are explicitly overwritten with zeros after use via `utils.MemZero()`. This reduces credential lifetime in process memory, but Go strings and crypto library internals may retain copies that Aegis cannot explicitly zero.
 
 ### 5. Egress Filtering
 
-The streaming proxy engine validates all outbound requests against a configured domain allowlist. Even if the gateway is compromised, it cannot exfiltrate data to unauthorized endpoints.
+The streaming proxy engine validates configured outbound provider requests against a domain allowlist. This prevents normal proxy execution from reaching non-allowlisted hosts; it is not a containment boundary for a fully compromised process or configuration.
 
 ### 6. Minimal Attack Surface
 

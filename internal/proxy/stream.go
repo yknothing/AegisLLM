@@ -242,7 +242,7 @@ func (e *Engine) forwardResponse(w http.ResponseWriter, resp *http.Response) err
 }
 
 // validateEgress checks if the target URL's domain is in the allowlist.
-// SECURITY: This prevents data exfiltration even if the gateway is compromised.
+// SECURITY: This constrains normal proxy execution to configured provider hosts.
 func (e *Engine) validateEgress(targetURL string) error {
 	if len(e.config.AllowedDomains) == 0 {
 		return fmt.Errorf("no egress allowlist configured")

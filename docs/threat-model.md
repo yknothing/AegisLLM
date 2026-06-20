@@ -36,6 +36,8 @@ flowchart LR
 ## Residual Risks
 
 - Go strings used for HTTP headers can retain provider keys until garbage collection. The runtime must minimize lifetime and avoid additional copies, but cannot guarantee immediate zeroing of header strings.
+- Local KMS zeroes Store-owned key byte slices on Close, but Go AES/GCM internals may retain key schedule material that Aegis cannot explicitly zero.
+- The egress allowlist constrains normal proxy execution to configured provider hosts. It is not a containment boundary for a fully compromised process or malicious configuration.
 - Local in-memory KMS backend is an MVP/development storage backend. A persistent encrypted backend or Vault integration is required before production use.
 - HS256 JWT validation is the minimal no-dependency baseline. RS256 requires a separate reviewed key loading and rotation design.
 - Provider-specific protocol adapters are framework-level only until each adapter has contract tests against real provider formats.

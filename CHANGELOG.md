@@ -34,6 +34,7 @@ All notable changes to AegisLLM are documented here.
 
 - Marked `v0.2.0` as the remediated architecture truth surface superseding the `v0.1.0` scaffold baseline.
 - Documented current runtime capabilities versus planned capabilities across README, architecture docs, ADRs, and integration notes.
+- Clarified local KMS memory-zeroing and egress allowlist residual risks without claiming impossible Go runtime guarantees.
 - Recorded that Admin API issuance, Vault KMS, Redis rate limiting, quota/TPM enforcement, RS256, and non-OpenAI protocol adapters remain planned work.
 
 ### Verification evidence
