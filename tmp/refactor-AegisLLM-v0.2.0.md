@@ -348,6 +348,39 @@ After each significant step:
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
 
+### Step 32 - Server TLS/mTLS Config Boundary Evidence
+
+- Architecture finding:
+  - README lists server TLS as implemented and says mTLS requires `ca_file`.
+  - Runtime had the TLS/mTLS configuration path, but `internal/server` lacked focused tests proving the config boundary.
+- Fix:
+  - Added `internal/server/server_test.go`.
+  - Covered TLS config without `ca_file`: TLS 1.3 minimum and no client-certificate requirement.
+  - Covered TLS config with a generated test CA: TLS 1.3 minimum, populated client CA pool, and `RequireAndVerifyClientCert`.
+  - Covered invalid CA PEM fail-closed behavior.
+  - Runtime code was not changed.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test -count=1 ./internal/server` passed.
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test -race -count=5 -run 'TestBuildTLSConfig' ./internal/server` passed.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed, including package tests, race tests, `golangci-lint`, `govulncheck`, and `gosec`.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=e50d8c6-server-tls-tests BUILD_DATE=2026-06-20T00:00:00Z PORT=18116` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `319.72kB`.
+    - Image `sha256:4464114b7c0951eb8d26c2a2d5591087919e5de8ab984d6033899ffebd4fb063`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: e50d8c6-server-tls-tests, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Autoreview:
+  - Architecture reviewer found no blocking or should-fix issues and judged the tests sufficient for the current TLS/mTLS configuration-level claim.
+  - Security reviewer found no release blocker and confirmed the generated CA does not write private keys to disk.
+  - Scope boundary: this is server TLS/mTLS config-boundary evidence, not end-to-end TLS handshake coverage.
+- Remaining gates before release-complete claim:
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
 ### Step 31 - Per-Key Concurrency Claim and Ceiling Semantics
 
 - Architecture/security finding:
