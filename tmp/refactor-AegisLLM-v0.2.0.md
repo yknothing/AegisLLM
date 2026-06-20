@@ -348,6 +348,41 @@ After each significant step:
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
 
+### Step 27 - Router Baseline Test Evidence
+
+- Release-quality finding:
+  - `v0.2.0` documents provider routing, model permission enforcement, body-size limiting, and stream flag detection as implemented baseline behavior.
+  - The middleware package did not have dedicated Router behavior tests covering those contracts as release evidence.
+  - This was a test evidence gap rather than a runtime behavior change.
+- Fix:
+  - Added `internal/middleware/router_test.go`.
+  - Covered exact model permission selecting the expected provider and pool key.
+  - Covered request body preservation by reading the body after Router runs and comparing it to the original bytes.
+  - Covered explicit wildcard model permission allowing a known model.
+  - Covered unpermitted models returning `403` before provider/key selection.
+  - Covered missing model `400`, permitted model with no supporting provider `503`, and body limit `413`.
+  - Did not update `CHANGELOG.md` because this is test-only and does not change user-visible runtime behavior.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test -count=1 ./internal/middleware` passed.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=daaee65-router-baseline-tests BUILD_DATE=2026-06-20T00:00:00Z PORT=18109` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `302.94kB`.
+    - Image `sha256:c920a4443ad6e339b043645e5ea865c5eb0d47b12bb29e86e0ed1e153badd679`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: daaee65-router-baseline-tests, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Autoreview:
+  - Architecture expert Chandrasekhar first found two should-fix issues: the body-preservation test only checked `ContentLength`, and wildcard model permission lacked a success-path Router test.
+  - The patch was updated to read and compare the preserved body bytes and add `TestRouterWildcardPermissionAllowsKnownModel`.
+  - Chandrasekhar's follow-up read-only review confirmed both should-fix findings are resolved, found no new release blocker or should-fix, and accepted this test-only diff as `v0.2.0` router baseline release evidence.
+- Remaining gates before release-complete claim:
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
 ### Step 26 - Reserved Admin Scaffold Auth Hardening
 
 - Security/truth-surface finding:
