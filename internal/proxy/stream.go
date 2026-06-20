@@ -75,6 +75,11 @@ var renamedResponseHeaders = map[string]string{
 	http.CanonicalHeaderKey(requestid.Header): requestid.UpstreamHeader,
 }
 
+const (
+	sseScannerInitialBufferSize = 64 * 1024
+	sseScannerMaxLineSize       = 1 << 20
+)
+
 // NewEngine creates a new streaming proxy engine.
 func NewEngine(cfg StreamConfig) *Engine {
 	if cfg.MaxRequestBodySize <= 0 {
@@ -203,6 +208,7 @@ func (e *Engine) streamSSE(w http.ResponseWriter, resp *http.Response) (int64, e
 
 	var tokenCount atomic.Int64
 	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, sseScannerInitialBufferSize), sseScannerMaxLineSize)
 
 	for scanner.Scan() {
 		line := scanner.Text()

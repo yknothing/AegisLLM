@@ -11,6 +11,8 @@ import (
 	"github.com/yknothing/AegisLLM/internal/requestid"
 )
 
+const oversizedScannerDefaultLineSize = 70 * 1024
+
 func TestValidateEgressRequiresAllowlist(t *testing.T) {
 	engine := NewEngine(StreamConfig{})
 
@@ -81,6 +83,52 @@ func TestNewEngineRequiresTLS13ForUpstreamTransport(t *testing.T) {
 	}
 	if transport.TLSClientConfig.MinVersion != tls.VersionTLS13 {
 		t.Fatalf("MinVersion = %x, want TLS 1.3", transport.TLSClientConfig.MinVersion)
+	}
+}
+
+func TestStreamSSEForwardsLargeDataLine(t *testing.T) {
+	engine := NewEngine(StreamConfig{})
+	largeContent := strings.Repeat("x", oversizedScannerDefaultLineSize)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: io.NopCloser(strings.NewReader(
+			`data: {"choices":[{"delta":{"content":"` + largeContent + `"}}]}` + "\n" +
+				`data: [DONE]` + "\n",
+		)),
+	}
+
+	recorder := httptest.NewRecorder()
+	tokens, err := engine.streamSSE(recorder, resp)
+	if err != nil {
+		t.Fatalf("streamSSE returned error for large data line: %v", err)
+	}
+	if tokens != 1 {
+		t.Fatalf("tokens = %d, want 1", tokens)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, largeContent) {
+		t.Fatal("streamSSE did not forward the large SSE data line")
+	}
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Fatal("streamSSE did not forward the done marker")
+	}
+}
+
+func TestStreamSSERejectsOversizedDataLine(t *testing.T) {
+	engine := NewEngine(StreamConfig{})
+	largeContent := strings.Repeat("x", sseScannerMaxLineSize+1)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: io.NopCloser(strings.NewReader(
+			`data: {"choices":[{"delta":{"content":"` + largeContent + `"}}]}` + "\n",
+		)),
+	}
+
+	recorder := httptest.NewRecorder()
+	if _, err := engine.streamSSE(recorder, resp); err == nil {
+		t.Fatal("streamSSE accepted an oversized SSE data line")
 	}
 }
 

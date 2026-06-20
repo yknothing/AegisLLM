@@ -37,6 +37,7 @@ All notable changes to AegisLLM are documented here.
 - Added `.dockerignore` to keep VCS metadata, local secrets, key stores, coverage, and scratch files out of Docker build contexts.
 - Pinned Makefile-installed security tooling versions.
 - Added CI for Go 1.22 compatibility, Go 1.26 quality gates, and Docker read-only smoke testing with pinned official GitHub Actions.
+- Raised the bounded SSE scanner line limit so large provider stream events above Go's default scanner token size can be forwarded without making stream parsing unbounded.
 
 ### Documentation
 

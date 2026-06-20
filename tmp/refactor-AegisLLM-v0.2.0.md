@@ -348,6 +348,38 @@ After each significant step:
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
 
+### Step 33 - Bounded SSE Scanner Line Limit
+
+- Architecture/reliability finding:
+  - Streaming proxy used `bufio.Scanner` for SSE lines without setting an explicit buffer.
+  - Go's default scanner token limit can reject provider stream events above 64 KiB, which is too implicit for the `v0.2.0` streaming proxy baseline.
+- Fix:
+  - Set an explicit bounded SSE scanner buffer: 64 KiB initial buffer and 1 MiB max line size.
+  - Added regression coverage that forwards a single SSE `data:` line larger than Go's default scanner token size.
+  - Added regression coverage that rejects an SSE `data:` line above the explicit max line size, keeping stream parsing bounded.
+  - Updated `CHANGELOG.md`.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test -count=1 ./internal/proxy` passed.
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test -race -count=10 -run 'TestStreamSSE' ./internal/proxy` passed.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed, including package tests, race tests, `golangci-lint`, `govulncheck`, and `gosec`.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=0763f51-sse-line-buffer BUILD_DATE=2026-06-20T00:00:00Z PORT=18117` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `321.62kB`.
+    - Image `sha256:b4522e0eff72cc76a41a4bf905db97c41cb1d81661d19b8d9f926b007f8bdc65`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: 0763f51-sse-line-buffer, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Autoreview:
+  - Attempted architecture and security subagent autoreviews, but both failed with usage-limit errors before producing usable review evidence.
+  - Mainline code-review/security-audit pass found no blocking or should-fix findings.
+  - Mainline review confirmed the change is bounded, preserves streaming/token-counting behavior, and keeps oversized single-line events fail-closed.
+- Remaining gates before release-complete claim:
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
 ### Step 32 - Server TLS/mTLS Config Boundary Evidence
 
 - Architecture finding:
