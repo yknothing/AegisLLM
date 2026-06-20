@@ -53,6 +53,27 @@ func TestSafeHandlerPreservesSafeStructuralTokenCounts(t *testing.T) {
 	}
 }
 
+func TestSafeHandlerRedactsVirtualKeyTokenFieldButPreservesID(t *testing.T) {
+	var out bytes.Buffer
+	logger := NewAuditLogger(&out, slog.LevelInfo)
+
+	logger.Info("request completed",
+		"virtual_key", "vk_full_bearer_token",
+		"virtual_key_id", "vk_test_id",
+	)
+
+	logOutput := out.String()
+	if strings.Contains(logOutput, "vk_full_bearer_token") {
+		t.Fatalf("log output leaked virtual key token: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, `"virtual_key":"[REDACTED]"`) {
+		t.Fatalf("log output = %s, want virtual_key redacted", logOutput)
+	}
+	if !strings.Contains(logOutput, `"virtual_key_id":"vk_test_id"`) {
+		t.Fatalf("log output = %s, want virtual key ID metadata preserved", logOutput)
+	}
+}
+
 func TestSafeHandlerRedactsNestedGroupAttrs(t *testing.T) {
 	var out bytes.Buffer
 	logger := NewAuditLogger(&out, slog.LevelInfo)

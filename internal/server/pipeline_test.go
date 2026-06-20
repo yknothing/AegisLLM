@@ -199,6 +199,30 @@ func TestRequestIDMiddlewareRegeneratesUnsafeClientRequestID(t *testing.T) {
 	}
 }
 
+func TestAuditMiddlewareLogsVirtualKeyIDNotVirtualKeyToken(t *testing.T) {
+	var logs bytes.Buffer
+	logger := utils.NewAuditLogger(&logs, slog.LevelInfo)
+	pipeline := &Pipeline{logger: logger}
+	pipeline.Use(AuditMiddleware(logger))
+	pipeline.Use(func(ctx *RequestContext, next func()) {
+		ctx.VirtualKeyID = "vk_test_id"
+		ctx.ProviderID = "openai-main"
+		ctx.Model = "gpt-4o"
+		ctx.StatusCode = http.StatusOK
+		next()
+	})
+
+	pipeline.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
+
+	logOutput := logs.String()
+	if !strings.Contains(logOutput, `"virtual_key_id":"vk_test_id"`) {
+		t.Fatalf("audit log = %s, want virtual_key_id metadata", logOutput)
+	}
+	if strings.Contains(logOutput, `"virtual_key":`) {
+		t.Fatalf("audit log used ambiguous virtual_key field: %s", logOutput)
+	}
+}
+
 func testPipeline() *Pipeline {
 	return &Pipeline{
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),

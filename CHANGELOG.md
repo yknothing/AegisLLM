@@ -17,6 +17,7 @@ All notable changes to AegisLLM are documented here.
 - Tightened proxy egress validation to require HTTPS, enforced TLS 1.3 for upstream connections, and changed upstream request header forwarding to a minimal allowlist.
 - Changed egress allowlist host matching to exact-host by default; subdomain egress now requires an explicit `*.` wildcard entry.
 - Validated client-supplied `X-Request-ID` before echoing it; unsafe, oversized, or malformed IDs are replaced with generated request IDs, and safe upstream provider request IDs are mapped to `X-Upstream-Request-Id` instead of overwriting the gateway request ID.
+- Renamed audit metadata from `virtual_key` to `virtual_key_id` and redacted any accidental `virtual_key` log field so bearer virtual keys cannot be logged under the ambiguous field name.
 - Restricted adapter-generated provider target paths to root-relative paths so plugin or adapter errors cannot override the configured provider authority before proxy egress validation.
 - Changed upstream response header forwarding to an explicit client-contract allowlist for content type, request IDs, rate-limit metadata, and retry hints.
 - Filtered unsafe upstream response headers so hop-by-hop and credential-bearing provider headers are not reflected to clients.

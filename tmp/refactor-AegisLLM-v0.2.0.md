@@ -348,6 +348,43 @@ After each significant step:
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
 
+### Step 24 - Audit Virtual-Key ID Log Boundary
+
+- Security/truth-surface finding:
+  - Old `v0.2.0-rc` audit logs used the field name `virtual_key` while the value was actually the JWT `kid` / virtual-key ID, not the bearer virtual key token.
+  - The safe logger did not treat the exact `virtual_key` field name as sensitive, so future code could accidentally log a bearer virtual key under the ambiguous field without defense-in-depth redaction.
+- Fix:
+  - Renamed audit metadata from `virtual_key` to `virtual_key_id`.
+  - Added exact-field redaction for accidental `virtual_key` log attributes.
+  - Preserved `virtual_key_id` as structural audit metadata so per-key investigation remains possible without logging bearer tokens.
+  - Updated `SECURITY.md` and `CHANGELOG.md` to state the `v0.2.0` audit contract explicitly.
+  - Added regression coverage for both the audit middleware field name and safe logger redaction/preservation behavior.
+- New `v0.2.0` behavior:
+  - Audit logs may record virtual-key IDs.
+  - Bearer virtual keys logged under `virtual_key` are redacted.
+  - Existing method, path, status, duration, token-count, provider, and model audit metadata remains unchanged.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test ./internal/server ./internal/utils` passed.
+  - `git diff --check` passed.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=8efbd6d-audit-virtual-key-id BUILD_DATE=2026-06-20T00:00:00Z PORT=18105` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `291.83kB`.
+    - Image `sha256:006fd9a5247a9262619182b5d15e7c1330feb11972671c6dda4ae1daae1e0009`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: 8efbd6d-audit-virtual-key-id, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Autoreview:
+  - Architecture/security expert Noether found no release-blocking or should-fix issues, confirmed `ctx.VirtualKeyID` comes from the JWT `kid` and not the bearer token, and confirmed the production entrypoint uses `utils.NewAuditLogger`.
+  - Noether also confirmed there is no audit capability loss: per-key tracing remains under `virtual_key_id`, while the ambiguous `virtual_key` field is now protected.
+  - Mainline self-review confirmed the runtime no longer emits `"virtual_key":` and the remaining old-field references are tests, redaction config, planned admin response schema, and changelog wording.
+- Remaining gates before release-complete claim:
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
 ### Step 23 - Reserved TPM Token Retention Removal
 
 - Security/architecture finding:

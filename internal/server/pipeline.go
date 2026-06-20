@@ -192,7 +192,7 @@ func AuditMiddleware(logger *slog.Logger) Middleware {
 			"output_tokens", ctx.OutputTokens,
 			"provider", ctx.ProviderID,
 			"model", ctx.Model,
-			"virtual_key", ctx.VirtualKeyID,
+			"virtual_key_id", ctx.VirtualKeyID,
 			// NEVER: "body", "prompt", "completion", "headers"
 		)
 	}

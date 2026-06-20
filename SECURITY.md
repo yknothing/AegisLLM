@@ -20,7 +20,7 @@ Provider API keys are **never** stored in plaintext — not in configuration fil
 
 ### 2. Zero PII in Logs
 
-Audit logs record only structural metadata (timestamps, token counts, model names, status codes). Request bodies (prompts) and response bodies (completions) are **never** logged under any circumstance.
+Audit logs record only structural metadata (timestamps, token counts, model/provider identifiers, virtual-key IDs, and status codes). Bearer virtual keys, provider API keys, request bodies (prompts), and response bodies (completions) are **never** logged under any circumstance.
 
 ### 3. Strong Virtual-Key Signing
 

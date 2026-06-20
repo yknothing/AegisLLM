@@ -31,6 +31,7 @@ var SensitiveFields = map[string]bool{
 	"password":      true,
 	"authorization": true,
 	"cookie":        true,
+	"virtual_key":   true,
 }
 
 var safeStructuralFields = map[string]bool{
