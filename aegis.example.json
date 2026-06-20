@@ -18,11 +18,6 @@
     "local": {
       "master_key_env": "AEGIS_MASTER_KEY",
       "key_store_path": "aegis.keys"
-    },
-    "vault": {
-      "address": "https://vault.internal:8200",
-      "path": "secret/data/aegis/keys",
-      "token_env": "VAULT_TOKEN"
     }
   },
   "providers": [
@@ -74,20 +69,12 @@
   "rate_limit": {
     "enabled": true,
     "backend": "memory",
-    "redis_url": "redis://localhost:6379/0",
     "default_rpm": 60,
     "default_tpm": 0,
     "default_max_concurrency": 10
   },
   "quota": {
-    "enabled": false,
-    "backend": "sqlite",
-    "dsn": "aegis.db",
-    "default_budget": 100.0
-  },
-  "store": {
-    "type": "sqlite",
-    "dsn": "aegis.db"
+    "enabled": false
   },
   "egress": {
     "allowed_domains": [

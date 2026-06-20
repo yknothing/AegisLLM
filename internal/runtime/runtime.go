@@ -164,9 +164,6 @@ func validateRuntimeConfig(cfg *config.Config) error {
 	if cfg.Auth.TokenExpiry <= 0 {
 		return fmt.Errorf("auth.token_expiry must be positive")
 	}
-	if cfg.Quota.Enabled {
-		return fmt.Errorf("quota enforcement is not implemented; set quota.enabled=false")
-	}
 	switch cfg.RateLimit.Backend {
 	case "memory":
 	case "redis":
@@ -185,6 +182,30 @@ func validateRuntimeConfig(cfg *config.Config) error {
 	}
 	if cfg.RateLimit.DefaultTPM > 0 {
 		return fmt.Errorf("rate_limit.default_tpm is reserved; TPM enforcement is not implemented")
+	}
+	if cfg.RateLimit.RedisURL != "" {
+		return fmt.Errorf("rate_limit.redis_url is reserved; redis rate limiter backend is not implemented")
+	}
+	if cfg.Quota.Backend != "" {
+		return fmt.Errorf("quota.backend is reserved; quota enforcement is not implemented")
+	}
+	if cfg.Quota.DSN != "" {
+		return fmt.Errorf("quota.dsn is reserved; quota enforcement is not implemented")
+	}
+	if cfg.Quota.DefaultBudget < 0 {
+		return fmt.Errorf("quota.default_budget must not be negative")
+	}
+	if cfg.Quota.DefaultBudget > 0 {
+		return fmt.Errorf("quota.default_budget is reserved; quota enforcement is not implemented")
+	}
+	if cfg.Quota.Enabled {
+		return fmt.Errorf("quota enforcement is not implemented; set quota.enabled=false")
+	}
+	if cfg.Store.Type != "" || cfg.Store.DSN != "" {
+		return fmt.Errorf("store persistence config is reserved; control-plane store is not implemented")
+	}
+	if cfg.KMS.Mode == "local" && (cfg.KMS.Vault.Address != "" || cfg.KMS.Vault.Path != "" || cfg.KMS.Vault.TokenEnv != "") {
+		return fmt.Errorf("kms.vault is reserved; vault KMS backend is not implemented")
 	}
 	for _, p := range cfg.Providers {
 		if !p.Enabled {

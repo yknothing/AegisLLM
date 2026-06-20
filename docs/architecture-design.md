@@ -57,9 +57,9 @@ flowchart LR
 | Capability | Current Runtime Behavior | Guardrail |
 | --- | --- | --- |
 | Virtual key auth | HS256 validation, issuer/expiry checks, process-local revocation store | RS256 and admin-driven/shared revocation are reserved |
-| Rate limiting | In-memory RPM and concurrency | Redis and non-zero TPM fail fast until implemented |
-| Quota / budget | Package scaffold only, not in request pipeline | `quota.enabled=true` is rejected during config validation |
-| KMS | Local AES-256-GCM memory/file backends | Vault mode fails fast until the client and tests exist |
+| Rate limiting | In-memory RPM and concurrency | Redis backend/URL and non-zero TPM fail fast until implemented |
+| Quota / budget | Package scaffold only, not in request pipeline | `quota.enabled=true`, quota backend/DSN/default-budget fields, and store config are rejected during config validation |
+| KMS | Local AES-256-GCM memory/file backends | Vault mode/config fails fast until the client and tests exist |
 | Admin / BYOK | Handler scaffold exists but main gateway does not mount it | Mutating/query endpoints return `501`; `key_source="byok"` virtual keys fail closed until owner/provider binding exists |
 | Provider adapters | OpenAI-compatible `openai` and `deepseek` request path | Anthropic/Gemini are rejected by runtime until adapters are implemented |
 

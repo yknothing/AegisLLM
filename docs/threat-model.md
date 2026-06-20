@@ -38,10 +38,10 @@ flowchart LR
 - Go strings used for HTTP headers can retain provider keys until garbage collection. The runtime must minimize lifetime and avoid additional copies, but cannot guarantee immediate zeroing of header strings.
 - Local KMS zeroes Store-owned key byte slices on Close, but Go AES/GCM internals may retain key schedule material that Aegis cannot explicitly zero.
 - The egress allowlist constrains normal proxy execution to configured provider hosts. It is not a containment boundary for a fully compromised process or malicious configuration.
-- Local in-memory KMS backend is an MVP/development storage backend. A persistent encrypted backend or Vault integration is required before production use.
+- Local in-memory KMS backend is for smoke tests and development. File-backed local KMS persists encrypted blobs for standalone validation, while Vault-grade operational controls remain future work.
 - HS256 JWT validation is the minimal no-dependency baseline. RS256 requires a separate reviewed key loading and rotation design.
 - Provider-specific protocol adapters are framework-level only until each adapter has contract tests against real provider formats.
-- Quota and TPM controls are not runtime-enforced yet. Configuration enabling quota or non-zero TPM is rejected so deployments cannot silently assume cost controls are active.
+- Redis, Vault, quota, and TPM controls are not fully runtime-enforced yet. Configuration enabling Redis/Vault modes, reserved Redis/Vault config fields, quota, reserved quota storage/budget fields, reserved store config, or non-zero TPM is rejected so deployments cannot silently assume those controls are active.
 - Virtual key revocation is process-local until a managed admin path or shared store is implemented; short token TTLs and signing-key rotation remain the current operational fallback.
 
 ## Security Review Gates

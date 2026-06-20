@@ -201,6 +201,55 @@ func TestNewServerRejectsUnsupportedRuntimeControls(t *testing.T) {
 			wantErr: "quota enforcement is not implemented",
 		},
 		{
+			name: "quota backend",
+			mutate: func(cfg *config.Config) {
+				cfg.Quota.Backend = "sqlite"
+			},
+			wantErr: "quota.backend is reserved",
+		},
+		{
+			name: "quota dsn",
+			mutate: func(cfg *config.Config) {
+				cfg.Quota.DSN = "aegis.db"
+			},
+			wantErr: "quota.dsn is reserved",
+		},
+		{
+			name: "quota default budget",
+			mutate: func(cfg *config.Config) {
+				cfg.Quota.DefaultBudget = 100.0
+			},
+			wantErr: "quota.default_budget is reserved",
+		},
+		{
+			name: "negative quota default budget",
+			mutate: func(cfg *config.Config) {
+				cfg.Quota.DefaultBudget = -1.0
+			},
+			wantErr: "quota.default_budget must not be negative",
+		},
+		{
+			name: "store type",
+			mutate: func(cfg *config.Config) {
+				cfg.Store.Type = "sqlite"
+			},
+			wantErr: "store persistence config is reserved",
+		},
+		{
+			name: "store dsn",
+			mutate: func(cfg *config.Config) {
+				cfg.Store.DSN = "aegis.db"
+			},
+			wantErr: "store persistence config is reserved",
+		},
+		{
+			name: "vault config",
+			mutate: func(cfg *config.Config) {
+				cfg.KMS.Vault.Address = "https://vault.internal:8200"
+			},
+			wantErr: "kms.vault is reserved",
+		},
+		{
 			name: "unknown rate limit backend",
 			mutate: func(cfg *config.Config) {
 				cfg.RateLimit.Enabled = false
@@ -224,6 +273,14 @@ func TestNewServerRejectsUnsupportedRuntimeControls(t *testing.T) {
 				cfg.RateLimit.DefaultTPM = 1000
 			},
 			wantErr: "TPM enforcement is not implemented",
+		},
+		{
+			name: "redis url",
+			mutate: func(cfg *config.Config) {
+				cfg.RateLimit.Backend = "memory"
+				cfg.RateLimit.RedisURL = "redis://localhost:6379/0"
+			},
+			wantErr: "rate_limit.redis_url is reserved",
 		},
 		{
 			name: "disabled negative default RPM",

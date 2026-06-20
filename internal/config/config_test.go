@@ -87,6 +87,12 @@ func TestLoadExampleConfig(t *testing.T) {
 	if cfg.RateLimit.DefaultTPM != 0 {
 		t.Fatalf("example default_tpm = %d, want 0 until TPM enforcement exists", cfg.RateLimit.DefaultTPM)
 	}
+	if cfg.RateLimit.RedisURL != "" {
+		t.Fatalf("example redis_url = %q, want empty until redis backend exists", cfg.RateLimit.RedisURL)
+	}
+	if cfg.KMS.Vault.Address != "" || cfg.KMS.Vault.Path != "" || cfg.KMS.Vault.TokenEnv != "" {
+		t.Fatalf("example vault config = %+v, want empty until vault backend exists", cfg.KMS.Vault)
+	}
 	for _, provider := range cfg.Providers {
 		if provider.MaxRPM != 0 {
 			t.Fatalf("example provider %q max_rpm = %d, want 0 until provider RPM enforcement exists", provider.ID, provider.MaxRPM)
@@ -94,6 +100,12 @@ func TestLoadExampleConfig(t *testing.T) {
 	}
 	if cfg.Quota.Enabled {
 		t.Fatal("example config enabled quota before runtime enforcement exists")
+	}
+	if cfg.Quota.Backend != "" || cfg.Quota.DSN != "" || cfg.Quota.DefaultBudget != 0 {
+		t.Fatalf("example quota reserved fields = backend=%q dsn=%q budget=%f, want empty/zero until quota enforcement exists", cfg.Quota.Backend, cfg.Quota.DSN, cfg.Quota.DefaultBudget)
+	}
+	if cfg.Store.Type != "" || cfg.Store.DSN != "" {
+		t.Fatalf("example store reserved fields = type=%q dsn=%q, want empty until control-plane store exists", cfg.Store.Type, cfg.Store.DSN)
 	}
 }
 
@@ -123,6 +135,99 @@ func TestLoadRejectsQuotaUntilRuntimeEnforcementExists(t *testing.T) {
 	_, err := Load(path)
 	if err == nil || !strings.Contains(err.Error(), "quota enforcement is not implemented") {
 		t.Fatalf("Load error = %v, want quota enforcement failure", err)
+	}
+}
+
+func TestLoadRejectsReservedPersistenceConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  string
+		wantErr string
+	}{
+		{
+			name: "quota backend",
+			config: `"quota": {
+				"enabled": false,
+				"backend": "sqlite"
+			}`,
+			wantErr: "quota.backend is reserved",
+		},
+		{
+			name: "quota dsn",
+			config: `"quota": {
+				"enabled": false,
+				"dsn": "aegis.db"
+			}`,
+			wantErr: "quota.dsn is reserved",
+		},
+		{
+			name: "quota default budget",
+			config: `"quota": {
+				"enabled": false,
+				"default_budget": 100.0
+			}`,
+			wantErr: "quota.default_budget is reserved",
+		},
+		{
+			name: "zero quota default budget field present",
+			config: `"quota": {
+				"enabled": false,
+				"default_budget": 0
+			}`,
+			wantErr: "quota.default_budget is reserved",
+		},
+		{
+			name: "store type",
+			config: `"quota": {"enabled": false},
+				"store": {
+					"type": "sqlite"
+				}`,
+			wantErr: "store persistence config is reserved",
+		},
+		{
+			name: "store dsn",
+			config: `"quota": {"enabled": false},
+				"store": {
+					"dsn": "aegis.db"
+				}`,
+			wantErr: "store persistence config is reserved",
+		},
+		{
+			name: "empty store field present",
+			config: `"quota": {"enabled": false},
+				"store": {}`,
+			wantErr: "store persistence config is reserved",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+			path := writeConfig(t, `{
+				"kms": {
+					"mode": "local",
+					"local": {"master_key_env": "AEGIS_MASTER_KEY"}
+				},
+				"providers": [
+					{
+						"id": "openai-primary",
+						"name": "OpenAI Primary",
+						"type": "openai",
+						"base_url": "https://api.openai.com",
+						"api_key_id": "openai-key-1",
+						"models": ["gpt-4o-mini"],
+						"enabled": true
+					}
+				],
+				`+tt.config+`,
+				"egress": {"allowed_domains": ["api.openai.com"]}
+			}`)
+
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Load error = %v, want %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -252,6 +357,58 @@ func TestLoadRejectsReservedRateControls(t *testing.T) {
 				"egress": {"allowed_domains": ["api.openai.com"]}
 			}`,
 			wantErr: "TPM enforcement is not implemented",
+		},
+		{
+			name: "redis url field present",
+			config: `{
+				"kms": {
+					"mode": "local",
+					"local": {"master_key_env": "AEGIS_MASTER_KEY"}
+				},
+				"providers": [
+					{
+						"id": "openai-primary",
+						"name": "OpenAI Primary",
+						"type": "openai",
+						"base_url": "https://api.openai.com",
+						"api_key_id": "openai-key-1",
+						"models": ["gpt-4o-mini"],
+						"enabled": true
+					}
+				],
+				"rate_limit": {
+					"enabled": true,
+					"backend": "memory",
+					"redis_url": ""
+				},
+				"quota": {"enabled": false},
+				"egress": {"allowed_domains": ["api.openai.com"]}
+			}`,
+			wantErr: "rate_limit.redis_url is reserved",
+		},
+		{
+			name: "vault config field present",
+			config: `{
+				"kms": {
+					"mode": "local",
+					"local": {"master_key_env": "AEGIS_MASTER_KEY"},
+					"vault": {}
+				},
+				"providers": [
+					{
+						"id": "openai-primary",
+						"name": "OpenAI Primary",
+						"type": "openai",
+						"base_url": "https://api.openai.com",
+						"api_key_id": "openai-key-1",
+						"models": ["gpt-4o-mini"],
+						"enabled": true
+					}
+				],
+				"quota": {"enabled": false},
+				"egress": {"allowed_domains": ["api.openai.com"]}
+			}`,
+			wantErr: "kms.vault is reserved",
 		},
 	}
 
@@ -429,12 +586,7 @@ func TestLoadRejectsUnsupportedRuntimeBackends(t *testing.T) {
 		{
 			name: "vault",
 			config: `"kms": {
-				"mode": "vault",
-				"vault": {
-					"address": "https://vault.internal:8200",
-					"path": "secret/data/aegis/keys",
-					"token_env": "VAULT_TOKEN"
-				}
+				"mode": "vault"
 			}`,
 			wantErr: "vault KMS backend is not implemented",
 		},

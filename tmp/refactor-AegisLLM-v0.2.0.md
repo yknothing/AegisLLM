@@ -348,6 +348,40 @@ After each significant step:
   - Push branch and verify GitHub Actions CI green on final remote SHA.
   - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
 
+### Step 20 - Reserved Runtime Config Truth-Surface Tightening
+
+- Architecture finding:
+  - The old `v0.1.0` scaffold-style example and defaults exposed `quota.backend`, `quota.dsn`, `quota.default_budget`, and `store.*` values that looked like active SQLite persistence.
+  - The same example still exposed inert `rate_limit.redis_url` and `kms.vault` fields even though Redis and Vault are planned/fail-fast capabilities.
+  - The current runtime does not enforce quota and does not wire a control-plane store, so accepting those fields could make operators believe cost-control persistence exists.
+- Fix:
+  - Removed reserved Redis, Vault, quota, and store defaults from `aegis.example.json`; removed reserved quota/store defaults from `defaultConfig`.
+  - Rejected present `rate_limit.redis_url`, `kms.vault`, `quota.backend`, `quota.dsn`, `quota.default_budget`, and `store` fields in JSON config validation.
+  - Mirrored non-zero reserved field guardrails in `internal/runtime` so direct programmatic config construction cannot bypass `config.Load`.
+  - Updated README, architecture truth surface, architecture design notes, threat-model residual risks, and changelog to describe the `v0.2.0` fail-fast behavior.
+- Verification:
+  - `$HOME/.cache/codex-go/go1.26.4/bin/go test ./internal/config ./internal/runtime` passed.
+  - `rg` confirmed `aegis.example.json`, Dockerfile, README, architecture docs, and threat-model no longer expose Redis URL, Vault config, quota SQLite backend/DSN/default budget, or store defaults; remaining matches are fail-fast code, reserved docs, and regression tests.
+  - `git diff --check` passed.
+  - `ALLOW_DIRTY=1 make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passed.
+  - `ALLOW_DIRTY=1 make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=da8a793-reserved-config-presence BUILD_DATE=2026-06-20T00:00:00Z PORT=18095` passed on `ssh ceo`.
+  - `ceo-docker-smoke` evidence:
+    - Host `Mac-mini.local`, `arm64`.
+    - Docker server `29.1.3`, architecture `aarch64`.
+    - Build context `278.33kB`.
+    - Image `sha256:e80ee597e06d950f7798ae3aeeddecd88b536d4b21045b7e212c0aa6d05d86d3`, `os=linux`, `arch=arm64`, `user=nonroot:nonroot`.
+    - Binary: `ELF 64-bit LSB executable, ARM aarch64`.
+    - Version output: `aegis v0.2.0-docker-test (commit: da8a793-reserved-config-presence, built: 2026-06-20T00:00:00Z)`.
+    - Runtime: `health={"status":"ok"}`, `unauth_status=401`, `readonly=true`, `user=nonroot:nonroot`, `/var/lib/aegis:volume`.
+- Autoreview:
+  - Architecture expert A found no bypass for reserved quota/store values through `config.Load` or `runtime.NewServer`, identified the stricter presence-based JSON config requirement that is now implemented, and confirmed no blocking findings after final recheck; the remaining wording drift was resolved by replacing `Non-empty` contract text with configured/presence wording.
+  - Architecture expert B found no quota/store/BYOK current-runtime misstatement and identified remaining Redis/Vault inert fields in `aegis.example.json`, which are now removed and covered by fail-fast validation.
+  - Architecture expert B final recheck found no blocking or should-fix findings and independently verified `./internal/config ./internal/runtime`, `./...`, `git diff --check`, and a `ceo` Docker smoke with `health={"status":"ok"}`, unauthenticated `401`, read-only runtime, and `nonroot:nonroot`.
+- Remaining gates before release-complete claim:
+  - Restore an approved GitHub write credential path.
+  - Push branch and verify GitHub Actions CI green on final remote SHA.
+  - Create `v0.2.0` tag only after remote CI and final release artifact checks pass.
+
 ### Step 11 - Release Plan and Go/No-Go Runbook
 
 - Added `docs/release-plan-v0.2.0.md` as the public release-management artifact for `v0.2.0`.

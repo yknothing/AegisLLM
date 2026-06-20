@@ -102,15 +102,18 @@ type RateLimitConfig struct {
 }
 
 // QuotaConfig reserves budget and cost management settings.
-// quota.enabled=true fails fast until runtime enforcement exists.
+// quota.enabled=true and configured quota storage/budget fields fail fast until
+// runtime enforcement exists. JSON config files reject those fields by presence.
 type QuotaConfig struct {
 	Enabled       bool    `json:"enabled"`
 	Backend       string  `json:"backend"` // Reserved durable store backend
 	DSN           string  `json:"dsn"`
-	DefaultBudget float64 `json:"default_budget"` // Default monthly budget in USD
+	DefaultBudget float64 `json:"default_budget"` // Reserved default monthly budget in USD
 }
 
 // StoreConfig reserves the persistence layer for future control-plane state.
+// JSON config files reject this object by presence because no runtime store is
+// wired yet.
 type StoreConfig struct {
 	Type string `json:"type"` // "sqlite" | "mysql"
 	DSN  string `json:"dsn"`
@@ -224,6 +227,52 @@ func parseDuration(raw json.RawMessage, field string) (time.Duration, error) {
 	return 0, fmt.Errorf("%s must be a duration string or integer nanoseconds, got %s", field, strconv.Quote(string(raw)))
 }
 
+func rejectReservedConfigFields(data []byte) error {
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		return err
+	}
+
+	if rateLimitRaw, ok := root["rate_limit"]; ok && !isJSONNull(rateLimitRaw) {
+		var rateLimitFields map[string]json.RawMessage
+		if err := json.Unmarshal(rateLimitRaw, &rateLimitFields); err != nil {
+			return fmt.Errorf("rate_limit must be an object: %w", err)
+		}
+		if _, exists := rateLimitFields["redis_url"]; exists {
+			return errors.New("rate_limit.redis_url is reserved; redis rate limiter backend is not implemented")
+		}
+	}
+	if quotaRaw, ok := root["quota"]; ok && !isJSONNull(quotaRaw) {
+		var quotaFields map[string]json.RawMessage
+		if err := json.Unmarshal(quotaRaw, &quotaFields); err != nil {
+			return fmt.Errorf("quota must be an object: %w", err)
+		}
+		for _, field := range []string{"backend", "dsn", "default_budget"} {
+			if _, exists := quotaFields[field]; exists {
+				return fmt.Errorf("quota.%s is reserved; quota enforcement is not implemented", field)
+			}
+		}
+	}
+	if kmsRaw, ok := root["kms"]; ok && !isJSONNull(kmsRaw) {
+		var kmsFields map[string]json.RawMessage
+		if err := json.Unmarshal(kmsRaw, &kmsFields); err != nil {
+			return fmt.Errorf("kms must be an object: %w", err)
+		}
+		if _, exists := kmsFields["vault"]; exists {
+			return errors.New("kms.vault is reserved; vault KMS backend is not implemented")
+		}
+	}
+	if _, exists := root["store"]; exists {
+		return errors.New("store persistence config is reserved; control-plane store is not implemented")
+	}
+
+	return nil
+}
+
+func isJSONNull(raw json.RawMessage) bool {
+	return len(raw) == 0 || string(raw) == "null"
+}
+
 // Load reads and validates the configuration from the given path.
 // If path is empty, it attempts to load from default locations.
 func Load(path string) (*Config, error) {
@@ -250,6 +299,9 @@ func Load(path string) (*Config, error) {
 		}
 		if err := json.Unmarshal(data, cfg); err != nil {
 			return nil, fmt.Errorf("parsing config file: %w", err)
+		}
+		if err := rejectReservedConfigFields(data); err != nil {
+			return nil, fmt.Errorf("config validation: %w", err)
 		}
 	}
 
@@ -289,14 +341,7 @@ func defaultConfig() *Config {
 			DefaultMaxConcurrency: 10,
 		},
 		Quota: QuotaConfig{
-			Enabled:       false,
-			Backend:       "sqlite",
-			DSN:           "aegis.db",
-			DefaultBudget: 100.0,
-		},
-		Store: StoreConfig{
-			Type: "sqlite",
-			DSN:  "aegis.db",
+			Enabled: false,
 		},
 	}
 }
@@ -374,13 +419,34 @@ func (c *Config) validate() error {
 	if c.RateLimit.DefaultTPM > 0 {
 		return errors.New("rate_limit.default_tpm is reserved; TPM enforcement is not implemented")
 	}
+	if c.RateLimit.RedisURL != "" {
+		return errors.New("rate_limit.redis_url is reserved; redis rate limiter backend is not implemented")
+	}
 
+	if c.Quota.Backend != "" {
+		return errors.New("quota.backend is reserved; quota enforcement is not implemented")
+	}
+	if c.Quota.DSN != "" {
+		return errors.New("quota.dsn is reserved; quota enforcement is not implemented")
+	}
+	if c.Quota.DefaultBudget < 0 {
+		return errors.New("quota.default_budget must not be negative")
+	}
+	if c.Quota.DefaultBudget > 0 {
+		return errors.New("quota.default_budget is reserved; quota enforcement is not implemented")
+	}
 	if c.Quota.Enabled {
 		return errors.New("quota enforcement is not implemented; set quota.enabled=false")
+	}
+	if c.Store.Type != "" || c.Store.DSN != "" {
+		return errors.New("store persistence config is reserved; control-plane store is not implemented")
 	}
 
 	switch c.KMS.Mode {
 	case "local":
+		if c.KMS.Vault.Address != "" || c.KMS.Vault.Path != "" || c.KMS.Vault.TokenEnv != "" {
+			return errors.New("kms.vault is reserved; vault KMS backend is not implemented")
+		}
 		if c.KMS.Local.MasterKeyEnv == "" {
 			return errors.New("local KMS requires master_key_env to be set")
 		}

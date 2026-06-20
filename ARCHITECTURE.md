@@ -47,10 +47,12 @@ These are architecture targets, not current runtime capabilities:
 
 | Capability | Current guardrail |
 | --- | --- |
-| Redis rate limiter | `rate_limit.backend="redis"` fails fast |
+| Redis rate limiter | `rate_limit.backend="redis"` or configured `rate_limit.redis_url` fails fast |
 | TPM enforcement | Non-zero configured TPM or JWT TPM fails closed |
 | Quota / budget enforcement | `quota.enabled=true` fails fast |
-| Vault KMS | `kms.mode="vault"` fails fast |
+| Quota storage/default budget config | Configured `quota.backend`, `quota.dsn`, or `quota.default_budget` fails fast |
+| Control-plane store config | Configured `store` persistence fields fail fast |
+| Vault KMS | `kms.mode="vault"` or configured `kms.vault` fails fast |
 | Admin API / BYOK control plane | Handler scaffold exists; not mounted by main gateway |
 | BYOK key source | `key_source="byok"` virtual keys fail closed until owner/provider binding exists |
 | RS256 virtual keys | Reserved pending reviewed key loading and rotation |
