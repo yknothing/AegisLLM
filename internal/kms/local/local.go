@@ -35,7 +35,10 @@ type Store struct {
 	masterKey []byte
 	gcm       cipher.AEAD
 	backend   Backend
+	closed    bool
 }
+
+var errStoreClosed = errors.New("local KMS store is closed")
 
 // Backend defines the storage interface for encrypted key blobs.
 // Current runtime uses file and in-memory stores; other durable stores are
@@ -93,6 +96,9 @@ func New(masterKeyEnv string, backend Backend) (*Store, error) {
 func (s *Store) GetKey(ctx context.Context, keyID string) (*utils.SecureBytes, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.closed {
+		return nil, errStoreClosed
+	}
 
 	ciphertext, err := s.backend.Get(keyID)
 	if err != nil {
@@ -121,6 +127,9 @@ func (s *Store) StoreKey(ctx context.Context, keyID string, plaintext []byte) er
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	defer utils.MemZero(plaintext) // Zero input after use
+	if s.closed {
+		return errStoreClosed
+	}
 
 	nonce := make([]byte, s.gcm.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
@@ -140,6 +149,9 @@ func (s *Store) StoreKey(ctx context.Context, keyID string, plaintext []byte) er
 func (s *Store) DeleteKey(ctx context.Context, keyID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return errStoreClosed
+	}
 	return s.backend.Delete(keyID)
 }
 
@@ -162,6 +174,11 @@ func (s *Store) RotateKey(ctx context.Context, keyID string) error {
 
 // ListKeyIDs returns all stored key identifiers.
 func (s *Store) ListKeyIDs(ctx context.Context) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return nil, errStoreClosed
+	}
 	return s.backend.List()
 }
 
@@ -171,8 +188,13 @@ func (s *Store) ListKeyIDs(ctx context.Context) ([]string, error) {
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
 	utils.MemZero(s.masterKey)
 	s.masterKey = nil
+	s.gcm = nil
+	s.closed = true
 	return nil
 }
 

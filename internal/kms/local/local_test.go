@@ -3,6 +3,7 @@ package local
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,6 +101,50 @@ func TestSecureBytesClose(t *testing.T) {
 
 	if secureKey.Bytes() != nil {
 		t.Fatal("SecureBytes.Bytes() should return nil after Close()")
+	}
+}
+
+func TestStoreRejectsOperationsAfterClose(t *testing.T) {
+	masterKeyHex := hex.EncodeToString(make([]byte, 32))
+	const envVar = "TEST_AEGIS_CLOSED_STORE_KEY"
+	t.Setenv(envVar, masterKeyHex)
+
+	store, err := New(envVar, NewMemoryBackend())
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := store.StoreKey(ctx, "closed-test", []byte("sk-before-close")); err != nil {
+		t.Fatalf("StoreKey before Close returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("second Close returned error: %v", err)
+	}
+
+	if _, err := store.GetKey(ctx, "closed-test"); !errors.Is(err, errStoreClosed) {
+		t.Fatalf("GetKey after Close error = %v, want errStoreClosed", err)
+	}
+	plaintext := []byte("sk-after-close")
+	if err := store.StoreKey(ctx, "after-close", plaintext); !errors.Is(err, errStoreClosed) {
+		t.Fatalf("StoreKey after Close error = %v, want errStoreClosed", err)
+	}
+	for _, b := range plaintext {
+		if b != 0 {
+			t.Fatal("StoreKey did not zero plaintext after closed-store failure")
+		}
+	}
+	if err := store.DeleteKey(ctx, "closed-test"); !errors.Is(err, errStoreClosed) {
+		t.Fatalf("DeleteKey after Close error = %v, want errStoreClosed", err)
+	}
+	if err := store.RotateKey(ctx, "closed-test"); !errors.Is(err, errStoreClosed) {
+		t.Fatalf("RotateKey after Close error = %v, want errStoreClosed", err)
+	}
+	if _, err := store.ListKeyIDs(ctx); !errors.Is(err, errStoreClosed) {
+		t.Fatalf("ListKeyIDs after Close error = %v, want errStoreClosed", err)
 	}
 }
 

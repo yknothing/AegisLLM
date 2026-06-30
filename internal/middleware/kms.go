@@ -46,6 +46,10 @@ func KMSInjector(cfg KMSMiddlewareConfig) server.Middleware {
 			ctx.Abort(http.StatusInternalServerError, []byte(`{"error":{"message":"internal routing error","type":"server_error"}}`))
 			return
 		}
+		if cfg.Provider == nil {
+			ctx.Abort(http.StatusServiceUnavailable, []byte(`{"error":{"message":"key service unavailable","type":"server_error"}}`))
+			return
+		}
 
 		// Resolve the KMS key ID based on key source
 		keyID := resolveKeyID(ctx, cfg.PoolKeyMapping)
