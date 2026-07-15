@@ -4,8 +4,8 @@
 
 | Field | Value |
 | --- | --- |
-| Architecture version | `v0.2.0` |
-| Supersedes | `v0.1.0` legacy architecture scaffold |
+| Architecture version | `v0.2.1` |
+| Supersedes | `v0.2.0` hardened standalone baseline |
 | Status | Current runtime truth |
 | Scope | Capability status, runtime dependencies, and reserved architecture targets |
 
@@ -26,19 +26,23 @@ Client
   -> Provider
 ```
 
-The main gateway mounts only `/v1/*` and `/health`. Admin routes exist as a scaffold in `internal/admin` but are not mounted by `cmd/aegis`.
+The main gateway mounts only `POST /v1/chat/completions` and the Go `GET /health` pattern (which also serves HTTP `HEAD`). Unsupported data-plane methods and paths never enter the policy pipeline. Admin routes exist as a scaffold in `internal/admin` but are not mounted by `cmd/aegis`.
 
 ## Implemented Baseline
 
 | Capability | Runtime status |
 | --- | --- |
-| Auth | HS256 virtual-key validation, issuer/expiry checks, process-local revocation store |
+| Auth | HS256 virtual-key validation, issuer/expiry checks, durable single-host revocation with fail-closed degraded state |
 | Rate limiting | In-memory RPM and concurrency |
 | PII | Default regex redaction mode |
 | Routing | Enabled provider selection by model, priority, and circuit-breaker state |
-| KMS | Local AES-256-GCM with in-memory and encrypted file backends |
+| Provider health | Circuit breakers consume only proxy-observed provider 429/5xx outcomes; gateway-local failures do not poison provider health |
+| KMS | Local AES-256-GCM v2 envelope with keyID AAD, explicit compatibility migration, and strict-v2 post-migration floor |
+| Operator | Offline provider-key import, virtual-key issue/revoke, revocation initialization, and KMS migration |
 | Providers | OpenAI-compatible `openai` and `deepseek` request path |
-| Proxy | SSE forwarding, egress allowlist validation, heuristic token counting |
+| Request body | One bounded request-scoped buffer shared by PII, router, adapter, and proxy, then zeroed at pipeline completion |
+| Proxy | Streaming response forwarding, egress allowlist validation, heuristic token counting |
+| Config | Unknown JSON fields, empty auth issuer, and unsupported/reserved capabilities fail closed during load |
 | TLS | Server TLS with TLS 1.3 baseline; mTLS requires `ca_file` |
 
 ## Reserved Capabilities
@@ -68,6 +72,7 @@ The default standalone profile needs:
 - `egress.allowed_domains`
 - at least one enabled provider whose `api_key_id` references a KMS key
 - a writable key-store path when using local file KMS
+- an initialized owner-only revocation snapshot on durable local storage
 
 Container smoke runs can use the bundled `/etc/aegis/aegis.json`. Production container deployments should mount `/etc/aegis/aegis.json` explicitly and must provide a writable `/var/lib/aegis` volume when using file-backed local KMS.
 

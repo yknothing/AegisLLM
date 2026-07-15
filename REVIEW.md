@@ -4,14 +4,16 @@
 
 | Field | Value |
 | --- | --- |
-| Review version | `v0.2.0` |
+| Review version | `v0.2.1` |
 | Supersedes | `v0.1.0` pre-remediation architecture review |
 | Baseline reviewed | `v0.1.0` exposed planned/scaffolded capabilities without consistent fail-fast truth |
-| Remediated baseline | `v0.2.0` aligns config, runtime guardrails, and documentation truth surface |
+| Remediated baseline | `v0.2.1` adds a supported offline operator path, keyID-bound KMS format, and durable single-host revocation |
 
 ## Result
 
 The previous architecture review found several Redis-like gaps where documents, config fields, or interfaces exposed capabilities that runtime did not enforce. This remediation converts the highest-risk gaps into explicit fail-fast behavior and aligns the public truth surface.
+
+The deeper 2026-07-15 follow-up, evidence reconciliation, prioritized task board, and product-decision queue are maintained in `docs/review-remediation-2026-07-15.md`.
 
 ## Fixed In This Slice
 
@@ -30,7 +32,7 @@ The previous architecture review found several Redis-like gaps where documents, 
 
 - Implement quota middleware and a durable quota store.
 - Implement TPM preflight reservation and post-response reconciliation.
-- Promote revocation store into a managed runtime dependency and connect admin revocation.
+- Replace local revocation with a reviewed shared backend before multi-host deployment.
 - Implement Vault KMS client with failure-mode tests.
 - Mount Admin API only after issuance, BYOK storage, revocation, and audit are delivered atomically.
 - Add real Anthropic/Gemini adapter contract tests before enabling those provider types.
@@ -40,10 +42,10 @@ The previous architecture review found several Redis-like gaps where documents, 
 Run before claiming local remediation complete:
 
 ```bash
-make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local
-make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=<candidate-sha> BUILD_DATE=<utc-build-date> PORT=<free-port>
+GOTOOLCHAIN=go1.26.5 make release-preflight VERSION=v0.2.1-rc-local
+make ceo-docker-smoke VERSION=v0.2.1-docker-test COMMIT=<candidate-sha> BUILD_DATE=<utc-build-date> PORT=<free-port>
 ```
 
 Do not claim a supported release until the branch is pushed, GitHub Actions are
-green on the final SHA, ownership is assigned in `docs/release-plan-v0.2.0.md`,
-and the `v0.2.0` tag is created.
+green on the final SHA, ownership is assigned in `docs/release-plan-v0.2.1.md`,
+and the `v0.2.1` tag is created.

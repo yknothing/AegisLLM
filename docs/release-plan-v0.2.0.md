@@ -38,8 +38,8 @@ Explicitly excluded:
 All gates are required before tag creation:
 
 1. Local worktree is clean on `codex/aegis-architecture-refactor`.
-2. `make release-preflight GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local` passes with uncached Go tests and local process smoke.
-3. `make local-smoke GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local COMMIT=<sha> PORT=<free-port>` passes against the exact clean candidate SHA.
+2. `GOTOOLCHAIN=go1.26.5 make release-preflight VERSION=v0.2.0-rc-local` passes with uncached Go tests, source and binary vulnerability scans, and local process smoke.
+3. `GOTOOLCHAIN=go1.26.5 make local-smoke VERSION=v0.2.0-rc-local COMMIT=<sha> PORT=<free-port>` passes against the exact clean candidate SHA.
 4. `make ceo-docker-smoke VERSION=v0.2.0-docker-test COMMIT=<sha> BUILD_DATE=<utc-rfc3339> PORT=<free-port>` passes on `ssh ceo` against the exact clean candidate SHA.
 5. Branch is pushed to GitHub without rewriting the local clean commit sequence.
 6. GitHub Actions CI is green for the exact commit that will be tagged.

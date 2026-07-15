@@ -25,6 +25,8 @@ The middleware pipeline will execute in this strict order:
 10. Proxy       → Forward to upstream provider
 ```
 
+The body-processing stages share one bounded request-scoped buffer. If an adapter or redaction stage replaces that buffer, the superseded bytes are zeroed; the final buffer is zeroed when the pipeline returns. A terminal middleware commits or aborts without calling `next()`; reaching the end of the chain without a response is an internal error and fails closed.
+
 ## Rationale
 
 The ordering follows the principle of **"fail fast, fail cheap"**:
@@ -46,6 +48,7 @@ The ordering follows the principle of **"fail fast, fail cheap"**:
 - Rate-limited requests are rejected at step 5 without touching KMS or providers.
 - PII is redacted before any routing or key injection occurs.
 - The real API key exists in memory for the shortest possible duration (steps 8-10 only).
+- Provider health is updated only from proxy-observed provider outcomes; local gateway failures remain outside the circuit-breaker signal.
 
 ### Negative
 - The strict ordering means middleware cannot be freely reordered without security review.

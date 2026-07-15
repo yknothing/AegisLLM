@@ -4,9 +4,9 @@ This document describes how consumer-facing applications should integrate with A
 
 ## Overview
 
-Consumer apps face a fundamental three-way tension when integrating LLM capabilities: **who holds the keys**, **who bears the cost**, and **who controls access**. Aegis resolves this through a unified Virtual Key abstraction. The current `v0.2.0` runtime supports the server-hosted pool key source only; BYOK remains a future control-plane capability.
+Consumer apps face a fundamental three-way tension when integrating LLM capabilities: **who holds the keys**, **who bears the cost**, and **who controls access**. Aegis resolves this through a unified Virtual Key abstraction. The current `v0.2.1` runtime supports the server-hosted pool key source only; BYOK remains a future control-plane capability.
 
-Current runtime status: the gateway supports server-hosted pool keys when provider keys have already been seeded into KMS. `key_source: "byok"` virtual keys fail closed until Aegis has server-side owner/provider binding. BYOK registration, virtual-key issuance, revocation, usage dashboard APIs, quota enforcement, and TPM enforcement are planned control-plane work and are not current runtime capabilities.
+Current runtime status: the offline Operator CLI imports configured provider keys, issues supported pool virtual keys, and durably revokes their `kid` on one host. `key_source: "byok"` fails closed until server-side owner/provider binding exists. BYOK registration, network management APIs, usage dashboards, shared revocation, quota, and TPM remain planned control-plane work.
 
 ## Access Modes
 
@@ -18,7 +18,7 @@ Current runtime status: the gateway supports server-hosted pool keys when provid
 
 ## Recommended Architecture: Layered Hybrid Model
 
-The target hybrid model provides zero-friction onboarding while offering flexibility for advanced users. For `v0.2.0`, use the server-hosted pool mode only.
+The target hybrid model provides zero-friction onboarding while offering flexibility for advanced users. For `v0.2.1`, use the server-hosted pool mode only.
 
 ### User Tier Mapping
 
@@ -53,7 +53,7 @@ LLM Provider (OpenAI-compatible OpenAI / DeepSeek)
 
 ### Key Insight
 
-The App client sends a Virtual Key in the `Authorization: Bearer vk_xxx` header. In `v0.2.0`, that key must use `key_source: "pool"`.
+The App client sends a Virtual Key JWT in the `Authorization: Bearer <token>` header. In `v0.2.1`, that key must use `key_source: "pool"`.
 
 ## Virtual Key JWT Claims
 
@@ -95,11 +95,11 @@ Future BYOK tokens are reserved until server-side owner/provider binding exists.
 
 Current runtime accepts non-zero virtual-key `rpm` claims for per-key request limiting and non-zero `max_concurrency` claims for per-key concurrent request limits. When `rate_limit.default_max_concurrency` is non-zero, it is a deployment-wide ceiling; a token claim can only tighten that limit. Provider config `max_rpm` and `max_tpm` values are reserved and must be `0` until provider-level throttle and TPM enforcement are implemented. Virtual-key `tpm` and `budget` claims are also reserved and must be `0` until TPM and quota enforcement are implemented.
 
-Current `v0.2.0` routing supports configured `openai` and OpenAI-compatible `deepseek` providers only. Do not issue virtual keys for Anthropic or Gemini models until their protocol adapters are implemented and enabled.
+Current `v0.2.1` routing supports configured `openai` and OpenAI-compatible `deepseek` providers only. The Operator CLI refuses to issue tokens for models absent from enabled providers.
 
 ## Future BYOK Workflow
 
-These steps are not current `v0.2.0` runtime behavior:
+These steps are not current `v0.2.1` runtime behavior:
 
 1. User navigates to App settings and enters their API key.
 2. App sends the key to a future Aegis Admin API: `POST /admin/keys/byok`.

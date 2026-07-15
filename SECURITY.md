@@ -16,7 +16,7 @@ Aegis is built with security as the highest priority. The following invariants a
 
 ### 1. No Plaintext Secrets at Rest
 
-Provider API keys are **never** stored in plaintext — not in configuration files, not in databases, not in environment variables (except the master encryption key). Current runtime encrypts keys through the local AES-256-GCM KMS. HashiCorp Vault support is reserved and fails fast until implemented.
+Provider API keys are **never** stored in plaintext — not in configuration files, databases, or command-line arguments. The offline CLI accepts provider keys only through bounded non-terminal stdin. Current runtime encrypts keys through the local AES-256-GCM KMS; v2 blobs authenticate the exact key ID as AAD. New installs use `kms.local.minimum_envelope_version=2`; version `1` is a temporary legacy-migration compatibility mode, not the steady state. HashiCorp Vault support is reserved and fails fast until implemented.
 
 ### 2. Zero PII in Logs
 
@@ -24,7 +24,16 @@ Audit logs record only structural metadata (timestamps, token counts, model/prov
 
 ### 3. Strong Virtual-Key Signing
 
-HS256 virtual-key signing material must be at least 32 bytes. Aegis rejects shorter JWT signing keys at runtime and rejects virtual keys whose `exp - iat` lifetime exceeds `auth.token_expiry`.
+HS256 virtual-key signing material must be at least 32 bytes. Aegis requires a non-empty configured issuer and an explicit supported `key_source`, rejects shorter signing keys, and rejects virtual keys whose `exp - iat` lifetime exceeds `auth.token_expiry`.
+
+Virtual-key revocation uses a strict owner-only local snapshot. Missing, corrupt,
+or permission-unsafe state prevents startup or produces a generic `503`
+degraded response for otherwise valid tokens. A running reader also fails
+closed if it observes a lower generation or changed content at the same
+generation. Rollback performed before process restart cannot be detected
+without an independent trusted monotonic anchor; recovery must preserve the
+union of unexpired tombstones. The local file backend is not supported on
+shared network filesystems or as a multi-host store.
 
 ### 4. Memory Zeroing
 
@@ -48,23 +57,25 @@ Contributors MUST follow these rules:
 4. **Constant-time comparison**: Use `crypto/subtle` for token/signature validation
 5. **Input validation**: Reject oversized payloads, cap request-body limits, validate all user input
 6. **No open redirects**: The proxy only contacts pre-configured provider URLs
+7. **Strict configuration**: Reject unknown JSON fields rather than accepting misspelled security controls
 
 ## Dependency Policy
 
 - Minimize external dependencies (prefer Go standard library)
 - Runtime/module dependencies must be pinned by Go modules and committed in `go.sum` when present
 - Release gate tools invoked through `go run module@version` must use explicit versions in `Makefile` or release scripts and are verified through the Go module checksum database
-- Regular `govulncheck` scans for known vulnerabilities
+- Release gates run both source-mode and final-binary `govulncheck` scans for known vulnerabilities using the pinned release toolchain
 - No dependencies with known supply chain attack history
 
 ## Supported Versions
 
-The `v0.2.0` tag is the first supported AegisLLM release line. It is supported
-only when the tag points to a commit whose release branch was pushed, whose
-GitHub Actions run was green, and whose final release gates are recorded in
-[docs/release-plan-v0.2.0.md](docs/release-plan-v0.2.0.md).
+The `v0.2.0` tag is the first supported AegisLLM release line. `v0.2.1` becomes
+supported only when its tag points to a pushed commit, GitHub Actions is green,
+and final release gates are recorded in
+[docs/release-plan-v0.2.1.md](docs/release-plan-v0.2.1.md).
 
 | Version | Supported |
 | :--- | :---: |
+| `v0.2.1` | Pending final tag and gates |
 | `v0.2.0` | Yes |
 | `v0.1.0` scaffold baseline | No |

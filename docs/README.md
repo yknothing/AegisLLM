@@ -18,7 +18,8 @@
 
 ## Guides
 
-- [v0.2.0 Release Plan](release-plan-v0.2.0.md) - Go/no-go gates, ownership, communication, and rollback plan
+- [v0.2.1 Release Plan](release-plan-v0.2.1.md) - Current go/no-go gates, ownership, communication, and storage rollback plan
+- [v0.2.0 Release Plan](release-plan-v0.2.0.md) - Historical first-supported-line release plan
 - Deployment Guide (planned)
 - Virtual Key Management Guide (planned)
 - BYOK Integration Guide (planned)

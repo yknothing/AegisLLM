@@ -27,18 +27,18 @@ Every feature is a middleware plugin. The core is minimal and auditable.
 
 ## Current Implementation Status
 
-Architecture truth surface: `v0.2.0`, superseding the `v0.1.0` scaffold baseline that exposed planned capabilities without consistent fail-fast guards.
+Architecture truth surface: `v0.2.1`, superseding the `v0.2.0` hardening baseline.
 
 This repository currently provides the runtime framework and a minimal OpenAI-compatible gateway path:
 
-- Implemented baseline: safe logger, config loading, middleware composition, HS256 virtual-key validation, in-memory rate limiting, PII redaction, provider routing, local encrypted file KMS backend, egress allowlist validation, and streaming proxy scaffolding.
+- Implemented baseline: safe logger, strict config loading, fail-closed middleware composition, HS256 virtual-key issuance/validation, durable single-host revocation, in-memory rate limiting, PII redaction, provider routing, keyID-bound local encrypted file KMS, an offline Operator CLI, egress allowlist validation, and streaming response proxying.
 - Explicitly not production-ready yet: Admin API key issuance, BYOK key-source runtime, Vault KMS, Redis rate limiter, quota/TPM enforcement, durable control-plane store, and non-OpenAI protocol transformations.
-- Fail-fast behavior: unsupported BYOK key source, Vault KMS mode/config, Redis limiter backend/URL, quota enforcement, reserved quota storage/budget fields, reserved store config, and non-zero TPM configuration are rejected instead of silently running without controls.
+- Fail-fast behavior: unknown config fields, empty auth issuer, missing/unsupported JWT key source, unsupported Vault/Redis/quota/store/TPM capabilities, and an exhausted pipeline without a terminal response are rejected instead of silently running without controls.
 
 ## Development Smoke
 
 ```bash
-make local-smoke GO=$HOME/.cache/codex-go/go1.26.4/bin/go VERSION=v0.2.0-rc-local
+GOTOOLCHAIN=go1.26.5 make local-smoke VERSION=v0.2.1-rc-local
 ```
 
 For manual smoke testing:
@@ -48,41 +48,68 @@ For manual smoke testing:
 export AEGIS_MASTER_KEY=$(openssl rand -hex 32)
 export AEGIS_JWT_KEY=$(openssl rand -hex 64)
 
-# Build and run Aegis in one terminal
-make build
+# Build, initialize durable revocation state, import one provider key from
+# bounded non-terminal stdin, and issue a virtual key into a new 0600 file.
+GOTOOLCHAIN=go1.26.5 make build
+./bin/aegis operator revocation init --config aegis.example.json
+printf '%s' "$OPENAI_API_KEY" | ./bin/aegis operator provider-key import \
+  --config aegis.example.json --provider openai-primary
+./bin/aegis operator virtual-key issue \
+  --config aegis.example.json \
+  --subject local-client \
+  --models gpt-4o-mini \
+  --ttl 1h \
+  --out ./local-client.jwt
+
+# Run Aegis in one terminal.
 ./bin/aegis --config aegis.example.json
 
 # Verify the process is alive from another terminal
 curl http://localhost:8080/health
 ```
 
-The current baseline does not yet include a production key issuance and provider-key seeding flow. After that flow exists, OpenAI-compatible clients should point at Aegis like this:
+The Operator CLI is a standalone/offline management path, not a network Control Plane. OpenAI-compatible clients can use the issued JWT as their API key:
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(
     base_url="http://localhost:8080/v1",
-    api_key="vk_your_virtual_key_here"
+    api_key=open("local-client.jwt", encoding="utf-8").read().strip()
 )
 
 response = client.chat.completions.create(
-    model="gpt-4o",
+    model="gpt-4o-mini",
     messages=[{"role": "user", "content": "Hello!"}],
     stream=True
 )
 ```
 
+New stores use `kms.local.minimum_envelope_version=2`. To migrate an older
+nil-AAD store, stop all KMS writers, temporarily set the field to `1`, run
+`operator kms migrate --dry-run`, then `--apply --backup-dir <new-dir>`. Require
+a second dry-run to report `legacy=0`, restore the field to `2`, and restart.
+Retain the encrypted backup for rollback. Do not run provider-key imports or
+other KMS writers during apply, even though current operator commands share a
+local kernel lock. A rollback to v0.2.0 must also restore the complete
+pre-v0.2.1 config and its matching auth/storage state. The older binary does
+not implement v0.2.1-only semantics such as `minimum_envelope_version` and
+`auth.revocation`; silently ignored fields are not a supported mixed-version
+rollback.
+
 ## Capability Status
 
 | Capability | Status |
 | :--- | :--- |
-| OpenAI-compatible `/v1/chat/completions` path | Baseline framework implemented |
-| Virtual key auth | HS256 validation implemented; RS256 is planned |
+| OpenAI-compatible `POST /v1/chat/completions` path | Baseline framework implemented; other data-plane paths and methods do not enter the policy pipeline |
+| Virtual key auth | Offline HS256 issuance and runtime validation implemented; RS256 is planned |
 | Provider support | `openai` and OpenAI-compatible `deepseek` enabled; Anthropic/Gemini fail closed until adapters are implemented |
-| KMS | Local AES-GCM interface with in-memory and encrypted file backends implemented; Vault is planned |
+| KMS | Local AES-GCM v2 envelope binds ciphertext to key ID as AAD; explicit compatibility migration ends in a strict-v2 format floor; Vault is planned |
+| Revocation | Versioned local snapshot, serialized atomic CLI writes, 500 ms polling, and in-memory request checks implemented for single-host deployments; shared backend is planned |
+| Operator CLI | Offline revocation initialization, provider-key import, virtual-key issue/revoke, and KMS migration implemented; no network Admin API is mounted |
 | Rate limiting | In-memory RPM and default/per-key concurrency baseline implemented; non-zero `default_max_concurrency` is a deployment ceiling; non-zero TPM, Redis backend, and `redis_url` fail fast until implemented |
 | PII protection | Regex-based request redaction baseline implemented |
+| Request memory | One bounded request-scoped body buffer is shared across policy/adapter stages and zeroed after use; provider responses are streamed |
 | Cost management | Pricing/quota modules scaffolded; `quota.enabled=true` and reserved quota backend/DSN/default-budget fields are rejected until runtime enforcement exists |
 | Admin API / BYOK | Handler scaffold exists but is not mounted by the main gateway; mutating/query endpoints fail closed with `501`, and `key_source="byok"` virtual keys are rejected until owner/provider binding exists |
 | Streaming proxy | SSE forwarding baseline implemented; token counting is heuristic |
@@ -98,10 +125,16 @@ response = client.chat.completions.create(
 
 ## Docker Runtime Contract
 
-The image includes `/etc/aegis/aegis.json` derived from `aegis.example.json` with `kms.local.key_store_path` set to `/var/lib/aegis/keys`, and creates `/var/lib/aegis` for the local encrypted key store. Production deployments should mount a writable data volume and may mount their own config explicitly:
+The image includes `/etc/aegis/aegis.json` derived from `aegis.example.json`, with KMS and revocation state under `/var/lib/aegis`. Initialize the volume once with the same release binary before starting the gateway:
 
 ```bash
-make docker VERSION=v0.2.0-rc-local
+make docker VERSION=v0.2.1-rc-local
+
+docker volume create aegis-data
+docker run --rm \
+  -v aegis-data:/var/lib/aegis \
+  aegis:v0.2.1-rc-local \
+  operator revocation init --config /etc/aegis/aegis.json
 
 docker run --rm \
   --read-only \
@@ -109,10 +142,10 @@ docker run --rm \
   -e AEGIS_JWT_KEY="$(openssl rand -hex 64)" \
   -v aegis-data:/var/lib/aegis \
   -p 8080:8080 \
-  aegis:v0.2.0-rc-local
+  aegis:v0.2.1-rc-local
 ```
 
-The bundled example config is non-secret and suitable only for smoke validation. If you mount a custom config at `/etc/aegis/aegis.json`, set `kms.local.key_store_path` to a path backed by a writable volume. Provider API keys must still be seeded into KMS before real `/v1` provider calls can succeed.
+The bundled example config is non-secret and suitable only for smoke validation. If you mount a custom config, put both `kms.local.key_store_path` and `auth.revocation.file_path` on durable local storage. Import provider keys with `operator provider-key import` before real `/v1` traffic. Local revocation files are not a multi-host store and cannot detect restoration of an older valid snapshot before restart; recovery must preserve the union of unexpired tombstones.
 
 The default Docker target tags only the explicit `VERSION`. Set `DOCKER_TAG_LATEST=true` only for a supported release.
 
@@ -127,6 +160,7 @@ Security is Aegis's highest priority. See [SECURITY.md](SECURITY.md) for:
 - API keys never exist in plaintext at rest
 - Memory is zeroed after credential use
 - Egress filtering constrains configured provider requests to allowlisted hosts; plain entries are exact hosts and `*.example.com` is required for subdomains
+- Unknown JSON configuration fields, an empty auth issuer, and a missing JWT `key_source` fail closed
 - No shell or package manager in production image
 
 ## Project Structure
@@ -138,6 +172,9 @@ internal/
   server/           → HTTP server and middleware pipeline
   middleware/       → Auth, rate limit, PII, router, KMS, adapter
   kms/              → Key management (local AES implemented; Vault reserved)
+  operator/         → Privileged offline use-case coordination
+  revocation/       → Durable single-host revocation snapshot
+  virtualkey/       → Shared token issuance and validation contract
   proxy/            → Streaming proxy engine
   quota/            → Budget and cost management
   model/            → OpenAI-compatible API types
@@ -154,8 +191,8 @@ See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## Release Plan
 
-See [docs/release-plan-v0.2.0.md](docs/release-plan-v0.2.0.md) for the current
-`v0.2.0` go/no-go gates and release ownership checklist.
+See [docs/release-plan-v0.2.1.md](docs/release-plan-v0.2.1.md) for the current
+`v0.2.1` go/no-go gates and release ownership checklist.
 
 ## License
 

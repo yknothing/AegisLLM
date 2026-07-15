@@ -12,14 +12,17 @@ Accepted baseline for the current framework build-out.
 | Secret handling | A provider key is needed for one upstream request | Fetch from KMS only after routing, hold in request scope, close after proxy returns | No plaintext provider key in config, logs, or long-lived caches | 2 | ADR-002, ADR-003 |
 | Egress control | A configured provider URL or transformed target is malicious | Validate normalized URL host against an allowlist before outbound request | Exact host by default; subdomains require explicit `*.` wildcard; wildcard allows nested subdomains but not the apex; empty allowlist fails closed | 3 | `AGENTS.md`, `SECURITY.md` |
 | Pipeline integrity | A new middleware is added | Preserve ADR-004 order unless a new ADR changes it | Composition tests cover middleware order | 4 | ADR-004 |
-| Maintainability | Provider, KMS, or limiter implementation changes | Change the implementation behind a stable interface without changing server microkernel | `internal/server` does not import concrete middleware packages | 5 | Module design assumption |
-| MVP operability | Standalone users run a local gateway | Local KMS, in-memory limiter, and strict config validation start without external services | `go test ./...` and example config load pass in a Go toolchain | 6 | README deployment modes |
+| Configuration integrity | An operator mistypes a field or omits an auth boundary | Reject unknown JSON fields and require a non-empty issuer | Typo tests fail during config load at root and nested boundaries | 5 | Fail-closed operating policy |
+| Maintainability | Provider, KMS, or limiter implementation changes | Change the implementation behind a stable interface without changing server microkernel | `internal/server` does not import concrete middleware packages | 6 | Module design assumption |
+| MVP operability | Standalone users run a local gateway | Local KMS, in-memory limiter, and strict config validation start without external services | `go test ./...` and example config load pass in a Go toolchain | 7 | README deployment modes |
 
 ## Architectural Style
 
 Aegis remains a single-process modular gateway: a microkernel HTTP server plus a middleware pipeline. This avoids distributed-system cost while keeping provider, KMS, limiter, adapter, and proxy modules independently replaceable.
 
-The composition root is `internal/runtime`. It owns concrete wiring from configuration to interfaces. `internal/server` owns only request dispatch, pipeline execution, recovery, request ID, and audit metadata. Middleware packages depend on `internal/server` for the `RequestContext` contract, but `internal/server` does not depend on middleware implementations.
+The composition root is `internal/runtime`. It owns concrete wiring from configuration to interfaces. `internal/server` owns only exact request dispatch, pipeline execution, recovery, request ID, and audit metadata. Middleware packages depend on `internal/server` for the `RequestContext` contract, but `internal/server` does not depend on middleware implementations.
+
+The data plane is deliberately narrow: `POST /v1/chat/completions` is the only provider route. PII scanning, routing, and adaptation share one bounded request-scoped body buffer; superseded buffers and the final buffer are zeroed. Provider circuit breakers are updated only from proxy-observed provider responses, never from gateway-local failures.
 
 ## Runtime Request Flow
 
@@ -43,12 +46,15 @@ flowchart LR
 
 | Component | Responsibility | Owns | Must Not Own |
 | --- | --- | --- | --- |
-| `cmd/aegis` | CLI entrypoint and process lifecycle | flags, logger bootstrap, signal handling | pipeline composition details |
+| `cmd/aegis` | CLI entrypoint and process lifecycle | server flags, offline operator command parsing, logger/signal bootstrap | pipeline composition or privileged policy details |
 | `internal/runtime` | Convert config into a runnable server | middleware order, concrete implementations, default runtime policies | HTTP request execution logic |
 | `internal/server` | HTTP microkernel and middleware execution | mux, request context, infrastructure middleware | auth, routing, provider, or KMS policy |
 | `internal/config` | Config loading and validation | externalized runtime settings | secrets, live provider clients |
 | `internal/middleware` | Request policy controls | auth, rate limiting, PII, routing, adapter, KMS, proxy middleware contracts | network transport implementation |
 | `internal/kms` | Provider key storage abstraction | encrypted key lifecycle | request authorization decisions |
+| `internal/operator` | Privileged offline workflows | provider import, token issuance/revocation, KMS migration coordination | network listeners or data-plane routes |
+| `internal/revocation` | Single-host durable negative auth state | atomic snapshot writer, polling reader, immutable checker | multi-host shared-state claims |
+| `internal/virtualkey` | Virtual-key token contract | HS256 issuance and validation | HTTP request handling |
 | `internal/proxy` | Upstream HTTP/SSE forwarding | outbound transport, egress validation, response forwarding | model authorization or key resolution |
 | `internal/quota` | Budget accounting | usage and cost data | auth or request routing |
 
@@ -56,7 +62,7 @@ flowchart LR
 
 | Capability | Current Runtime Behavior | Guardrail |
 | --- | --- | --- |
-| Virtual key auth | HS256 validation, issuer/expiry checks, process-local revocation store | RS256 and admin-driven/shared revocation are reserved |
+| Virtual key auth | HS256 issuance/validation, issuer/expiry checks, and durable single-host revocation | RS256 and shared/network control-plane revocation are reserved |
 | Rate limiting | In-memory RPM and concurrency | Redis backend/URL and non-zero TPM fail fast until implemented |
 | Quota / budget | Package scaffold only, not in request pipeline | `quota.enabled=true`, quota backend/DSN/default-budget fields, and store config are rejected during config validation |
 | KMS | Local AES-256-GCM memory/file backends | Vault mode/config fails fast until the client and tests exist |
@@ -65,9 +71,9 @@ flowchart LR
 
 ## Deployment Topology
 
-MVP topology is one Aegis process behind a trusted ingress or localhost development binding. Production topology should place `/v1/*` behind TLS or mTLS and keep any future admin API on a separate listener or internal-only network. The local KMS runtime supports an in-memory backend for smoke tests and an encrypted file backend for standalone validation; Vault remains a separate production hardening track.
+MVP topology is one Aegis process behind a trusted ingress or localhost development binding. Production topology should place `POST /v1/chat/completions` behind TLS or mTLS and keep any future admin API on a separate listener or internal-only network. The local KMS runtime supports an in-memory backend for smoke tests and an encrypted file backend for standalone validation; Vault remains a separate production hardening track.
 
-Container deployments must provide `AEGIS_MASTER_KEY`, `AEGIS_JWT_KEY`, and a writable key-store volume at `/var/lib/aegis` when using the file-backed local KMS. Production deployments should mount an explicit config at `/etc/aegis/aegis.json`; the bundled config is for smoke validation only.
+Container deployments must provide `AEGIS_MASTER_KEY`, `AEGIS_JWT_KEY`, and a writable local state volume at `/var/lib/aegis` for file-backed KMS and revocation. Initialize revocation state with the same release binary before server start. Production deployments should mount an explicit config at `/etc/aegis/aegis.json`; the bundled config is for smoke validation only.
 
 ## Hard Decisions and Exit Cost
 
@@ -83,7 +89,10 @@ Container deployments must provide `AEGIS_MASTER_KEY`, `AEGIS_JWT_KEY`, and a wr
 | Check | Expected Result | When |
 | --- | --- | --- |
 | Pipeline order test | ADR-004 order is preserved | Every PR touching runtime or middleware |
-| Example config load test | `aegis.example.json` parses and validates with required env vars | Every config change |
+| Strict config tests | `aegis.example.json` loads, while unknown root/nested fields and empty auth issuer fail closed | Every config change |
 | Egress validation tests | Empty allowlist fails closed; host matching is exact by default and wildcard-only for subdomains | Every proxy change |
 | Secret handling tests | KMS StoreKey zeroes plaintext and SecureBytes closes after use | Every KMS change |
 | Auth tests | Invalid, expired, wrong issuer, and bad signature JWTs fail closed | Every auth change |
+| Body ownership tests | Middleware reuses one bounded buffer and zeroes superseded/final buffers | Every body-processing change |
+| Provider health tests | Provider 429/5xx opens the circuit; gateway-local failures do not | Every router/proxy change |
+| Release security tests | Source and final binary `govulncheck` pass under the pinned release toolchain | Every release candidate |

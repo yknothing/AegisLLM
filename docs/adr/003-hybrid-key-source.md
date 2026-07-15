@@ -4,7 +4,7 @@
 Accepted
 
 ## Implementation Status
-Current `v0.2.0` runtime resolves only `key_source: "pool"`. `key_source: "byok"` fails closed until Aegis has server-side owner/provider binding for user-owned keys. The Admin API issuance, BYOK registration, deletion, and revocation workflows are scaffolded only and are not mounted by the main gateway.
+Current `v0.2.1` runtime resolves only `key_source: "pool"`. The offline Operator CLI issues and revokes pool virtual keys. `key_source: "byok"` fails closed until Aegis has server-side owner/provider binding; network Admin/BYOK workflows remain scaffolded and unmounted.
 
 ## Context
 Consumer apps face a dilemma: server-hosted keys provide a great UX but expose developers to high costs and quota exhaustion risks, while Bring Your Own Key (BYOK) transfers costs to users but creates friction. We need an architecture that supports both models seamlessly without forcing the client app to implement complex logic for different tiers.
@@ -12,11 +12,11 @@ Consumer apps face a dilemma: server-hosted keys provide a great UX but expose d
 ## Decision
 We will use **Hybrid Key Source Resolution** based on Virtual Keys (JWT).
 
-1. The client app will **always** authenticate using a Virtual Key (`Authorization: Bearer vk_...`).
+1. The client app will **always** authenticate using a Virtual Key JWT (`Authorization: Bearer <token>`).
 2. The Virtual Key (a signed JWT) will contain a `key_source` claim. Current runtime accepts `"pool"` only.
 3. If `key_source` is `"pool"`, Aegis will inject a developer-provided API key from the KMS pool.
 4. If `key_source` is `"byok"`, the request fails closed until the Admin/BYOK control plane can bind the user-owned key to the token subject and provider.
-5. For supported pool requests, the real API key is fetched dynamically just before the proxy request and zeroed immediately after. Key issuance and BYOK provisioning remain future admin-control work.
+5. For supported pool requests, the real API key is fetched dynamically just before the proxy request and zeroed immediately after. Pool-token issuance is available through the offline Operator CLI; BYOK provisioning remains future control-plane work.
 
 ## Consequences
 

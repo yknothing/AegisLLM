@@ -2,6 +2,27 @@
 
 All notable changes to AegisLLM are documented here.
 
+## v0.2.1 - Unreleased
+
+### Standalone operations and security
+
+- Added a same-binary offline Operator CLI for revocation initialization,
+  configured provider-key import, pool virtual-key issuance/revocation, and KMS
+  migration inspection/application.
+- Restricted provider-key input to bounded non-terminal stdin and required
+  explicit token output to either stdout or a new owner-only file.
+- Added a versioned local-KMS envelope that authenticates the exact key ID as
+  AES-GCM AAD, supports a bounded legacy compatibility migration from a
+  complete encrypted backup, and enforces a strict-v2 post-migration floor.
+- Replaced runtime process-memory revocation with a strict versioned local
+  snapshot, serialized atomic writer, bounded polling reader, immutable request
+  lookup, fail-closed corruption/deletion behavior, and running-reader rollback
+  detection; cross-restart rollback remains an explicit single-file limitation.
+- Unified HS256 virtual-key issuance and validation in one internal contract and
+  aligned the default maximum token lifetime to 24 hours.
+- Extended local and Mac Mini Docker smoke contracts to initialize durable
+  revocation state and exercise the release binary's offline provisioning path.
+
 ## v0.2.0 - 2026-06-21
 
 ### Security hardening

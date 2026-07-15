@@ -5,12 +5,18 @@
 ```mermaid
 flowchart TD
   cmd["cmd/aegis"] --> runtime["internal/runtime"]
+  cmd --> operator["internal/operator"]
   runtime --> server["internal/server"]
   runtime --> middleware["internal/middleware"]
   runtime --> kms["internal/kms"]
   runtime --> egress["internal/egress"]
   runtime --> proxy["internal/proxy"]
   runtime --> config["internal/config"]
+  runtime --> revocation["internal/revocation"]
+  middleware --> virtualkey["internal/virtualkey"]
+  operator --> virtualkey
+  operator --> revocation
+  operator --> kms
   middleware --> server
   middleware --> kms
   middleware --> proxy
@@ -46,7 +52,9 @@ Exports:
 Internal:
 - HTTP mux registration.
 - Recovery, request ID, and audit metadata middleware.
-- The main gateway currently mounts only `/v1/*` and `/health`.
+- The main gateway currently mounts only `POST /v1/chat/completions` and the Go `GET /health` pattern, which also serves HTTP `HEAD`.
+- A middleware chain that reaches its terminal boundary without producing a response fails closed with `500`.
+- A terminal middleware commits or aborts without delegating; middleware that calls `next()` remains non-terminal and may not defer the only response write until unwind.
 
 ### `internal/middleware`
 
@@ -58,8 +66,10 @@ Exports:
 Invariants:
 - Auth runs before any body scanning or KMS access.
 - Router validates model permission before KMS key resolution.
-- KMS key resolution is pool-only in `v0.2.0` and fails closed for reserved BYOK key sources until owner/provider binding exists.
-- Adapter may rewrite request body and target path, but must not log body content.
+- KMS key resolution is pool-only in `v0.2.1` and fails closed for reserved BYOK key sources until owner/provider binding exists.
+- PII, router, and adapter share one bounded request-scoped body buffer; no middleware may independently re-read and retain a second body copy.
+- Adapter may replace the owned request body and target path, but must not log body content; replaced and final buffers are zeroed.
+- Router circuit-breaker state may consume only outcome fields set by the proxy boundary.
 
 ### `internal/proxy`
 
@@ -72,8 +82,27 @@ Exports:
 Invariants:
 - Egress host must pass allowlist validation.
 - Exact egress entries match only exact hosts; wildcard entries such as `*.example.com` allow nested subdomains but not the apex host.
-- Request and response bodies are streamed, not logged.
+- The bounded request body is forwarded from the pipeline-owned buffer; provider responses are streamed and neither body is logged.
 - Hop-by-hop and client credential headers are stripped before upstream forwarding.
+
+### `internal/operator`
+
+Responsibility: coordinate privileged offline provisioning without introducing
+a network trust boundary. Provider-key import resolves an enabled provider to
+its configured KMS key ID; virtual-key issuance uses `internal/virtualkey`;
+revocation and KMS migration use durable local contracts.
+
+### `internal/revocation`
+
+Responsibility: own the versioned single-host revocation snapshot, serialized
+atomic writer, bounded polling reader, and fail-closed checker contract. Shared
+or multi-host backends must replace this module behind the checker seam rather
+than sharing its local file over a network filesystem.
+
+### `internal/virtualkey`
+
+Responsibility: own the HS256 claims, issuance, and validation contract used by
+both the offline operator path and runtime Auth middleware.
 
 ## Change Scenarios
 
