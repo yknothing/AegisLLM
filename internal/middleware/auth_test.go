@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -179,6 +180,21 @@ func TestValidateTokenRejectsReservedBYOKKeySource(t *testing.T) {
 	}
 }
 
+func TestValidateTokenRejectsMissingKeySource(t *testing.T) {
+	key := testSigningKey
+	token := signTestToken(t, key, VirtualKeyClaims{
+		KeyID:     "vk_test",
+		Models:    []string{"gpt-4o-mini"},
+		IssuedAt:  time.Now().Add(-time.Minute).Unix(),
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		Issuer:    "aegis",
+	})
+
+	if _, err := validateToken(token, key, "aegis", testTokenMaxTTL); err == nil || !strings.Contains(err.Error(), "missing key source") {
+		t.Fatalf("validateToken error = %v, want missing key source rejection", err)
+	}
+}
+
 func TestValidateTokenRejectsBYOKKeyIDInPoolToken(t *testing.T) {
 	key := testSigningKey
 	token := signTestToken(t, key, VirtualKeyClaims{
@@ -310,6 +326,7 @@ func TestAuthPopulatesConcurrencyClaim(t *testing.T) {
 		SigningKey: key,
 		Issuer:     "aegis",
 		Expiry:     testTokenMaxTTL,
+		Revocation: NewMemoryRevocationStore(),
 	})(ctx, func() {
 		calledNext = true
 	})
@@ -323,6 +340,86 @@ func TestAuthPopulatesConcurrencyClaim(t *testing.T) {
 	if ctx.MaxConcurrency != testContextMaxConcurrency {
 		t.Fatalf("ctx.MaxConcurrency = %d, want %d", ctx.MaxConcurrency, testContextMaxConcurrency)
 	}
+}
+
+func TestAuthFailsClosedWhenRevocationCheckerIsMissing(t *testing.T) {
+	token := signTestToken(t, testSigningKey, validAuthClaims("vk_missing_checker"))
+	ctx := authRequestContext(token)
+
+	Auth(AuthConfig{
+		SigningKey: testSigningKey,
+		Issuer:     "aegis",
+		Expiry:     testTokenMaxTTL,
+	})(ctx, func() {
+		t.Fatal("Auth called next without a revocation checker")
+	})
+
+	if ctx.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", ctx.StatusCode)
+	}
+}
+
+func TestAuthFailsClosedWhenRevocationStateIsUnavailable(t *testing.T) {
+	token := signTestToken(t, testSigningKey, validAuthClaims("vk_unavailable"))
+	ctx := authRequestContext(token)
+
+	Auth(AuthConfig{
+		SigningKey: testSigningKey,
+		Issuer:     "aegis",
+		Expiry:     testTokenMaxTTL,
+		Revocation: failingRevocationChecker{},
+	})(ctx, func() {
+		t.Fatal("Auth called next with unavailable revocation state")
+	})
+
+	if ctx.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", ctx.StatusCode)
+	}
+}
+
+func TestAuthRejectsRevokedToken(t *testing.T) {
+	token := signTestToken(t, testSigningKey, validAuthClaims("vk_revoked"))
+	ctx := authRequestContext(token)
+	store := NewMemoryRevocationStore()
+	store.Revoke("aegis", "vk_revoked")
+
+	Auth(AuthConfig{
+		SigningKey: testSigningKey,
+		Issuer:     "aegis",
+		Expiry:     testTokenMaxTTL,
+		Revocation: store,
+	})(ctx, func() {
+		t.Fatal("Auth called next for revoked token")
+	})
+
+	if ctx.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", ctx.StatusCode)
+	}
+}
+
+type failingRevocationChecker struct{}
+
+func (failingRevocationChecker) Check(context.Context, string, string) (bool, error) {
+	return false, context.DeadlineExceeded
+}
+
+func validAuthClaims(keyID string) VirtualKeyClaims {
+	return VirtualKeyClaims{
+		KeyID:     keyID,
+		KeySource: KeySourcePool,
+		Models:    []string{"gpt-4o-mini"},
+		IssuedAt:  time.Now().Add(-time.Minute).Unix(),
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		Issuer:    "aegis",
+	}
+}
+
+func authRequestContext(token string) *server.RequestContext {
+	ctx := &server.RequestContext{
+		Request: httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+	}
+	ctx.Request.Header.Set("Authorization", "Bearer "+token)
+	return ctx
 }
 
 func TestIsModelAllowedFailsClosedForEmptyPermissions(t *testing.T) {

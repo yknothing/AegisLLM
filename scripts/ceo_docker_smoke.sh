@@ -2,7 +2,7 @@
 set -eu
 
 REMOTE_HOST=${REMOTE_HOST:-ceo}
-VERSION=${VERSION:-v0.2.0-docker-test}
+VERSION=${VERSION:-v0.2.1-docker-test}
 BUILD_DATE=${BUILD_DATE:-2026-06-20T00:00:00Z}
 REMOTE_DOCKER_PATH='/Applications/Docker.app/Contents/Resources/bin:$PATH'
 
@@ -78,6 +78,9 @@ set -eu
 cd "$REMOTE_DIR"
 bin_copy="/tmp/aegis-codex-docker-test-bin-${CONTAINER}"
 unauth_body="/tmp/aegis-codex-unauth-body-${CONTAINER}"
+auth_body="/tmp/aegis-codex-auth-body-${CONTAINER}"
+revoked_body="/tmp/aegis-codex-revoked-body-${CONTAINER}"
+issue_status="/tmp/aegis-codex-issue-status-${CONTAINER}"
 cid=''
 
 cleanup() {
@@ -87,7 +90,7 @@ cleanup() {
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
   docker volume rm "$VOLUME" >/dev/null 2>&1 || true
   docker rmi "$IMAGE" >/dev/null 2>&1 || true
-  rm -f "$bin_copy" "$unauth_body"
+  rm -f "$bin_copy" "$unauth_body" "$auth_body" "$revoked_body" "$issue_status"
 }
 trap cleanup EXIT
 cleanup
@@ -127,10 +130,33 @@ printf '%s\n' "$version_output"
 
 echo "== readonly_runtime =="
 docker volume create "$VOLUME" >/dev/null
+master_key=$(openssl rand -hex 32)
+jwt_key=$(openssl rand -hex 32)
+docker run --rm \
+  -v "$VOLUME:/var/lib/aegis" \
+  "$IMAGE" operator revocation init --config /etc/aegis/aegis.json
+printf '%s' 'sk-smoke-provider-key' | docker run -i --rm \
+  -e AEGIS_MASTER_KEY="$master_key" \
+  -v "$VOLUME:/var/lib/aegis" \
+  "$IMAGE" operator provider-key import \
+    --config /etc/aegis/aegis.json --provider openai-primary
+virtual_key=$(docker run --rm \
+  -e AEGIS_JWT_KEY="$jwt_key" \
+  -v "$VOLUME:/var/lib/aegis" \
+  "$IMAGE" operator virtual-key issue \
+    --config /etc/aegis/aegis.json \
+    --subject smoke-client \
+    --models gpt-4o-mini \
+    --ttl 5m \
+    --stdout 2>"$issue_status")
+cat "$issue_status"
+virtual_key_id=$(sed -n 's/^virtual_key_issued kid=\([^ ]*\) expires_at=.*/\1/p' "$issue_status")
+test -n "$virtual_key"
+test -n "$virtual_key_id"
 docker run -d --name "$CONTAINER" --read-only \
   -p "127.0.0.1:${PORT}:8080" \
-  -e AEGIS_MASTER_KEY="$(openssl rand -hex 32)" \
-  -e AEGIS_JWT_KEY="$(openssl rand -hex 32)" \
+  -e AEGIS_MASTER_KEY="$master_key" \
+  -e AEGIS_JWT_KEY="$jwt_key" \
   -v "$VOLUME:/var/lib/aegis" \
   "$IMAGE" >/dev/null
 
@@ -144,7 +170,41 @@ done
 test "$health" = '{"status":"ok"}'
 printf 'health=%s\n' "$health"
 
-status=$(curl -sS -o "$unauth_body" -w '%{http_code}' "http://127.0.0.1:${PORT}/v1/chat/completions" || true)
+status=$(curl -sS -o "$auth_body" -w '%{http_code}' \
+  -X POST \
+  -H "Authorization: Bearer $virtual_key" \
+  -H 'Content-Type: application/json' \
+  --data '{' \
+  "http://127.0.0.1:${PORT}/v1/chat/completions" || true)
+test "$status" = "400"
+printf 'authenticated_pre_revoke_status=%s\n' "$status"
+
+docker run --rm \
+  -v "$VOLUME:/var/lib/aegis" \
+  "$IMAGE" operator virtual-key revoke \
+    --config /etc/aegis/aegis.json \
+    --kid "$virtual_key_id"
+status=''
+for _ in $(seq 1 30); do
+  status=$(curl -sS -o "$revoked_body" -w '%{http_code}' \
+    -X POST \
+    -H "Authorization: Bearer $virtual_key" \
+    -H 'Content-Type: application/json' \
+    --data '{' \
+    "http://127.0.0.1:${PORT}/v1/chat/completions" || true)
+  if [ "$status" = "401" ]; then
+    break
+  fi
+  sleep 0.025
+done
+test "$status" = "401"
+printf 'revoked_status=%s\n' "$status"
+
+status=$(curl -sS -o "$unauth_body" -w '%{http_code}' \
+  -X POST \
+  -H 'Content-Type: application/json' \
+  --data '{"model":"gpt-4o-mini","messages":[]}' \
+  "http://127.0.0.1:${PORT}/v1/chat/completions" || true)
 test "$status" = "401"
 printf 'unauth_status=%s\n' "$status"
 docker inspect "$CONTAINER" --format 'readonly={{.HostConfig.ReadonlyRootfs}} user={{.Config.User}} mounts={{range .Mounts}}{{.Destination}}:{{.Type}} {{end}}'

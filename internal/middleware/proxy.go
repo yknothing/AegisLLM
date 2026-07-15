@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -50,11 +51,16 @@ func Proxy(engine proxyEngine) server.Middleware {
 			ctx.IsStreaming,
 		)
 		if result != nil {
+			ctx.ProviderResponded = true
+			ctx.ProviderFailure = result.StatusCode == http.StatusTooManyRequests || result.StatusCode >= http.StatusInternalServerError
 			ctx.StatusCode = result.StatusCode
 			ctx.InputTokens = int(result.InputTokens)
 			ctx.OutputTokens = int(result.OutputTokens)
 		}
 		if err != nil {
+			if errors.Is(err, proxy.ErrUpstreamTransport) || errors.Is(err, proxy.ErrUpstreamRead) {
+				ctx.ProviderFailure = true
+			}
 			ctx.StatusCode = http.StatusBadGateway
 			if result != nil {
 				// The upstream response may already have been partially written.

@@ -6,17 +6,20 @@
 package runtime
 
 import (
+	"crypto/x509"
 	"fmt"
 	"log/slog"
 	"net/url"
 	"os"
+	"strings"
 
 	"github.com/yknothing/AegisLLM/internal/config"
 	"github.com/yknothing/AegisLLM/internal/egress"
 	"github.com/yknothing/AegisLLM/internal/kms"
-	"github.com/yknothing/AegisLLM/internal/kms/local"
+	"github.com/yknothing/AegisLLM/internal/kms/factory"
 	"github.com/yknothing/AegisLLM/internal/middleware"
 	"github.com/yknothing/AegisLLM/internal/proxy"
+	"github.com/yknothing/AegisLLM/internal/revocation"
 	"github.com/yknothing/AegisLLM/internal/server"
 	"github.com/yknothing/AegisLLM/internal/utils"
 )
@@ -24,6 +27,10 @@ import (
 // NewServer builds a runnable Aegis server with middleware registered in the
 // ADR-004 order.
 func NewServer(cfg *config.Config, logger *slog.Logger) (*server.Server, error) {
+	return newServer(cfg, logger, nil)
+}
+
+func newServer(cfg *config.Config, logger *slog.Logger, proxyRootCAs *x509.CertPool) (*server.Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config is nil")
 	}
@@ -45,8 +52,19 @@ func NewServer(cfg *config.Config, logger *slog.Logger) (*server.Server, error) 
 		return nil, err
 	}
 
+	revocationReader, err := revocation.NewReader(
+		cfg.Auth.Revocation.FilePath,
+		cfg.Auth.Revocation.RefreshInterval,
+	)
+	if err != nil {
+		utils.MemZero(signingKey)
+		_ = kmsProvider.Close()
+		return nil, fmt.Errorf("loading revocation state: %w", err)
+	}
+
 	channels, poolKeyMapping, providerTypes, err := providerRuntime(cfg)
 	if err != nil {
+		_ = revocationReader.Close()
 		utils.MemZero(signingKey)
 		_ = kmsProvider.Close()
 		return nil, err
@@ -56,21 +74,29 @@ func NewServer(cfg *config.Config, logger *slog.Logger) (*server.Server, error) 
 		MaxRequestBodySize: cfg.Server.MaxRequestBodySize,
 		StreamTimeout:      cfg.Server.WriteTimeout,
 		AllowedDomains:     cfg.Egress.AllowedDomains,
+		RootCAs:            proxyRootCAs,
 	})
 
-	opts, err := runtimeMiddlewareOptions(cfg, signingKey, kmsProvider, channels, poolKeyMapping, providerTypes, engine)
+	opts, err := runtimeMiddlewareOptions(cfg, signingKey, revocationReader, kmsProvider, channels, poolKeyMapping, providerTypes, engine)
 	if err != nil {
+		_ = revocationReader.Close()
 		utils.MemZero(signingKey)
 		_ = kmsProvider.Close()
 		return nil, err
 	}
 	opts = append(opts, server.WithShutdownHook(func() error {
 		utils.MemZero(signingKey)
-		return kmsProvider.Close()
+		revocationErr := revocationReader.Close()
+		kmsErr := kmsProvider.Close()
+		if revocationErr != nil {
+			return revocationErr
+		}
+		return kmsErr
 	}))
 
 	srv, err := server.New(cfg, logger, opts...)
 	if err != nil {
+		_ = revocationReader.Close()
 		utils.MemZero(signingKey)
 		_ = kmsProvider.Close()
 		return nil, err
@@ -105,6 +131,7 @@ func runtimeMiddlewareOrder(rateLimitEnabled bool) []string {
 func runtimeMiddlewareOptions(
 	cfg *config.Config,
 	signingKey []byte,
+	revocationStore middleware.RevocationStore,
 	kmsProvider kms.Provider,
 	channels []middleware.ProviderChannel,
 	poolKeyMapping map[string]string,
@@ -120,7 +147,7 @@ func runtimeMiddlewareOptions(
 				SigningKey: signingKey,
 				Issuer:     cfg.Auth.Issuer,
 				Expiry:     cfg.Auth.TokenExpiry,
-				Revocation: middleware.NewMemoryRevocationStore(),
+				Revocation: revocationStore,
 			})))
 		case runtimeStepRateLimit:
 			opts = append(opts, server.WithMiddleware(middleware.RateLimiter(middleware.RateLimitConfig{
@@ -166,6 +193,12 @@ func validateRuntimeConfig(cfg *config.Config) error {
 	}
 	if cfg.Auth.TokenExpiry <= 0 {
 		return fmt.Errorf("auth.token_expiry must be positive")
+	}
+	if strings.TrimSpace(cfg.Auth.Issuer) == "" {
+		return fmt.Errorf("auth.issuer must not be empty")
+	}
+	if err := config.ValidateRevocationConfig(cfg.Auth.Revocation); err != nil {
+		return err
 	}
 	switch cfg.RateLimit.Backend {
 	case "memory":
@@ -235,22 +268,7 @@ func validateRuntimeConfig(cfg *config.Config) error {
 }
 
 func newKMSProvider(cfg config.KMSConfig) (kms.Provider, error) {
-	switch cfg.Mode {
-	case "local":
-		backend := local.Backend(local.NewMemoryBackend())
-		if cfg.Local.KeyStorePath != "" {
-			fileBackend, err := local.NewFileBackend(cfg.Local.KeyStorePath)
-			if err != nil {
-				return nil, err
-			}
-			backend = fileBackend
-		}
-		return local.New(cfg.Local.MasterKeyEnv, backend)
-	case "vault":
-		return nil, fmt.Errorf("vault KMS backend is not implemented")
-	default:
-		return nil, fmt.Errorf("unsupported KMS mode: %q", cfg.Mode)
-	}
+	return factory.New(cfg)
 }
 
 func loadSecretEnv(envName, label string) ([]byte, error) {
@@ -277,6 +295,9 @@ func loadJWTSigningKeyEnv(envName string) ([]byte, error) {
 }
 
 func providerRuntime(cfg *config.Config) ([]middleware.ProviderChannel, map[string]string, map[string]string, error) {
+	if err := config.ValidateEnabledProviderIDs(cfg.Providers); err != nil {
+		return nil, nil, nil, err
+	}
 	channels := make([]middleware.ProviderChannel, 0, len(cfg.Providers))
 	poolKeyMapping := make(map[string]string, len(cfg.Providers))
 	providerTypes := make(map[string]string, len(cfg.Providers))

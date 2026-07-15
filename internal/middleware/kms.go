@@ -84,11 +84,11 @@ func KMSInjector(cfg KMSMiddlewareConfig) server.Middleware {
 // For "byok" mode: Fails closed until the runtime has server-side owner/provider
 // binding for user-owned keys.
 func resolveKeyID(ctx *server.RequestContext, poolMapping map[string]string) string {
-	if ctx.KeySource != "" && ctx.KeySource != KeySourcePool {
+	if ctx.KeySource != KeySourcePool {
 		return ""
 	}
 
-	// Default: pool mode — look up from the server's key mapping
+	// Pool mode — look up from the server's key mapping.
 	keyID, ok := poolMapping[ctx.ProviderID]
 	if !ok {
 		return ""

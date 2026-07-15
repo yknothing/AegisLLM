@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,7 +14,7 @@ import (
 )
 
 func TestProxyAbortsWhenUpstreamRequestFailsBeforeResponse(t *testing.T) {
-	engine := stubProxyEngine{err: errors.New("dial failed")}
+	engine := stubProxyEngine{err: fmt.Errorf("dial failed: %w", proxy.ErrUpstreamTransport)}
 	ctx := proxyTestContext()
 
 	Proxy(engine)(ctx, func() {})
@@ -23,6 +24,19 @@ func TestProxyAbortsWhenUpstreamRequestFailsBeforeResponse(t *testing.T) {
 	}
 	if ctx.StatusCode != http.StatusBadGateway {
 		t.Fatalf("status = %d, want %d", ctx.StatusCode, http.StatusBadGateway)
+	}
+	if !ctx.ProviderFailure {
+		t.Fatal("upstream transport failure was not recorded as a provider failure")
+	}
+}
+
+func TestProxyDoesNotRecordLocalEngineErrorAsProviderFailure(t *testing.T) {
+	ctx := proxyTestContext()
+
+	Proxy(stubProxyEngine{err: errors.New("local proxy configuration error")})(ctx, func() {})
+
+	if ctx.ProviderFailure {
+		t.Fatal("local proxy error was recorded as a provider failure")
 	}
 }
 
@@ -43,6 +57,55 @@ func TestProxyMarksPartialUpstreamFailureAsBadGateway(t *testing.T) {
 	}
 	if ctx.OutputTokens != 7 {
 		t.Fatalf("output tokens = %d, want 7", ctx.OutputTokens)
+	}
+	if ctx.ProviderFailure {
+		t.Fatal("unclassified partial response error was recorded as a provider failure")
+	}
+}
+
+func TestProxyRecordsUpstreamResponseReadFailure(t *testing.T) {
+	engine := stubProxyEngine{
+		result: &proxy.ProxyResult{StatusCode: http.StatusOK},
+		err:    fmt.Errorf("stream interrupted: %w", proxy.ErrUpstreamRead),
+	}
+	ctx := proxyTestContext()
+
+	Proxy(engine)(ctx, func() {})
+
+	if !ctx.ProviderResponded {
+		t.Fatal("provider response was not recorded")
+	}
+	if !ctx.ProviderFailure {
+		t.Fatal("upstream response read failure was not recorded as a provider failure")
+	}
+	if ctx.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", ctx.StatusCode, http.StatusBadGateway)
+	}
+}
+
+func TestProxyRecordsProviderResponseOutcome(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      int
+		wantFailure bool
+	}{
+		{name: "success", status: http.StatusOK},
+		{name: "rate limited", status: http.StatusTooManyRequests, wantFailure: true},
+		{name: "server error", status: http.StatusServiceUnavailable, wantFailure: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := proxyTestContext()
+			Proxy(stubProxyEngine{result: &proxy.ProxyResult{StatusCode: tt.status}})(ctx, func() {})
+
+			if !ctx.ProviderResponded {
+				t.Fatal("provider response was not recorded")
+			}
+			if ctx.ProviderFailure != tt.wantFailure {
+				t.Fatalf("provider failure = %v, want %v", ctx.ProviderFailure, tt.wantFailure)
+			}
+		})
 	}
 }
 

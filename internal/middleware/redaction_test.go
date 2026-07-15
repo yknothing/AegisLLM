@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -38,6 +39,28 @@ func TestPIIRedactionRedactsPIIBeforeNext(t *testing.T) {
 	}
 	if ctx.IsAborted() {
 		t.Fatalf("PIIRedaction aborted redact-mode request with status %d", ctx.StatusCode)
+	}
+}
+
+func TestPIIRedactionReplacesMultipleRulesAndZeroesOwnedInput(t *testing.T) {
+	original := []byte(`{"model":"gpt-4o","messages":[{"content":"user@example.com 123-45-6789"}]}`)
+	ctx := &server.RequestContext{
+		Request:           httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		RequestBody:       original,
+		RequestBodyLoaded: true,
+	}
+
+	PIIRedaction(RedactionConfig{
+		Mode:               ModeRedact,
+		MaxRequestBodySize: redactionTestBodyLimit,
+	})(ctx, func() {})
+
+	if !bytes.Equal(original, make([]byte, len(original))) {
+		t.Fatal("PIIRedaction did not zero the superseded owned input")
+	}
+	got := string(ctx.RequestBody)
+	if !strings.Contains(got, "[EMAIL_REDACTED]") || !strings.Contains(got, "[SSN_REDACTED]") {
+		t.Fatalf("redacted body = %q, want email and SSN replacements", got)
 	}
 }
 

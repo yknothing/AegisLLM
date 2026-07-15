@@ -30,7 +30,7 @@ ifeq ($(DOCKER_TAG_LATEST),true)
 DOCKER_TAGS += -t aegis:latest
 endif
 
-.PHONY: all build build-linux test test-coverage lint fmt vet security govulncheck gosec docker local-smoke release-preflight ceo-docker-smoke generate-key clean help
+.PHONY: all build build-linux test test-coverage lint fmt vet security govulncheck govulncheck-binary gosec docker local-smoke release-preflight ceo-docker-smoke generate-key clean help
 
 all: lint test build
 
@@ -66,10 +66,16 @@ vet:
 
 ## Security
 
-security: govulncheck gosec
+security: govulncheck govulncheck-binary gosec
 
 govulncheck:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+
+govulncheck-binary:
+	@tmp_dir=$$(mktemp -d); \
+		trap 'rm -rf "$$tmp_dir"' 0 1 2 3 15; \
+		CGO_ENABLED=0 $(GO) build $(GOFLAGS) -ldflags="$(LDFLAGS)" -o "$$tmp_dir/$(BINARY)" ./cmd/aegis; \
+		$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) -mode=binary "$$tmp_dir/$(BINARY)"
 
 gosec:
 	$(GO) run github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VERSION) -quiet ./...
@@ -111,7 +117,7 @@ help:
 	@echo "  build-linux    Cross-compile for Linux"
 	@echo "  test           Run tests with race detector"
 	@echo "  lint           Run golangci-lint"
-	@echo "  security       Run govulncheck and gosec"
+	@echo "  security       Run source/binary govulncheck and gosec"
 	@echo "  docker         Build Docker image"
 	@echo "  local-smoke    Run local process smoke test"
 	@echo "  release-preflight  Run local release gates"

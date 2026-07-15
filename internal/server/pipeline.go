@@ -30,6 +30,10 @@ type RequestContext struct {
 	// Request and response
 	Writer  http.ResponseWriter
 	Request *http.Request
+	// RequestBody is the single bounded buffer owned by the request pipeline.
+	// Middleware must share this buffer instead of re-reading Request.Body.
+	RequestBody       []byte
+	RequestBodyLoaded bool
 
 	// Identity (populated by auth middleware)
 	VirtualKeyID   string
@@ -58,12 +62,72 @@ type RequestContext struct {
 	InputTokens  int
 	OutputTokens int
 	StatusCode   int
+	// ProviderResponded and ProviderFailure are set only by the proxy boundary.
+	// Local KMS, adapter, and gateway errors must not affect provider health.
+	ProviderResponded bool
+	ProviderFailure   bool
 
 	// Internal pipeline state
 	logger    *slog.Logger
 	aborted   bool
 	abortCode int
 	abortBody []byte
+	response  *responseCommitState
+}
+
+type responseCommitState struct {
+	committed  bool
+	statusCode int
+}
+
+type trackingResponseWriter struct {
+	http.ResponseWriter
+	state *responseCommitState
+	ctx   *RequestContext
+}
+
+func (w *trackingResponseWriter) WriteHeader(statusCode int) {
+	if w.state.committed {
+		return
+	}
+	w.state.committed = true
+	w.state.statusCode = statusCode
+	if w.ctx.StatusCode == 0 {
+		w.ctx.StatusCode = statusCode
+	}
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *trackingResponseWriter) Write(body []byte) (int, error) {
+	if !w.state.committed {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func (w *trackingResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+type flushingTrackingResponseWriter struct {
+	*trackingResponseWriter
+	flusher http.Flusher
+}
+
+func (w *flushingTrackingResponseWriter) Flush() {
+	if !w.state.committed {
+		w.WriteHeader(http.StatusOK)
+	}
+	w.flusher.Flush()
+}
+
+func trackResponseWriter(w http.ResponseWriter, ctx *RequestContext) (http.ResponseWriter, *responseCommitState) {
+	state := &responseCommitState{}
+	tracked := &trackingResponseWriter{ResponseWriter: w, state: state, ctx: ctx}
+	if flusher, ok := w.(http.Flusher); ok {
+		return &flushingTrackingResponseWriter{trackingResponseWriter: tracked, flusher: flusher}, state
+	}
+	return tracked, state
 }
 
 // Abort stops the pipeline and returns an error response.
@@ -111,20 +175,23 @@ func (p *Pipeline) Use(m Middleware) {
 // ServeHTTP implements http.HandlerFunc and dispatches requests through the pipeline.
 func (p *Pipeline) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := &RequestContext{
-		Writer:    w,
 		Request:   r,
 		StartTime: time.Now(),
 		logger:    p.logger,
 	}
+	ctx.Writer, ctx.response = trackResponseWriter(w, ctx)
 
 	// Execute the middleware chain
 	p.execute(ctx, 0)
+	if !ctx.IsAborted() && !ctx.response.committed {
+		ctx.Abort(http.StatusInternalServerError, []byte(`{"error":{"message":"gateway pipeline produced no response","type":"server_error"}}`))
+	}
 
 	// If aborted, write the error response
-	if ctx.IsAborted() {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(ctx.abortCode)
-		_, _ = w.Write(ctx.abortBody)
+	if ctx.IsAborted() && !ctx.response.committed {
+		ctx.Writer.Header().Set("Content-Type", "application/json")
+		ctx.Writer.WriteHeader(ctx.abortCode)
+		_, _ = ctx.Writer.Write(ctx.abortBody)
 	}
 
 	// SECURITY: Zero sensitive fields after request completion
@@ -132,17 +199,29 @@ func (p *Pipeline) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ctx.ProviderAPIKey.Close()
 		ctx.ProviderAPIKey = nil
 	}
+	utils.MemZero(ctx.RequestBody)
+	ctx.RequestBody = nil
+	ctx.RequestBodyLoaded = false
 }
 
 // execute recursively runs the middleware chain.
 func (p *Pipeline) execute(ctx *RequestContext, index int) {
-	if ctx.IsAborted() || index >= len(p.middlewares) {
+	if ctx.IsAborted() {
+		return
+	}
+	if index >= len(p.middlewares) {
+		if ctx.response == nil || !ctx.response.committed {
+			ctx.Abort(http.StatusInternalServerError, []byte(`{"error":{"message":"gateway pipeline produced no response","type":"server_error"}}`))
+		}
 		return
 	}
 
 	p.middlewares[index](ctx, func() {
 		p.execute(ctx, index+1)
 	})
+	if !ctx.IsAborted() && (ctx.response == nil || !ctx.response.committed) {
+		ctx.Abort(http.StatusInternalServerError, []byte(`{"error":{"message":"gateway pipeline produced no response","type":"server_error"}}`))
+	}
 }
 
 // --- Built-in infrastructure middleware ---

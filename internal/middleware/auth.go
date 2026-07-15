@@ -11,18 +11,15 @@
 package middleware
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/base64"
+	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/yknothing/AegisLLM/internal/server"
+	"github.com/yknothing/AegisLLM/internal/virtualkey"
 )
 
 // AuthConfig holds authentication middleware configuration.
@@ -35,37 +32,23 @@ type AuthConfig struct {
 
 const (
 	// MinJWTSigningKeyBytes is the minimum HS256 signing-key length accepted by runtime.
-	MinJWTSigningKeyBytes = 32
-	maxClockSkew          = 60 * time.Second
+	MinJWTSigningKeyBytes = virtualkey.MinSigningKeyBytes
 
-	// KeySourcePool is the only key source supported by the v0.2.0 runtime.
-	KeySourcePool = "pool"
-	keySourceBYOK = "byok"
+	// KeySourcePool is the only key source supported by the v0.2.1 runtime.
+	KeySourcePool = virtualkey.KeySourcePool
+	keySourceBYOK = "byok" // Kept for package-level reserved-mode tests.
 )
 
 // RevocationStore checks if a virtual key has been revoked.
-// Current runtime uses an in-memory set; Redis-backed shared revocation is a
-// reserved cluster-mode target.
+// Current runtime uses a durable local checker; shared revocation is a reserved
+// cluster-mode target. The in-memory implementation below is test-only.
 type RevocationStore interface {
-	IsRevoked(keyID string) bool
+	Check(ctx context.Context, issuer, keyID string) (bool, error)
 }
 
-// VirtualKeyClaims represents the JWT payload for an Aegis virtual key.
-type VirtualKeyClaims struct {
-	KeyID          string   `json:"kid"`
-	Subject        string   `json:"sub"`                   // Owner identifier
-	Models         []string `json:"models"`                // Allowed models
-	MaxRPM         int      `json:"rpm"`                   // Per-key rate limit (0 = unlimited)
-	MaxTPM         int      `json:"tpm"`                   // Per-key token limit (0 = unlimited)
-	MaxConcurrency int      `json:"max_concurrency"`       // Per-key concurrent requests (0 = default)
-	BudgetUSD      float64  `json:"budget"`                // Monthly budget in USD (0 = unlimited)
-	KeySource      string   `json:"key_source"`            // Runtime: "pool"; reserved: "byok"
-	BYOKKeyID      string   `json:"byok_key_id,omitempty"` // Reserved until BYOK binding exists
-	PoolGroup      string   `json:"pool_group,omitempty"`  // Pool group for server-hosted keys
-	IssuedAt       int64    `json:"iat"`
-	ExpiresAt      int64    `json:"exp"`
-	Issuer         string   `json:"iss"`
-}
+// VirtualKeyClaims is retained as an alias for middleware callers. The
+// issuance and validation contract is owned by internal/virtualkey.
+type VirtualKeyClaims = virtualkey.Claims
 
 // Auth creates the authentication middleware.
 // This is the FIRST middleware in the pipeline - it rejects unauthorized
@@ -100,8 +83,18 @@ func Auth(cfg AuthConfig) server.Middleware {
 			return
 		}
 
-		// Check revocation list
-		if cfg.Revocation != nil && cfg.Revocation.IsRevoked(claims.KeyID) {
+		// Check revocation state. Missing or unavailable state cannot safely
+		// produce an allow decision.
+		if cfg.Revocation == nil {
+			ctx.Abort(http.StatusServiceUnavailable, authUnavailableJSON())
+			return
+		}
+		revoked, err := cfg.Revocation.Check(ctx.Request.Context(), claims.Issuer, claims.KeyID)
+		if err != nil {
+			ctx.Abort(http.StatusServiceUnavailable, authUnavailableJSON())
+			return
+		}
+		if revoked {
 			ctx.Abort(http.StatusUnauthorized, authFailureJSON())
 			return
 		}
@@ -123,116 +116,15 @@ func Auth(cfg AuthConfig) server.Middleware {
 // validateToken verifies the JWT signature and claims.
 // SECURITY: Uses constant-time comparison to prevent timing attacks.
 func validateToken(token string, signingKey []byte, expectedIssuer string, maxTokenTTL time.Duration) (*VirtualKeyClaims, error) {
-	if len(signingKey) < MinJWTSigningKeyBytes {
-		return nil, fmt.Errorf("signing key must be at least %d bytes", MinJWTSigningKeyBytes)
-	}
-
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return nil, fmt.Errorf("invalid token format")
-	}
-
-	headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil {
-		return nil, fmt.Errorf("invalid token header: %w", err)
-	}
-	var header struct {
-		Alg string `json:"alg"`
-		Typ string `json:"typ"`
-	}
-	if err := json.Unmarshal(headerBytes, &header); err != nil {
-		return nil, fmt.Errorf("invalid token header JSON: %w", err)
-	}
-	if header.Alg != "HS256" {
-		return nil, fmt.Errorf("unsupported signing algorithm")
-	}
-
-	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
-	if err != nil {
-		return nil, fmt.Errorf("invalid token signature: %w", err)
-	}
-
-	mac := hmac.New(sha256.New, signingKey)
-	_, _ = mac.Write([]byte(parts[0] + "." + parts[1]))
-	expectedSignature := mac.Sum(nil)
-	if subtle.ConstantTimeCompare(signature, expectedSignature) != 1 {
-		return nil, fmt.Errorf("invalid signature")
-	}
-
-	claimsBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return nil, fmt.Errorf("invalid token payload: %w", err)
-	}
-	var claims VirtualKeyClaims
-	if err := json.Unmarshal(claimsBytes, &claims); err != nil {
-		return nil, fmt.Errorf("invalid token claims: %w", err)
-	}
-
-	now := time.Now().Unix()
-	if claims.KeyID == "" {
-		return nil, fmt.Errorf("missing key id")
-	}
-	if len(claims.Models) == 0 {
-		return nil, fmt.Errorf("missing model permissions")
-	}
-	if claims.ExpiresAt <= now {
-		return nil, fmt.Errorf("token expired")
-	}
-	if claims.IssuedAt > now+int64(maxClockSkew.Seconds()) {
-		return nil, fmt.Errorf("token issued in the future")
-	}
-	if maxTokenTTL > 0 {
-		if claims.IssuedAt <= 0 {
-			return nil, fmt.Errorf("missing issued-at claim")
-		}
-		if claims.ExpiresAt <= claims.IssuedAt {
-			return nil, fmt.Errorf("token expires before issued-at")
-		}
-		tokenTTL := time.Unix(claims.ExpiresAt, 0).Sub(time.Unix(claims.IssuedAt, 0))
-		if tokenTTL > maxTokenTTL {
-			return nil, fmt.Errorf("token lifetime exceeds configured maximum")
-		}
-	}
-	if expectedIssuer != "" && claims.Issuer != expectedIssuer {
-		return nil, fmt.Errorf("invalid issuer")
-	}
-	if claims.KeySource == "" {
-		claims.KeySource = KeySourcePool
-	}
-	switch claims.KeySource {
-	case KeySourcePool:
-		if claims.BYOKKeyID != "" {
-			return nil, fmt.Errorf("byok_key_id is reserved for unsupported BYOK mode")
-		}
-	case keySourceBYOK:
-		return nil, fmt.Errorf("BYOK key source is not implemented")
-	default:
-		return nil, fmt.Errorf("invalid key source")
-	}
-	if claims.MaxRPM < 0 {
-		return nil, fmt.Errorf("RPM limit must not be negative")
-	}
-	if claims.BudgetUSD < 0 {
-		return nil, fmt.Errorf("budget must not be negative")
-	}
-	if claims.BudgetUSD > 0 {
-		return nil, fmt.Errorf("budget enforcement is not implemented")
-	}
-	if claims.MaxTPM < 0 {
-		return nil, fmt.Errorf("TPM limit must not be negative")
-	}
-	if claims.MaxTPM > 0 {
-		return nil, fmt.Errorf("TPM enforcement is not implemented")
-	}
-	if claims.MaxConcurrency < 0 {
-		return nil, fmt.Errorf("concurrency limit must not be negative")
-	}
-
-	return &claims, nil
+	return virtualkey.Validate(token, signingKey, expectedIssuer, maxTokenTTL)
 }
 
 func authFailureJSON() []byte {
 	return errorJSON("invalid or expired virtual key")
+}
+
+func authUnavailableJSON() []byte {
+	return errorJSON("authentication temporarily unavailable")
 }
 
 // errorJSON creates a standard authentication error response body.
@@ -257,22 +149,27 @@ type MemoryRevocationStore struct {
 	revoked map[string]struct{}
 }
 
-// NewMemoryRevocationStore creates an in-memory revocation store.
+// NewMemoryRevocationStore creates a test-only in-memory revocation store.
 func NewMemoryRevocationStore() *MemoryRevocationStore {
 	return &MemoryRevocationStore{revoked: make(map[string]struct{})}
 }
 
 // Revoke adds a key ID to the revocation list.
-func (s *MemoryRevocationStore) Revoke(keyID string) {
+func (s *MemoryRevocationStore) Revoke(issuer, keyID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.revoked[keyID] = struct{}{}
+	s.revoked[issuer+"\x00"+keyID] = struct{}{}
 }
 
-// IsRevoked checks if a key ID has been revoked.
-func (s *MemoryRevocationStore) IsRevoked(keyID string) bool {
+// Check reports whether an issuer/key ID pair has been revoked.
+func (s *MemoryRevocationStore) Check(ctx context.Context, issuer, keyID string) (bool, error) {
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	default:
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	_, ok := s.revoked[keyID]
-	return ok
+	_, ok := s.revoked[issuer+"\x00"+keyID]
+	return ok, nil
 }

@@ -20,6 +20,7 @@ import (
 	"sync"
 
 	"github.com/yknothing/AegisLLM/internal/server"
+	"github.com/yknothing/AegisLLM/internal/utils"
 )
 
 // RedactionMode determines how detected PII is handled.
@@ -102,7 +103,7 @@ func PIIRedaction(cfg RedactionConfig) server.Middleware {
 	scanner := newPIIScanner(cfg)
 
 	return func(ctx *server.RequestContext, next func()) {
-		body, err := readAndReplaceBody(ctx.Request, cfg.MaxRequestBodySize)
+		body, err := readRequestBody(ctx, cfg.MaxRequestBodySize)
 		if errors.Is(err, errRequestBodyTooLarge) {
 			ctx.Abort(http.StatusRequestEntityTooLarge, []byte(`{"error":{"message":"request body too large","type":"invalid_request_error"}}`))
 			return
@@ -112,7 +113,7 @@ func PIIRedaction(cfg RedactionConfig) server.Middleware {
 			return
 		}
 
-		findings := scanner.Scan(string(body))
+		findings := scanner.Scan(body)
 		if len(findings) == 0 {
 			next()
 			return
@@ -124,7 +125,7 @@ func PIIRedaction(cfg RedactionConfig) server.Middleware {
 		case ModeBlock:
 			ctx.Abort(http.StatusBadRequest, blockErrorJSON())
 		default:
-			replaceBody(ctx.Request, []byte(scanner.Redact(string(body))))
+			replaceRequestBody(ctx, scanner.Redact(body))
 			next()
 		}
 	}
@@ -154,7 +155,7 @@ func newPIIScanner(cfg RedactionConfig) *piiScanner {
 }
 
 // Scan checks text for PII patterns and returns findings.
-func (s *piiScanner) Scan(text string) []PIIFinding {
+func (s *piiScanner) Scan(text []byte) []PIIFinding {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -163,7 +164,7 @@ func (s *piiScanner) Scan(text string) []PIIFinding {
 		if !rule.Enabled {
 			continue
 		}
-		matches := rule.Pattern.FindAllStringIndex(text, -1)
+		matches := rule.Pattern.FindAllIndex(text, -1)
 		for _, match := range matches {
 			findings = append(findings, PIIFinding{
 				Rule:  rule.Name,
@@ -176,16 +177,20 @@ func (s *piiScanner) Scan(text string) []PIIFinding {
 }
 
 // Redact replaces all PII matches with their configured replacements.
-func (s *piiScanner) Redact(text string) string {
+func (s *piiScanner) Redact(text []byte) []byte {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	result := text
 	for _, rule := range s.rules {
-		if !rule.Enabled {
+		if !rule.Enabled || !rule.Pattern.Match(result) {
 			continue
 		}
-		result = rule.Pattern.ReplaceAllString(result, rule.Replacement)
+		replaced := rule.Pattern.ReplaceAll(result, []byte(rule.Replacement))
+		if !sameBuffer(result, text) {
+			utils.MemZero(result)
+		}
+		result = replaced
 	}
 	return result
 }

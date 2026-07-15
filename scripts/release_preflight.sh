@@ -3,7 +3,7 @@ set -eu
 
 GO_BIN=${GO:-go}
 ACTIONLINT_VERSION=${ACTIONLINT_VERSION:-v1.7.12}
-VERSION=${VERSION:-v0.2.0-rc-local}
+VERSION=${VERSION:-v0.2.1-rc-local}
 
 if [ "${ALLOW_DIRTY:-}" != "1" ] && [ -n "$(git status --porcelain)" ]; then
   echo "release preflight requires a clean worktree; set ALLOW_DIRTY=1 to override" >&2

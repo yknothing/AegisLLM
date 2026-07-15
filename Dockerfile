@@ -11,7 +11,7 @@
 # Stage 1: Build
 # ============================================================
 ARG BUILDPLATFORM=linux/amd64
-FROM --platform=$BUILDPLATFORM golang:1.22-alpine@sha256:1699c10032ca2582ec89a24a1312d986a3f094aed3d5c1147b19880afe40e052 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS builder
 
 # Security: Base image digest is pinned; Alpine packages track repository
 # security patch levels at build time.
@@ -31,7 +31,8 @@ COPY . .
 # runs. Production deployments should mount their own config and data volume.
 RUN mkdir -p /build/etc/aegis /build/var/lib/aegis \
     && cp aegis.example.json /build/etc/aegis/aegis.json \
-    && sed -i 's#"key_store_path": "aegis.keys"#"key_store_path": "/var/lib/aegis/keys"#' /build/etc/aegis/aegis.json
+    && sed -i 's#"key_store_path": "aegis.keys"#"key_store_path": "/var/lib/aegis/keys"#' /build/etc/aegis/aegis.json \
+    && sed -i 's#"file_path": "aegis.revocations.json"#"file_path": "/var/lib/aegis/revocations.json"#' /build/etc/aegis/aegis.json
 
 # Build with security hardening flags:
 #   -trimpath: Remove file system paths from binary

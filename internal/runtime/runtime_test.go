@@ -2,7 +2,17 @@ package runtime
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,7 +21,248 @@ import (
 	"time"
 
 	"github.com/yknothing/AegisLLM/internal/config"
+	"github.com/yknothing/AegisLLM/internal/middleware"
+	"github.com/yknothing/AegisLLM/internal/requestid"
+	"github.com/yknothing/AegisLLM/internal/revocation"
 )
+
+func TestRuntimeHermeticTLSProviderSuccessPath(t *testing.T) {
+	const (
+		masterKeyEnv = "TEST_AEGIS_E2E_MASTER_KEY"
+		jwtKeyEnv    = "TEST_AEGIS_E2E_JWT_KEY"
+		providerKey  = "provider-secret"
+	)
+
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("upstream request = %s %s, want POST /v1/chat/completions", r.Method, r.URL.Path)
+		}
+		if r.TLS == nil || r.TLS.Version != tls.VersionTLS13 {
+			t.Errorf("upstream TLS version = %v, want TLS 1.3", r.TLS)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer "+providerKey {
+			t.Errorf("upstream authorization = %q, want provider credential", got)
+		}
+		if got := r.Header.Get("X-Api-Key"); got != "" {
+			t.Errorf("client credential reached upstream: %q", got)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read upstream body: %v", err)
+		}
+		bodyText := string(body)
+		if strings.Contains(bodyText, "alice@example.com") || !strings.Contains(bodyText, "[EMAIL_REDACTED]") {
+			t.Errorf("upstream body was not redacted: %q", bodyText)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(requestid.Header, "provider-request-e2e")
+		w.Header().Set("Set-Cookie", "provider-session=secret")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-e2e","choices":[]}`)
+	}))
+	upstream.TLS = &tls.Config{MinVersion: tls.VersionTLS13}
+	upstream.StartTLS()
+	t.Cleanup(upstream.Close)
+
+	masterKey := make([]byte, 32)
+	for i := range masterKey {
+		masterKey[i] = byte(i + 1)
+	}
+	t.Setenv(masterKeyEnv, hex.EncodeToString(masterKey))
+	jwtKey := []byte("runtime-e2e-signing-key-32-bytes-minimum")
+	t.Setenv(jwtKeyEnv, string(jwtKey))
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve gateway address: %v", err)
+	}
+	gatewayAddress := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("release gateway address: %v", err)
+	}
+
+	cfg := minimalRuntimeConfig()
+	cfg.Server.Address = gatewayAddress
+	cfg.KMS.Local.MasterKeyEnv = masterKeyEnv
+	cfg.KMS.Local.KeyStorePath = filepath.Join(t.TempDir(), "keys")
+	cfg.Auth.JWTSigningKeyEnv = jwtKeyEnv
+	cfg.Auth.Revocation.FilePath = filepath.Join(t.TempDir(), "revocations.json")
+	cfg.Providers[0].BaseURL = upstream.URL
+	cfg.Egress.AllowedDomains = []string{"127.0.0.1"}
+	if _, err := revocation.NewWriter(cfg.Auth.Revocation.FilePath, 2*time.Second).Init(context.Background(), time.Now()); err != nil {
+		t.Fatalf("initialize revocation state: %v", err)
+	}
+
+	seedStore, err := newKMSProvider(cfg.KMS)
+	if err != nil {
+		t.Fatalf("open seed KMS: %v", err)
+	}
+	if err := seedStore.StoreKey(context.Background(), cfg.Providers[0].APIKeyID, []byte(providerKey)); err != nil {
+		_ = seedStore.Close()
+		t.Fatalf("seed provider key: %v", err)
+	}
+	if err := seedStore.Close(); err != nil {
+		t.Fatalf("close seed KMS: %v", err)
+	}
+
+	roots := x509.NewCertPool()
+	roots.AddCert(upstream.Certificate())
+	srv, err := newServer(cfg, nil, roots)
+	if err != nil {
+		t.Fatalf("build runtime server: %v", err)
+	}
+	runCtx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() { runErr <- srv.Run(runCtx) }()
+	serverStopped := false
+	defer func() {
+		if serverStopped {
+			return
+		}
+		cancel()
+		<-runErr
+	}()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	gatewayURL := "http://" + gatewayAddress
+	for attempt := 0; ; attempt++ {
+		resp, requestErr := client.Get(gatewayURL + "/health")
+		if requestErr == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		if attempt == 99 {
+			t.Fatalf("gateway did not become healthy: %v", requestErr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	now := time.Now()
+	token := signRuntimeTestToken(t, jwtKey, middleware.VirtualKeyClaims{
+		KeyID:          "virtual-key-e2e",
+		Subject:        "operator-e2e",
+		Models:         []string{"gpt-4o-mini"},
+		MaxRPM:         10,
+		MaxConcurrency: 2,
+		KeySource:      middleware.KeySourcePool,
+		IssuedAt:       now.Add(-time.Minute).Unix(),
+		ExpiresAt:      now.Add(time.Hour).Unix(),
+		Issuer:         "aegis",
+	})
+	requestBody := `{"model":"gpt-4o-mini","messages":[{"role":"user","content":"email me at alice@example.com"}]}`
+	req, err := http.NewRequest(http.MethodPost, gatewayURL+"/v1/chat/completions", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatalf("build gateway request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Api-Key", "client-secret")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("gateway request: %v", err)
+	}
+	responseBody, readErr := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read gateway response: %v", readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("gateway status = %d body=%s, want 200", resp.StatusCode, responseBody)
+	}
+	if got := resp.Header.Get("X-Upstream-Request-Id"); got != "provider-request-e2e" {
+		t.Fatalf("upstream request id = %q, want provider-request-e2e", got)
+	}
+	if got := resp.Header.Get("Set-Cookie"); got != "" {
+		t.Fatalf("unsafe upstream cookie reached client: %q", got)
+	}
+	if got, want := string(responseBody), `{"id":"chatcmpl-e2e","choices":[]}`; got != want {
+		t.Fatalf("response body = %q, want %q", got, want)
+	}
+
+	if _, err := revocation.NewWriter(cfg.Auth.Revocation.FilePath, 2*time.Second).Revoke(
+		context.Background(), cfg.Auth.Issuer, "virtual-key-e2e", time.Now(), cfg.Auth.TokenExpiry,
+	); err != nil {
+		t.Fatalf("revoke virtual key during runtime: %v", err)
+	}
+	revocationDeadline := time.Now().Add(cfg.Auth.Revocation.RefreshInterval + 250*time.Millisecond)
+	for {
+		revokedRequest, err := http.NewRequest(
+			http.MethodPost,
+			gatewayURL+"/v1/chat/completions",
+			strings.NewReader(requestBody),
+		)
+		if err != nil {
+			t.Fatalf("build revoked gateway request: %v", err)
+		}
+		revokedRequest.Header.Set("Authorization", "Bearer "+token)
+		revokedRequest.Header.Set("Content-Type", "application/json")
+		revokedResponse, requestErr := client.Do(revokedRequest)
+		if requestErr == nil {
+			_, _ = io.Copy(io.Discard, revokedResponse.Body)
+			_ = revokedResponse.Body.Close()
+			if revokedResponse.StatusCode == http.StatusUnauthorized {
+				break
+			}
+		}
+		if time.Now().After(revocationDeadline) {
+			t.Fatalf("revoked token was not rejected within refresh SLA: last error=%v", requestErr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	cancel()
+	shutdownErr := <-runErr
+	serverStopped = true
+	if shutdownErr != nil {
+		t.Fatalf("runtime shutdown: %v", shutdownErr)
+	}
+}
+
+func TestNewServerRejectsMissingRevocationSnapshot(t *testing.T) {
+	const (
+		masterKeyEnv = "TEST_AEGIS_MISSING_REVOCATION_MASTER"
+		jwtKeyEnv    = "TEST_AEGIS_MISSING_REVOCATION_JWT"
+	)
+	t.Setenv(masterKeyEnv, hex.EncodeToString(make([]byte, 32)))
+	t.Setenv(jwtKeyEnv, "0123456789abcdef0123456789abcdef")
+
+	cfg := minimalRuntimeConfig()
+	cfg.KMS.Local.MasterKeyEnv = masterKeyEnv
+	cfg.Auth.JWTSigningKeyEnv = jwtKeyEnv
+	cfg.Auth.Revocation = config.RevocationConfig{
+		Backend:         "file",
+		FilePath:        filepath.Join(t.TempDir(), "missing.json"),
+		RefreshInterval: 500 * time.Millisecond,
+	}
+
+	if _, err := NewServer(cfg, nil); err == nil || !strings.Contains(err.Error(), "revocation") {
+		t.Fatalf("NewServer missing revocation error = %v, want startup rejection", err)
+	}
+}
+
+func signRuntimeTestToken(t *testing.T, key []byte, claims middleware.VirtualKeyClaims) string {
+	t.Helper()
+	headerJSON, err := json.Marshal(map[string]string{"alg": "HS256", "typ": "JWT"})
+	if err != nil {
+		t.Fatalf("marshal token header: %v", err)
+	}
+	claimsJSON, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("marshal token claims: %v", err)
+	}
+	segments := []string{
+		base64.RawURLEncoding.EncodeToString(headerJSON),
+		base64.RawURLEncoding.EncodeToString(claimsJSON),
+	}
+	signingInput := strings.Join(segments, ".")
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(signingInput))
+	segments = append(segments, base64.RawURLEncoding.EncodeToString(mac.Sum(nil)))
+	return strings.Join(segments, ".")
+}
 
 func TestProviderRuntimeAcceptsExplicitEgressDomains(t *testing.T) {
 	cfg := &config.Config{
@@ -63,7 +314,7 @@ func TestExampleConfigEgressMatchesEnabledRuntimeProviders(t *testing.T) {
 			t.Fatalf("example provider %q is disabled; keep future providers out of the current runtime example", provider.ID)
 		}
 		if !isSupportedProviderType(provider.Type) {
-			t.Fatalf("example provider %q type %q is not supported by v0.2.0 runtime", provider.ID, provider.Type)
+			t.Fatalf("example provider %q type %q is not supported by v0.2.1 runtime", provider.ID, provider.Type)
 		}
 		host, err := providerHost(provider.BaseURL)
 		if err != nil {
@@ -78,6 +329,16 @@ func TestExampleConfigEgressMatchesEnabledRuntimeProviders(t *testing.T) {
 	}
 	if !reflect.DeepEqual(allowedHosts, enabledHosts) {
 		t.Fatalf("example egress allowlist = %#v, want enabled provider hosts %#v", allowedHosts, enabledHosts)
+	}
+}
+
+func TestProviderRuntimeRejectsDuplicateEnabledProviderIDs(t *testing.T) {
+	cfg := minimalRuntimeConfig()
+	duplicate := cfg.Providers[0]
+	duplicate.APIKeyID = "other-key"
+	cfg.Providers = append(cfg.Providers, duplicate)
+	if _, _, _, err := providerRuntime(cfg); err == nil || !strings.Contains(err.Error(), "duplicated") {
+		t.Fatalf("providerRuntime duplicate ID error = %v", err)
 	}
 }
 
@@ -271,6 +532,13 @@ func TestNewServerRejectsUnsupportedRuntimeControls(t *testing.T) {
 				cfg.Auth.TokenExpiry = 0
 			},
 			wantErr: "auth.token_expiry must be positive",
+		},
+		{
+			name: "empty auth issuer",
+			mutate: func(cfg *config.Config) {
+				cfg.Auth.Issuer = ""
+			},
+			wantErr: "auth.issuer must not be empty",
 		},
 		{
 			name: "zero read timeout",
@@ -544,6 +812,12 @@ func minimalRuntimeConfig() *config.Config {
 		},
 		Auth: config.AuthConfig{
 			TokenExpiry: 24 * time.Hour,
+			Issuer:      "aegis",
+			Revocation: config.RevocationConfig{
+				Backend:         "file",
+				FilePath:        filepath.Join(os.TempDir(), "aegis-runtime-test-revocations.json"),
+				RefreshInterval: 500 * time.Millisecond,
+			},
 		},
 	}
 }

@@ -17,7 +17,8 @@
     "mode": "local",
     "local": {
       "master_key_env": "AEGIS_MASTER_KEY",
-      "key_store_path": "aegis.keys"
+      "key_store_path": "aegis.keys",
+      "minimum_envelope_version": 2
     }
   },
   "providers": [
@@ -50,8 +51,13 @@
   ],
   "auth": {
     "jwt_signing_key_env": "AEGIS_JWT_KEY",
-    "token_expiry": "720h",
-    "issuer": "aegis"
+    "token_expiry": "24h",
+    "issuer": "aegis",
+    "revocation": {
+      "backend": "file",
+      "file_path": "aegis.revocations.json",
+      "refresh_interval": "500ms"
+    }
   },
   "rate_limit": {
     "enabled": true,

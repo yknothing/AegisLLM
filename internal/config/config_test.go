@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -9,6 +10,75 @@ import (
 	"testing"
 	"time"
 )
+
+func TestLoadRejectsUnknownFieldsAtEveryConfigBoundary(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+
+	example, err := os.ReadFile(filepath.Join("..", "..", "aegis.example.json"))
+	if err != nil {
+		t.Fatalf("read example config: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{
+			name: "root",
+			data: bytes.Replace(example, []byte(`"server": {`), []byte(`"unexpected_root": true, "server": {`), 1),
+		},
+		{
+			name: "server",
+			data: bytes.Replace(example, []byte(`"address": ":8080",`), []byte(`"adress": ":9090", "address": ":8080",`), 1),
+		},
+		{
+			name: "tls",
+			data: bytes.Replace(example, []byte(`"enabled": false,`), []byte(`"enabeld": true, "enabled": false,`), 1),
+		},
+		{
+			name: "auth",
+			data: bytes.Replace(example, []byte(`"issuer": "aegis"`), []byte(`"isuer": "aegis", "issuer": "aegis"`), 1),
+		},
+		{
+			name: "provider",
+			data: bytes.Replace(example, []byte(`"name": "OpenAI Primary",`), []byte(`"naem": "OpenAI Primary", "name": "OpenAI Primary",`), 1),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "aegis.json")
+			if err := os.WriteFile(path, tt.data, 0600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), "unknown field") {
+				t.Fatalf("Load error = %v, want unknown field rejection", err)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsEmptyAuthIssuer(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+
+	example, err := os.ReadFile(filepath.Join("..", "..", "aegis.example.json"))
+	if err != nil {
+		t.Fatalf("read example config: %v", err)
+	}
+	example = bytes.Replace(example, []byte(`"issuer": "aegis"`), []byte(`"issuer": ""`), 1)
+
+	path := filepath.Join(t.TempDir(), "aegis.json")
+	if err := os.WriteFile(path, example, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err = Load(path)
+	if err == nil || !strings.Contains(err.Error(), "auth.issuer must not be empty") {
+		t.Fatalf("Load error = %v, want empty issuer rejection", err)
+	}
+}
 
 func TestLoadParsesDurationStrings(t *testing.T) {
 	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
@@ -76,6 +146,9 @@ func TestLoadParsesDurationStrings(t *testing.T) {
 	if cfg.KMS.Local.KeyStorePath != "aegis.keys" {
 		t.Fatalf("key store path = %q, want aegis.keys", cfg.KMS.Local.KeyStorePath)
 	}
+	if cfg.KMS.Local.MinimumEnvelopeVersion != 2 {
+		t.Fatalf("minimum envelope version = %d, want strict v2", cfg.KMS.Local.MinimumEnvelopeVersion)
+	}
 }
 
 func TestLoadExampleConfig(t *testing.T) {
@@ -88,11 +161,17 @@ func TestLoadExampleConfig(t *testing.T) {
 	if cfg.RateLimit.DefaultTPM != 0 {
 		t.Fatalf("example default_tpm = %d, want 0 until TPM enforcement exists", cfg.RateLimit.DefaultTPM)
 	}
+	if cfg.Auth.TokenExpiry > 24*time.Hour {
+		t.Fatalf("example token expiry = %v, want no more than 24h for the standalone baseline", cfg.Auth.TokenExpiry)
+	}
 	if cfg.RateLimit.RedisURL != "" {
 		t.Fatalf("example redis_url = %q, want empty until redis backend exists", cfg.RateLimit.RedisURL)
 	}
 	if cfg.KMS.Vault.Address != "" || cfg.KMS.Vault.Path != "" || cfg.KMS.Vault.TokenEnv != "" {
 		t.Fatalf("example vault config = %+v, want empty until vault backend exists", cfg.KMS.Vault)
+	}
+	if cfg.KMS.Local.MinimumEnvelopeVersion != 2 {
+		t.Fatalf("example minimum envelope version = %d, want 2", cfg.KMS.Local.MinimumEnvelopeVersion)
 	}
 	for _, provider := range cfg.Providers {
 		if provider.MaxRPM != 0 {
@@ -107,6 +186,129 @@ func TestLoadExampleConfig(t *testing.T) {
 	}
 	if cfg.Store.Type != "" || cfg.Store.DSN != "" {
 		t.Fatalf("example store reserved fields = type=%q dsn=%q, want empty until control-plane store exists", cfg.Store.Type, cfg.Store.DSN)
+	}
+}
+
+func TestLoadExampleConfigIncludesDurableFileRevocation(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+
+	cfg, err := Load(filepath.Join("..", "..", "aegis.example.json"))
+	if err != nil {
+		t.Fatalf("Load example config returned error: %v", err)
+	}
+	if cfg.Auth.Revocation.Backend != "file" {
+		t.Fatalf("revocation backend = %q, want file", cfg.Auth.Revocation.Backend)
+	}
+	if cfg.Auth.Revocation.FilePath != "aegis.revocations.json" {
+		t.Fatalf("revocation file path = %q, want aegis.revocations.json", cfg.Auth.Revocation.FilePath)
+	}
+	if cfg.Auth.Revocation.RefreshInterval != 500*time.Millisecond {
+		t.Fatalf("revocation refresh interval = %v, want 500ms", cfg.Auth.Revocation.RefreshInterval)
+	}
+}
+
+func TestLoadForOperatorDoesNotRequireUnrelatedSecretEnvironment(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", "")
+
+	cfg, err := LoadForOperator(filepath.Join("..", "..", "aegis.example.json"))
+	if err != nil {
+		t.Fatalf("LoadForOperator returned error without master-key env: %v", err)
+	}
+	if cfg.KMS.Local.MasterKeyEnv != "AEGIS_MASTER_KEY" {
+		t.Fatalf("master key env = %q, want configured env name", cfg.KMS.Local.MasterKeyEnv)
+	}
+}
+
+func TestDefaultConfigUsesTwentyFourHourTokenTTLAndFileRevocation(t *testing.T) {
+	cfg := defaultConfig()
+	if cfg.Auth.TokenExpiry != 24*time.Hour {
+		t.Fatalf("default token expiry = %v, want 24h", cfg.Auth.TokenExpiry)
+	}
+	if cfg.Auth.Revocation.Backend != "file" || cfg.Auth.Revocation.FilePath == "" {
+		t.Fatalf("default revocation = %+v, want durable file backend", cfg.Auth.Revocation)
+	}
+}
+
+func TestLoadRejectsInvalidRevocationConfig(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+	example, err := os.ReadFile(filepath.Join("..", "..", "aegis.example.json"))
+	if err != nil {
+		t.Fatalf("read example config: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		old     string
+		new     string
+		wantErr string
+	}{
+		{name: "backend", old: `"backend": "file"`, new: `"backend": "memory"`, wantErr: "unsupported auth.revocation backend"},
+		{name: "empty path", old: `"file_path": "aegis.revocations.json"`, new: `"file_path": ""`, wantErr: "auth.revocation.file_path must not be empty"},
+		{name: "too slow", old: `"refresh_interval": "500ms"`, new: `"refresh_interval": "10s"`, wantErr: "auth.revocation.refresh_interval must not exceed"},
+		{name: "unknown field", old: `"backend": "file"`, new: `"backend": "file", "unknown": true`, wantErr: "unknown field"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := bytes.Replace(example, []byte(tt.old), []byte(tt.new), 1)
+			path := filepath.Join(t.TempDir(), "aegis.json")
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Load error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateEnabledProviderIDsRejectsEmptyAndDuplicateIDs(t *testing.T) {
+	tests := []struct {
+		name      string
+		providers []Provider
+	}{
+		{name: "empty", providers: []Provider{{Enabled: true, ID: ""}}},
+		{name: "duplicate", providers: []Provider{{Enabled: true, ID: "same"}, {Enabled: true, ID: "same"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := ValidateEnabledProviderIDs(tt.providers); err == nil {
+				t.Fatal("ValidateEnabledProviderIDs accepted invalid provider IDs")
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidMinimumEnvelopeVersion(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+	example, err := os.ReadFile(filepath.Join("..", "..", "aegis.example.json"))
+	if err != nil {
+		t.Fatalf("read example config: %v", err)
+	}
+	data := bytes.Replace(example, []byte(`"minimum_envelope_version": 2`), []byte(`"minimum_envelope_version": 3`), 1)
+	path := filepath.Join(t.TempDir(), "aegis.json")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "minimum_envelope_version must be 1 or 2") {
+		t.Fatalf("Load error = %v, want envelope-version rejection", err)
+	}
+}
+
+func TestLoadRejectsProviderAPIKeyIDAboveKMSBound(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+	example, err := os.ReadFile(filepath.Join("..", "..", "aegis.example.json"))
+	if err != nil {
+		t.Fatalf("read example config: %v", err)
+	}
+	data := bytes.Replace(example, []byte(`"api_key_id": "openai-key-1"`), []byte(`"api_key_id": "`+strings.Repeat("k", 129)+`"`), 1)
+	path := filepath.Join(t.TempDir(), "aegis.json")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "api_key_id must not exceed 128 bytes") {
+		t.Fatalf("Load error = %v, want KMS key-ID bound rejection", err)
 	}
 }
 

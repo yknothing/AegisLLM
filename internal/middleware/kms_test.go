@@ -33,6 +33,15 @@ func TestResolveKeyIDRejectsBYOKSource(t *testing.T) {
 	}
 }
 
+func TestResolveKeyIDRejectsMissingKeySource(t *testing.T) {
+	ctx := &server.RequestContext{ProviderID: "openai-main"}
+
+	got := resolveKeyID(ctx, map[string]string{"openai-main": "pool-openai-key"})
+	if got != "" {
+		t.Fatalf("key ID = %q, want empty for missing key source", got)
+	}
+}
+
 func TestKMSInjectorFailsClosedWhenProviderMissing(t *testing.T) {
 	ctx := &server.RequestContext{
 		Writer:     httptest.NewRecorder(),

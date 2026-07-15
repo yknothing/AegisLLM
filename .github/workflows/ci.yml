@@ -43,7 +43,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.26.4'
+          go-version: '1.26.5'
           cache: true
 
       - name: Release preflight
@@ -56,6 +56,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+
+      - name: Set up Go for binary inspection
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.26.5'
+          cache: true
 
       - name: Build image
         run: |
@@ -80,6 +86,13 @@ jobs:
           esac
           printf '%s\n' "$version_output"
 
+          container_id="$(docker create aegis:ci)"
+          docker cp "${container_id}:/aegis" /tmp/aegis-ci-binary
+          docker rm "${container_id}" >/dev/null
+          go version -m /tmp/aegis-ci-binary | tee /tmp/aegis-ci-build-info
+          grep -F 'go1.26.5' /tmp/aegis-ci-build-info >/dev/null
+          go run golang.org/x/vuln/cmd/govulncheck@v1.4.0 -mode=binary /tmp/aegis-ci-binary
+
       - name: Run read-only smoke
         run: |
           set -euo pipefail
@@ -89,10 +102,33 @@ jobs:
             docker volume rm aegis-ci-data >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
+          master_key="$(openssl rand -hex 32)"
+          jwt_key="$(openssl rand -hex 32)"
+          docker run --rm \
+            -v aegis-ci-data:/var/lib/aegis \
+            aegis:ci operator revocation init --config /etc/aegis/aegis.json
+          printf '%s' 'sk-ci-provider-key' | docker run -i --rm \
+            -e AEGIS_MASTER_KEY="$master_key" \
+            -v aegis-ci-data:/var/lib/aegis \
+            aegis:ci operator provider-key import \
+              --config /etc/aegis/aegis.json --provider openai-primary
+          virtual_key="$(docker run --rm \
+            -e AEGIS_JWT_KEY="$jwt_key" \
+            -v aegis-ci-data:/var/lib/aegis \
+            aegis:ci operator virtual-key issue \
+              --config /etc/aegis/aegis.json \
+              --subject ci-smoke \
+              --models gpt-4o-mini \
+              --ttl 5m \
+              --stdout 2>/tmp/aegis-ci-issue-status)"
+          cat /tmp/aegis-ci-issue-status
+          virtual_key_id="$(sed -n 's/^virtual_key_issued kid=\([^ ]*\) expires_at=.*/\1/p' /tmp/aegis-ci-issue-status)"
+          test -n "$virtual_key"
+          test -n "$virtual_key_id"
           docker run -d --name aegis-ci --read-only \
             -p 127.0.0.1:18082:8080 \
-            -e AEGIS_MASTER_KEY="$(openssl rand -hex 32)" \
-            -e AEGIS_JWT_KEY="$(openssl rand -hex 32)" \
+            -e AEGIS_MASTER_KEY="$master_key" \
+            -e AEGIS_JWT_KEY="$jwt_key" \
             -v aegis-ci-data:/var/lib/aegis \
             aegis:ci >/dev/null
           health=''
@@ -104,7 +140,36 @@ jobs:
           done
           test "$health" = '{"status":"ok"}'
           printf 'health=%s\n' "$health"
-          test "$(curl -sS -o /tmp/aegis-ci-unauth -w '%{http_code}' http://127.0.0.1:18082/v1/chat/completions)" = "401"
+          test "$(curl -sS -o /tmp/aegis-ci-auth -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer $virtual_key" \
+            -H 'Content-Type: application/json' \
+            --data '{' \
+            http://127.0.0.1:18082/v1/chat/completions)" = "400"
+          docker run --rm \
+            -v aegis-ci-data:/var/lib/aegis \
+            aegis:ci operator virtual-key revoke \
+              --config /etc/aegis/aegis.json \
+              --kid "$virtual_key_id"
+          revoked_status=''
+          for _ in $(seq 1 30); do
+            revoked_status="$(curl -sS -o /tmp/aegis-ci-revoked -w '%{http_code}' \
+              -X POST \
+              -H "Authorization: Bearer $virtual_key" \
+              -H 'Content-Type: application/json' \
+              --data '{' \
+              http://127.0.0.1:18082/v1/chat/completions || true)"
+            if [ "$revoked_status" = "401" ]; then
+              break
+            fi
+            sleep 0.025
+          done
+          test "$revoked_status" = "401"
+          test "$(curl -sS -o /tmp/aegis-ci-unauth -w '%{http_code}' \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            --data '{"model":"gpt-4o-mini","messages":[]}' \
+            http://127.0.0.1:18082/v1/chat/completions)" = "401"
           docker inspect aegis-ci --format 'readonly={{.HostConfig.ReadonlyRootfs}} user={{.Config.User}}'
           test "$(docker inspect aegis-ci --format '{{.HostConfig.ReadonlyRootfs}}')" = "true"
           test "$(docker inspect aegis-ci --format '{{.Config.User}}')" = "nonroot:nonroot"

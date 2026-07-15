@@ -26,6 +26,12 @@ var (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "operator" {
+		stdinInfo, err := os.Stdin.Stat()
+		stdinIsTTY := err == nil && stdinInfo.Mode()&os.ModeCharDevice != 0
+		os.Exit(runOperator(os.Args[2:], os.Stdin, stdinIsTTY, os.Stdout, os.Stderr))
+	}
+
 	// Parse command-line flags
 	configPath := flag.String("config", "", "path to configuration file")
 	showVersion := flag.Bool("version", false, "print version information")

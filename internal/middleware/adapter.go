@@ -95,7 +95,7 @@ func Adapter(registry *AdapterRegistry, providerTypes map[string]string, maxRequ
 			return
 		}
 
-		body, err := readAndReplaceBody(ctx.Request, maxRequestBodySize)
+		body, err := readRequestBody(ctx, maxRequestBodySize)
 		if errors.Is(err, errRequestBodyTooLarge) {
 			ctx.Abort(http.StatusRequestEntityTooLarge, []byte(`{"error":{"message":"request body too large","type":"invalid_request_error"}}`))
 			return
@@ -110,7 +110,7 @@ func Adapter(registry *AdapterRegistry, providerTypes map[string]string, maxRequ
 			ctx.Abort(http.StatusBadRequest, []byte(`{"error":{"message":"invalid provider request","type":"invalid_request_error"}}`))
 			return
 		}
-		replaceBody(ctx.Request, transformed)
+		replaceRequestBody(ctx, transformed)
 		ctx.ProviderType = providerType
 		ctx.TargetPath = targetPath
 

@@ -5,12 +5,17 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/yknothing/AegisLLM/internal/kms"
 )
 
 // Config is the root configuration structure for Aegis.
@@ -63,8 +68,9 @@ type KMSConfig struct {
 // LocalKMS configures the built-in encryption engine.
 // The master key MUST be provided via environment variable, never in config files.
 type LocalKMS struct {
-	MasterKeyEnv string `json:"master_key_env"` // Name of env var holding the master key
-	KeyStorePath string `json:"key_store_path"` // Directory for encrypted local key blobs
+	MasterKeyEnv           string `json:"master_key_env"`           // Name of env var holding the master key
+	KeyStorePath           string `json:"key_store_path"`           // Directory for encrypted local key blobs
+	MinimumEnvelopeVersion int    `json:"minimum_envelope_version"` // 1 during legacy migration; 2 after completion
 }
 
 // VaultConfig reserves HashiCorp Vault integration settings.
@@ -93,10 +99,21 @@ type Provider struct {
 
 // AuthConfig defines authentication settings.
 type AuthConfig struct {
-	JWTSigningKeyEnv string        `json:"jwt_signing_key_env"` // Env var for JWT private key
-	TokenExpiry      time.Duration `json:"token_expiry"`        // Maximum accepted token lifetime
-	Issuer           string        `json:"issuer"`
+	JWTSigningKeyEnv string           `json:"jwt_signing_key_env"` // Env var for JWT private key
+	TokenExpiry      time.Duration    `json:"token_expiry"`        // Maximum accepted token lifetime
+	Issuer           string           `json:"issuer"`
+	Revocation       RevocationConfig `json:"revocation"`
 }
+
+// RevocationConfig defines the durable single-host virtual-key revocation
+// reader. Shared/distributed backends remain a future control-plane concern.
+type RevocationConfig struct {
+	Backend         string        `json:"backend"`
+	FilePath        string        `json:"file_path"`
+	RefreshInterval time.Duration `json:"refresh_interval"`
+}
+
+const maxRevocationRefreshInterval = 5 * time.Second
 
 // RateLimitConfig defines rate limiting behavior.
 type RateLimitConfig struct {
@@ -144,7 +161,7 @@ func (c *ServerConfig) UnmarshalJSON(data []byte) error {
 	}
 
 	var raw serverConfigJSON
-	if err := json.Unmarshal(data, &raw); err != nil {
+	if err := unmarshalStrict(data, &raw); err != nil {
 		return err
 	}
 
@@ -185,13 +202,14 @@ func (c *ServerConfig) UnmarshalJSON(data []byte) error {
 // UnmarshalJSON accepts both Go duration nanoseconds and duration strings.
 func (c *AuthConfig) UnmarshalJSON(data []byte) error {
 	type authConfigJSON struct {
-		JWTSigningKeyEnv *string         `json:"jwt_signing_key_env"`
-		TokenExpiry      json.RawMessage `json:"token_expiry"`
-		Issuer           *string         `json:"issuer"`
+		JWTSigningKeyEnv *string           `json:"jwt_signing_key_env"`
+		TokenExpiry      json.RawMessage   `json:"token_expiry"`
+		Issuer           *string           `json:"issuer"`
+		Revocation       *RevocationConfig `json:"revocation"`
 	}
 
 	var raw authConfigJSON
-	if err := json.Unmarshal(data, &raw); err != nil {
+	if err := unmarshalStrict(data, &raw); err != nil {
 		return err
 	}
 
@@ -208,7 +226,39 @@ func (c *AuthConfig) UnmarshalJSON(data []byte) error {
 	if raw.Issuer != nil {
 		c.Issuer = *raw.Issuer
 	}
+	if raw.Revocation != nil {
+		c.Revocation = *raw.Revocation
+	}
 
+	return nil
+}
+
+// UnmarshalJSON accepts a human-readable refresh interval while rejecting
+// unknown revocation fields.
+func (c *RevocationConfig) UnmarshalJSON(data []byte) error {
+	type revocationConfigJSON struct {
+		Backend         *string         `json:"backend"`
+		FilePath        *string         `json:"file_path"`
+		RefreshInterval json.RawMessage `json:"refresh_interval"`
+	}
+
+	var raw revocationConfigJSON
+	if err := unmarshalStrict(data, &raw); err != nil {
+		return err
+	}
+	if raw.Backend != nil {
+		c.Backend = *raw.Backend
+	}
+	if raw.FilePath != nil {
+		c.FilePath = *raw.FilePath
+	}
+	if raw.RefreshInterval != nil {
+		d, err := parseDuration(raw.RefreshInterval, "auth.revocation.refresh_interval")
+		if err != nil {
+			return err
+		}
+		c.RefreshInterval = d
+	}
 	return nil
 }
 
@@ -232,6 +282,23 @@ func parseDuration(raw json.RawMessage, field string) (time.Duration, error) {
 	}
 
 	return 0, fmt.Errorf("%s must be a duration string or integer nanoseconds, got %s", field, strconv.Quote(string(raw)))
+}
+
+func unmarshalStrict(data []byte, dst any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values are not allowed")
+		}
+		return err
+	}
+	return nil
 }
 
 func rejectReservedConfigFields(data []byte) error {
@@ -283,6 +350,17 @@ func isJSONNull(raw json.RawMessage) bool {
 // Load reads and validates the configuration from the given path.
 // If path is empty, it attempts to load from default locations.
 func Load(path string) (*Config, error) {
+	return load(path, true)
+}
+
+// LoadForOperator loads and structurally validates configuration without
+// requiring unrelated secret environment variables. Individual operator
+// commands load only the secret material they actually need.
+func LoadForOperator(path string) (*Config, error) {
+	return load(path, false)
+}
+
+func load(path string, requireSecretEnv bool) (*Config, error) {
 	if path == "" {
 		// Try default locations in order
 		candidates := []string{
@@ -304,7 +382,7 @@ func Load(path string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reading config file: %w", err)
 		}
-		if err := json.Unmarshal(data, cfg); err != nil {
+		if err := unmarshalStrict(data, cfg); err != nil {
 			return nil, fmt.Errorf("parsing config file: %w", err)
 		}
 		if err := rejectReservedConfigFields(data); err != nil {
@@ -312,7 +390,7 @@ func Load(path string) (*Config, error) {
 		}
 	}
 
-	if err := cfg.validate(); err != nil {
+	if err := cfg.validate(requireSecretEnv); err != nil {
 		return nil, fmt.Errorf("config validation: %w", err)
 	}
 
@@ -332,13 +410,19 @@ func defaultConfig() *Config {
 		KMS: KMSConfig{
 			Mode: "local",
 			Local: LocalKMS{
-				MasterKeyEnv: "AEGIS_MASTER_KEY",
+				MasterKeyEnv:           "AEGIS_MASTER_KEY",
+				MinimumEnvelopeVersion: 2,
 			},
 		},
 		Auth: AuthConfig{
 			JWTSigningKeyEnv: "AEGIS_JWT_KEY",
-			TokenExpiry:      720 * time.Hour, // 30 days
+			TokenExpiry:      24 * time.Hour,
 			Issuer:           "aegis",
+			Revocation: RevocationConfig{
+				Backend:         "file",
+				FilePath:        "aegis.revocations.json",
+				RefreshInterval: 500 * time.Millisecond,
+			},
 		},
 		RateLimit: RateLimitConfig{
 			Enabled:               true,
@@ -387,14 +471,23 @@ func ValidateServerConfig(server ServerConfig) error {
 }
 
 // validate checks the configuration for logical errors and security issues.
-func (c *Config) validate() error {
+func (c *Config) validate(requireSecretEnv bool) error {
 	if err := ValidateServerConfig(c.Server); err != nil {
 		return err
 	}
 	if c.Auth.TokenExpiry <= 0 {
 		return errors.New("auth.token_expiry must be positive")
 	}
+	if strings.TrimSpace(c.Auth.Issuer) == "" {
+		return errors.New("auth.issuer must not be empty")
+	}
+	if err := ValidateRevocationConfig(c.Auth.Revocation); err != nil {
+		return err
+	}
 
+	if err := ValidateEnabledProviderIDs(c.Providers); err != nil {
+		return err
+	}
 	enabledProviders := 0
 
 	// SECURITY: Ensure no plaintext keys in config
@@ -409,6 +502,9 @@ func (c *Config) validate() error {
 		}
 		if p.APIKeyID == "" {
 			return fmt.Errorf("provider %q: api_key_id must reference a KMS key, not be empty", providerName)
+		}
+		if len(p.APIKeyID) > kms.MaxKeyIDBytes {
+			return fmt.Errorf("provider %q: api_key_id must not exceed %d bytes", providerName, kms.MaxKeyIDBytes)
 		}
 		if p.MaxRPM < 0 {
 			return fmt.Errorf("provider %q: max_rpm must not be negative", providerName)
@@ -480,8 +576,11 @@ func (c *Config) validate() error {
 		if c.KMS.Local.MasterKeyEnv == "" {
 			return errors.New("local KMS requires master_key_env to be set")
 		}
+		if c.KMS.Local.MinimumEnvelopeVersion != 1 && c.KMS.Local.MinimumEnvelopeVersion != 2 {
+			return errors.New("kms.local.minimum_envelope_version must be 1 or 2")
+		}
 		// Verify the env var exists (but never log its value)
-		if os.Getenv(c.KMS.Local.MasterKeyEnv) == "" {
+		if requireSecretEnv && os.Getenv(c.KMS.Local.MasterKeyEnv) == "" {
 			return fmt.Errorf("environment variable %q for master key is not set", c.KMS.Local.MasterKeyEnv)
 		}
 	case "vault":
@@ -490,5 +589,41 @@ func (c *Config) validate() error {
 		return fmt.Errorf("unsupported KMS mode: %q", c.KMS.Mode)
 	}
 
+	return nil
+}
+
+// ValidateEnabledProviderIDs prevents route-to-credential ambiguity by
+// requiring every enabled provider ID to be non-empty and unique.
+func ValidateEnabledProviderIDs(providers []Provider) error {
+	seen := make(map[string]struct{}, len(providers))
+	for _, provider := range providers {
+		if !provider.Enabled {
+			continue
+		}
+		if strings.TrimSpace(provider.ID) == "" {
+			return errors.New("enabled provider id must not be empty")
+		}
+		if _, exists := seen[provider.ID]; exists {
+			return fmt.Errorf("enabled provider id %q is duplicated", provider.ID)
+		}
+		seen[provider.ID] = struct{}{}
+	}
+	return nil
+}
+
+// ValidateRevocationConfig validates the standalone durable revocation reader.
+func ValidateRevocationConfig(cfg RevocationConfig) error {
+	if cfg.Backend != "file" {
+		return fmt.Errorf("unsupported auth.revocation backend: %q", cfg.Backend)
+	}
+	if strings.TrimSpace(cfg.FilePath) == "" {
+		return errors.New("auth.revocation.file_path must not be empty")
+	}
+	if cfg.RefreshInterval <= 0 {
+		return errors.New("auth.revocation.refresh_interval must be positive")
+	}
+	if cfg.RefreshInterval > maxRevocationRefreshInterval {
+		return fmt.Errorf("auth.revocation.refresh_interval must not exceed %s", maxRevocationRefreshInterval)
+	}
 	return nil
 }

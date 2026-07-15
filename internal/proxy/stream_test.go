@@ -1,7 +1,10 @@
 package proxy
 
 import (
+	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/yknothing/AegisLLM/internal/requestid"
+	"github.com/yknothing/AegisLLM/internal/utils"
 )
 
 const oversizedScannerDefaultLineSize = 70 * 1024
@@ -86,6 +90,226 @@ func TestNewEngineRequiresTLS13ForUpstreamTransport(t *testing.T) {
 	}
 }
 
+func TestProxyRequestTLS13EndToEnd(t *testing.T) {
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS == nil || r.TLS.Version != tls.VersionTLS13 {
+			t.Errorf("upstream TLS version = %v, want TLS 1.3", r.TLS)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer provider-secret" {
+			t.Errorf("authorization = %q, want provider credential", got)
+		}
+		for _, header := range []string{"X-Api-Key", "X-Admin-Token", "X-Forwarded-For"} {
+			if got := r.Header.Get(header); got != "" {
+				t.Errorf("sensitive client header %s reached upstream: %q", header, got)
+			}
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read upstream request body: %v", err)
+		}
+		if got, want := string(body), `{"model":"gpt-4o","messages":[]}`; got != want {
+			t.Errorf("upstream body = %q, want %q", got, want)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(requestid.Header, "provider-request-1")
+		w.Header().Set("Set-Cookie", "provider-session=secret")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-test","choices":[]}`)
+	}))
+	upstream.TLS = &tls.Config{MinVersion: tls.VersionTLS13}
+	upstream.StartTLS()
+	t.Cleanup(upstream.Close)
+
+	engine := NewEngine(StreamConfig{
+		AllowedDomains: []string{"127.0.0.1"},
+	})
+	transport := engine.client.Transport.(*http.Transport).Clone()
+	transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	roots := x509.NewCertPool()
+	roots.AddCert(upstream.Certificate())
+	transport.TLSClientConfig.RootCAs = roots
+	engine.client.Transport = transport
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","messages":[]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Api-Key", "client-secret")
+	req.Header.Set("X-Admin-Token", "admin-secret")
+	req.Header.Set("X-Forwarded-For", "203.0.113.7")
+	recorder := httptest.NewRecorder()
+	apiKey := utils.NewSecureBytes([]byte("provider-secret"))
+
+	result, err := engine.ProxyRequest(req.Context(), recorder, req, upstream.URL+"/v1/chat/completions", apiKey, false)
+	if err != nil {
+		t.Fatalf("ProxyRequest returned error: %v", err)
+	}
+	if result.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", result.StatusCode, http.StatusOK)
+	}
+	if apiKey.Len() != 0 {
+		t.Fatal("provider credential was not zeroed after upstream response headers")
+	}
+
+	response := recorder.Result()
+	defer func() { _ = response.Body.Close() }()
+	if got := response.Header.Get("X-Upstream-Request-Id"); got != "provider-request-1" {
+		t.Fatalf("upstream request id = %q, want provider-request-1", got)
+	}
+	if got := response.Header.Get("Set-Cookie"); got != "" {
+		t.Fatalf("unsafe upstream cookie reached client: %q", got)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read proxy response: %v", err)
+	}
+	if got, want := string(body), `{"id":"chatcmpl-test","choices":[]}`; got != want {
+		t.Fatalf("response body = %q, want %q", got, want)
+	}
+}
+
+func TestProxyRequestClassifiesUpstreamTransportFailure(t *testing.T) {
+	engine := NewEngine(StreamConfig{AllowedDomains: []string{"api.openai.com"}})
+	engine.client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("dial failed")
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	apiKey := utils.NewSecureBytes([]byte("provider-secret"))
+
+	_, err := engine.ProxyRequest(req.Context(), httptest.NewRecorder(), req, "https://api.openai.com/v1/chat/completions", apiKey, false)
+	if !errors.Is(err, ErrUpstreamTransport) {
+		t.Fatalf("ProxyRequest error = %v, want ErrUpstreamTransport", err)
+	}
+	if apiKey.Len() != 0 {
+		t.Fatal("provider credential was not zeroed after transport failure")
+	}
+}
+
+func TestProxyRequestDoesNotClassifyClientCancellationAsProviderFailure(t *testing.T) {
+	engine := NewEngine(StreamConfig{AllowedDomains: []string{"api.openai.com"}})
+	engine.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, req.Context().Err()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`)).WithContext(ctx)
+	apiKey := utils.NewSecureBytes([]byte("provider-secret"))
+
+	_, err := engine.ProxyRequest(ctx, httptest.NewRecorder(), req, "https://api.openai.com/v1/chat/completions", apiKey, false)
+	if err == nil {
+		t.Fatal("ProxyRequest accepted a canceled client context")
+	}
+	if errors.Is(err, ErrUpstreamTransport) {
+		t.Fatalf("client cancellation was classified as provider transport failure: %v", err)
+	}
+	if apiKey.Len() != 0 {
+		t.Fatal("provider credential was not zeroed after client cancellation")
+	}
+}
+
+func TestProxyRequestDoesNotClassifyClientCancellationAfterResponseHeaders(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	engine := NewEngine(StreamConfig{AllowedDomains: []string{"api.openai.com"}})
+	engine.client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       &cancelingReadCloser{cancel: cancel},
+		}, nil
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`)).WithContext(ctx)
+	apiKey := utils.NewSecureBytes([]byte("provider-secret"))
+
+	result, err := engine.ProxyRequest(ctx, httptest.NewRecorder(), req, "https://api.openai.com/v1/chat/completions", apiKey, false)
+	if result == nil || result.StatusCode != http.StatusOK {
+		t.Fatalf("result = %#v, want upstream 200 result", result)
+	}
+	if err == nil {
+		t.Fatal("ProxyRequest accepted a canceled response read")
+	}
+	if errors.Is(err, ErrUpstreamRead) || errors.Is(err, ErrUpstreamTransport) {
+		t.Fatalf("client cancellation was classified as provider failure: %v", err)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type cancelingReadCloser struct {
+	cancel context.CancelFunc
+}
+
+func (r *cancelingReadCloser) Read([]byte) (int, error) {
+	r.cancel()
+	return 0, context.Canceled
+}
+
+func (r *cancelingReadCloser) Close() error { return nil }
+
+func TestForwardResponsePrefersClientWriteFailureWhenReadAlsoFails(t *testing.T) {
+	engine := NewEngine(StreamConfig{})
+	upstreamErr := errors.New("upstream read failed")
+	clientErr := errors.New("client write failed")
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body: &readOnceErrorCloser{
+			body: []byte(`{"partial":true}`),
+			err:  upstreamErr,
+		},
+	}
+	w := &failingResponseWriter{header: make(http.Header), err: clientErr}
+
+	err := engine.forwardResponse(w, resp)
+	if err == nil || !errors.Is(err, clientErr) {
+		t.Fatalf("forwardResponse error = %v, want client write failure", err)
+	}
+	if errors.Is(err, ErrUpstreamRead) {
+		t.Fatalf("client write failure was classified as upstream read failure: %v", err)
+	}
+}
+
+func TestForwardResponseClassifiesUpstreamReadFailure(t *testing.T) {
+	engine := NewEngine(StreamConfig{})
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       &readOnceErrorCloser{err: errors.New("upstream read failed")},
+	}
+
+	err := engine.forwardResponse(httptest.NewRecorder(), resp)
+	if !errors.Is(err, ErrUpstreamRead) {
+		t.Fatalf("forwardResponse error = %v, want ErrUpstreamRead", err)
+	}
+}
+
+type readOnceErrorCloser struct {
+	body []byte
+	err  error
+	done bool
+}
+
+func (r *readOnceErrorCloser) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	r.done = true
+	return copy(p, r.body), r.err
+}
+
+func (r *readOnceErrorCloser) Close() error { return nil }
+
+type failingResponseWriter struct {
+	header http.Header
+	err    error
+}
+
+func (w *failingResponseWriter) Header() http.Header       { return w.header }
+func (w *failingResponseWriter) WriteHeader(int)           {}
+func (w *failingResponseWriter) Write([]byte) (int, error) { return 0, w.err }
+
 func TestStreamSSEForwardsLargeDataLine(t *testing.T) {
 	engine := NewEngine(StreamConfig{})
 	largeContent := strings.Repeat("x", oversizedScannerDefaultLineSize)
@@ -127,8 +351,8 @@ func TestStreamSSERejectsOversizedDataLine(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	if _, err := engine.streamSSE(recorder, resp); err == nil {
-		t.Fatal("streamSSE accepted an oversized SSE data line")
+	if _, err := engine.streamSSE(recorder, resp); !errors.Is(err, ErrUpstreamRead) {
+		t.Fatalf("streamSSE error = %v, want ErrUpstreamRead", err)
 	}
 }
 

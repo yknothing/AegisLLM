@@ -40,7 +40,7 @@ type Template struct {
 // the runtime `max_concurrency` virtual-key claim when an external issuer uses
 // these templates; a non-zero deployment default remains the runtime ceiling.
 // The templates include only OpenAI-compatible model names for providers
-// enabled by the v0.2.0 runtime. BYOK is reserved and intentionally omitted
+// enabled by the v0.2.1 runtime. BYOK is reserved and intentionally omitted
 // until owner/provider binding exists.
 func DefaultTemplates() map[Tier]Template {
 	return map[Tier]Template{

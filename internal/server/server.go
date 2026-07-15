@@ -83,8 +83,8 @@ func New(cfg *config.Config, logger *slog.Logger, opts ...Option) (*Server, erro
 	srv.pipeline = pipeline
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/", pipeline.ServeHTTP)
-	mux.HandleFunc("/health", srv.healthHandler)
+	mux.HandleFunc("POST /v1/chat/completions", pipeline.ServeHTTP)
+	mux.HandleFunc("GET /health", srv.healthHandler)
 
 	srv.httpServer = &http.Server{
 		Addr:         cfg.Server.Address,

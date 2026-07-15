@@ -69,6 +69,70 @@ func TestPipelineAbortStopsInnerMiddleware(t *testing.T) {
 	}
 }
 
+func TestPipelineFailsClosedWhenChainHasNoTerminalResponse(t *testing.T) {
+	pipeline := testPipeline()
+	pipeline.Use(func(ctx *RequestContext, next func()) {
+		next()
+	})
+
+	recorder := httptest.NewRecorder()
+	pipeline.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusInternalServerError)
+	}
+	if body := recorder.Body.String(); body != `{"error":{"message":"gateway pipeline produced no response","type":"server_error"}}` {
+		t.Fatalf("body = %q, want fail-closed pipeline error", body)
+	}
+}
+
+func TestPipelineStatusAccountingDoesNotBypassTerminalGuard(t *testing.T) {
+	pipeline := testPipeline()
+	pipeline.Use(func(ctx *RequestContext, next func()) {
+		ctx.StatusCode = http.StatusNoContent
+	})
+
+	recorder := httptest.NewRecorder()
+	pipeline.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d when middleware records status without writing a response", recorder.Code, http.StatusInternalServerError)
+	}
+}
+
+func TestPipelineAcceptsCommittedTerminalResponseWithoutManualStatusAccounting(t *testing.T) {
+	pipeline := testPipeline()
+	pipeline.Use(func(ctx *RequestContext, next func()) {
+		ctx.Writer.WriteHeader(http.StatusNoContent)
+	})
+
+	recorder := httptest.NewRecorder()
+	pipeline.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNoContent)
+	}
+}
+
+func TestPipelineTrackingWriterPreservesFlusher(t *testing.T) {
+	pipeline := testPipeline()
+	pipeline.Use(func(ctx *RequestContext, next func()) {
+		flusher, ok := ctx.Writer.(http.Flusher)
+		if !ok {
+			t.Fatal("tracking response writer did not preserve http.Flusher")
+		}
+		ctx.Writer.WriteHeader(http.StatusOK)
+		flusher.Flush()
+	})
+
+	recorder := httptest.NewRecorder()
+	pipeline.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
+
+	if !recorder.Flushed {
+		t.Fatal("tracking response writer did not flush the underlying writer")
+	}
+}
+
 func TestPipelineClosesProviderAPIKeyAfterRequest(t *testing.T) {
 	pipeline := testPipeline()
 	rawSecret := []byte("provider-secret")
@@ -86,6 +150,22 @@ func TestPipelineClosesProviderAPIKeyAfterRequest(t *testing.T) {
 	}
 	if !bytes.Equal(rawSecret, make([]byte, len(rawSecret))) {
 		t.Fatal("provider API key buffer was not zeroed")
+	}
+}
+
+func TestPipelineZeroesOwnedRequestBodyAfterRequest(t *testing.T) {
+	pipeline := testPipeline()
+	rawBody := []byte("sensitive prompt")
+	pipeline.Use(func(ctx *RequestContext, next func()) {
+		ctx.RequestBody = rawBody
+		ctx.RequestBodyLoaded = true
+		ctx.StatusCode = http.StatusNoContent
+	})
+
+	pipeline.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
+
+	if !bytes.Equal(rawBody, make([]byte, len(rawBody))) {
+		t.Fatal("owned request body was not zeroed after request")
 	}
 }
 

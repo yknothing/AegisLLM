@@ -17,6 +17,10 @@ import (
 	"github.com/yknothing/AegisLLM/internal/utils"
 )
 
+// MaxKeyIDBytes is the shared configuration and backend bound for provider
+// credential identifiers.
+const MaxKeyIDBytes = 128
+
 // Common errors returned by KMS implementations.
 var (
 	ErrKeyNotFound      = errors.New("kms: key not found")

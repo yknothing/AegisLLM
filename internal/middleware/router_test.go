@@ -167,6 +167,51 @@ func TestRouterEnforcesBodyLimit(t *testing.T) {
 	}
 }
 
+func TestRouterDoesNotOpenProviderCircuitForLocalGatewayFailures(t *testing.T) {
+	router := Router(routerTestConfig())
+
+	for attempt := 1; attempt <= 6; attempt++ {
+		ctx := routerTestContext(`{"model":"gpt-4o","messages":[]}`, []string{routerTestModel})
+		calledNext := false
+		router(ctx, func() {
+			calledNext = true
+			ctx.StatusCode = http.StatusServiceUnavailable
+		})
+
+		if !calledNext {
+			t.Fatalf("attempt %d did not reach local downstream middleware; provider circuit was polluted by a gateway-local failure", attempt)
+		}
+	}
+}
+
+func TestRouterOpensProviderCircuitForProviderFailures(t *testing.T) {
+	router := Router(routerTestConfig())
+
+	for attempt := 1; attempt <= 5; attempt++ {
+		ctx := routerTestContext(`{"model":"gpt-4o","messages":[]}`, []string{routerTestModel})
+		calledNext := false
+		router(ctx, func() {
+			calledNext = true
+			ctx.StatusCode = http.StatusServiceUnavailable
+			ctx.ProviderResponded = true
+			ctx.ProviderFailure = true
+		})
+		if !calledNext {
+			t.Fatalf("attempt %d did not reach provider", attempt)
+		}
+	}
+
+	ctx := routerTestContext(`{"model":"gpt-4o","messages":[]}`, []string{routerTestModel})
+	calledNext := false
+	router(ctx, func() { calledNext = true })
+	if calledNext {
+		t.Fatal("provider request reached downstream after circuit threshold")
+	}
+	if ctx.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", ctx.StatusCode, http.StatusServiceUnavailable)
+	}
+}
+
 func routerTestContext(body string, permissions []string) *server.RequestContext {
 	return &server.RequestContext{
 		Request:     httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)),

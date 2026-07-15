@@ -10,6 +10,8 @@ import (
 	"encoding/pem"
 	"log/slog"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -91,6 +93,46 @@ func TestBuildTLSConfigWithoutCAUsesTLS13WithoutClientCert(t *testing.T) {
 	}
 	if tlsConfig.ClientCAs != nil {
 		t.Fatal("ClientCAs is set without ca_file")
+	}
+}
+
+func TestServerExposesOnlySupportedDataPlaneRoute(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		wantStatus int
+		wantCalled bool
+	}{
+		{name: "supported chat completion", method: http.MethodPost, path: "/v1/chat/completions", wantStatus: http.StatusNoContent, wantCalled: true},
+		{name: "wrong method", method: http.MethodGet, path: "/v1/chat/completions", wantStatus: http.StatusMethodNotAllowed},
+		{name: "unsupported v1 path", method: http.MethodPost, path: "/v1/models", wantStatus: http.StatusNotFound},
+		{name: "arbitrary v1 path", method: http.MethodDelete, path: "/v1/anything", wantStatus: http.StatusNotFound},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			called := false
+			cfg := &config.Config{Server: testValidServerConfig()}
+			srv, err := New(cfg, slog.Default(), WithMiddleware(func(ctx *RequestContext, next func()) {
+				called = true
+				ctx.StatusCode = http.StatusNoContent
+				ctx.Writer.WriteHeader(http.StatusNoContent)
+			}))
+			if err != nil {
+				t.Fatalf("New returned error: %v", err)
+			}
+
+			recorder := httptest.NewRecorder()
+			srv.httpServer.Handler.ServeHTTP(recorder, httptest.NewRequest(tt.method, tt.path, nil))
+
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", recorder.Code, tt.wantStatus)
+			}
+			if called != tt.wantCalled {
+				t.Fatalf("pipeline called = %t, want %t", called, tt.wantCalled)
+			}
+		})
 	}
 }
 

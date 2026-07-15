@@ -111,13 +111,15 @@ type Limiter interface {
 // --- In-Memory Limiter (Standalone Mode) ---
 
 type memoryLimiter struct {
-	mu      sync.Mutex
-	windows map[string]*slidingWindow
-	conc    map[string]*concurrencyTracker
+	mu         sync.Mutex
+	windows    map[string]*slidingWindow
+	conc       map[string]*concurrencyTracker
+	operations uint64
 }
 
 type slidingWindow struct {
 	counts []timestampedCount
+	window time.Duration
 }
 
 type timestampedCount struct {
@@ -128,6 +130,8 @@ type timestampedCount struct {
 type concurrencyTracker struct {
 	current int
 }
+
+const memoryLimiterCleanupEvery = 256
 
 func newMemoryLimiter() *memoryLimiter {
 	return &memoryLimiter{
@@ -144,15 +148,21 @@ func (m *memoryLimiter) Allow(key, dimension string, limit int, window time.Dura
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	now := time.Now()
+	m.operations++
+	if m.operations%memoryLimiterCleanupEvery == 0 {
+		m.cleanupExpiredWindows(now)
+	}
+
 	compositeKey := key + ":" + dimension
 	sw, ok := m.windows[compositeKey]
 	if !ok {
-		sw = &slidingWindow{}
+		sw = &slidingWindow{window: window}
 		m.windows[compositeKey] = sw
 	}
+	sw.window = window
 
 	// Evict expired entries
-	now := time.Now()
 	cutoff := now.Add(-window)
 	valid := sw.counts[:0]
 	total := 0
@@ -170,6 +180,27 @@ func (m *memoryLimiter) Allow(key, dimension string, limit int, window time.Dura
 
 	sw.counts = append(sw.counts, timestampedCount{time: now, count: 1})
 	return true, nil
+}
+
+func (m *memoryLimiter) cleanupExpiredWindows(now time.Time) {
+	for key, sw := range m.windows {
+		if sw.window <= 0 {
+			delete(m.windows, key)
+			continue
+		}
+		cutoff := now.Add(-sw.window)
+		valid := sw.counts[:0]
+		for _, tc := range sw.counts {
+			if tc.time.After(cutoff) {
+				valid = append(valid, tc)
+			}
+		}
+		if len(valid) == 0 {
+			delete(m.windows, key)
+			continue
+		}
+		sw.counts = valid
+	}
 }
 
 func (m *memoryLimiter) AcquireConcurrency(key string, maxConc int) (bool, func()) {
@@ -191,10 +222,18 @@ func (m *memoryLimiter) AcquireConcurrency(key string, maxConc int) (bool, func(
 	}
 
 	ct.current++
+	released := false
 	release := func() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
+		if released {
+			return
+		}
+		released = true
 		ct.current--
+		if ct.current == 0 && m.conc[key] == ct {
+			delete(m.conc, key)
+		}
 	}
 
 	return true, release

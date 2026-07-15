@@ -49,7 +49,7 @@ func Router(cfg RouterConfig) server.Middleware {
 
 	return func(ctx *server.RequestContext, next func()) {
 		// Extract requested model from the request
-		model, streaming, err := extractModelFromRequest(ctx.Request, cfg.MaxRequestBodySize)
+		model, streaming, err := extractModelFromRequest(ctx, cfg.MaxRequestBodySize)
 		if errors.Is(err, errRequestBodyTooLarge) {
 			ctx.Abort(http.StatusRequestEntityTooLarge, []byte(`{"error":{"message":"request body too large","type":"invalid_request_error"}}`))
 			return
@@ -86,10 +86,11 @@ func Router(cfg RouterConfig) server.Middleware {
 
 		next()
 
-		// After request: update circuit breaker based on response
-		if ctx.StatusCode >= 500 || ctx.StatusCode == 429 {
+		// After request: only the proxy boundary may update provider health.
+		// Gateway-local KMS, adapter, or policy failures must not poison it.
+		if ctx.ProviderFailure {
 			rt.RecordFailure(channel.ID)
-		} else if ctx.StatusCode > 0 && ctx.StatusCode < 400 {
+		} else if ctx.ProviderResponded && ctx.StatusCode > 0 && ctx.StatusCode < 400 {
 			rt.RecordSuccess(channel.ID)
 		}
 	}
@@ -234,8 +235,8 @@ func (cb *circuitBreaker) RecordSuccess() {
 
 // --- Helper Functions ---
 
-func extractModelFromRequest(r *http.Request, limit int64) (string, bool, error) {
-	body, err := readAndReplaceBody(r, limit)
+func extractModelFromRequest(ctx *server.RequestContext, limit int64) (string, bool, error) {
+	body, err := readRequestBody(ctx, limit)
 	if err != nil {
 		return "", false, err
 	}

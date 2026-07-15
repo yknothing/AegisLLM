@@ -17,6 +17,8 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -41,6 +43,10 @@ type StreamConfig struct {
 	// AllowedDomains restricts outbound connections (egress filtering).
 	// SECURITY: Only these domains can be contacted.
 	AllowedDomains []string
+
+	// RootCAs overrides the system trust store when non-nil. Runtime config does
+	// not expose this field; it exists for hermetic composition verification.
+	RootCAs *x509.CertPool
 }
 
 // Engine is the core streaming proxy that forwards requests to LLM providers.
@@ -80,6 +86,15 @@ const (
 	sseScannerMaxLineSize       = 1 << 20
 )
 
+// ErrUpstreamTransport classifies provider transport failures that should
+// contribute to circuit-breaker health. Configuration and client-cancellation
+// errors are deliberately excluded from this class.
+var ErrUpstreamTransport = errors.New("upstream transport failure")
+
+// ErrUpstreamRead classifies invalid or interrupted provider response bodies.
+// Client response-write failures are deliberately excluded from this class.
+var ErrUpstreamRead = errors.New("upstream response read failure")
+
 // NewEngine creates a new streaming proxy engine.
 func NewEngine(cfg StreamConfig) *Engine {
 	if cfg.MaxRequestBodySize <= 0 {
@@ -89,12 +104,18 @@ func NewEngine(cfg StreamConfig) *Engine {
 		cfg.StreamTimeout = 5 * time.Minute
 	}
 
+	var rootCAs *x509.CertPool
+	if cfg.RootCAs != nil {
+		rootCAs = cfg.RootCAs.Clone()
+	}
+
 	// Configure HTTP client with security-hardened settings
 	transport := &http.Transport{
 		MaxIdleConnsPerHost: 100,
 		IdleConnTimeout:     90 * time.Second,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS13,
+			RootCAs:    rootCAs,
 		},
 	}
 
@@ -165,6 +186,9 @@ func (e *Engine) ProxyRequest(
 	upstreamReq.Header.Del("Authorization")
 	apiKey.Close()
 	if err != nil {
+		if ctx.Err() == nil {
+			return nil, fmt.Errorf("%w: %v", ErrUpstreamTransport, err)
+		}
 		return nil, fmt.Errorf("upstream request failed: %w", err)
 	}
 	defer func() {
@@ -179,11 +203,17 @@ func (e *Engine) ProxyRequest(
 		// Stream SSE response with real-time token counting
 		result.OutputTokens, err = e.streamSSE(w, resp)
 		if err != nil {
+			if ctx.Err() != nil {
+				return result, fmt.Errorf("request context ended: %w", ctx.Err())
+			}
 			return result, fmt.Errorf("streaming failed: %w", err)
 		}
 	} else {
 		// Non-streaming: forward response directly
 		if err := e.forwardResponse(w, resp); err != nil {
+			if ctx.Err() != nil {
+				return result, fmt.Errorf("request context ended: %w", ctx.Err())
+			}
 			return result, fmt.Errorf("forwarding response failed: %w", err)
 		}
 	}
@@ -233,7 +263,7 @@ func (e *Engine) streamSSE(w http.ResponseWriter, resp *http.Response) (int64, e
 	}
 
 	if err := scanner.Err(); err != nil {
-		return tokenCount.Load(), fmt.Errorf("reading upstream stream: %w", err)
+		return tokenCount.Load(), fmt.Errorf("%w: %v", ErrUpstreamRead, err)
 	}
 
 	return tokenCount.Load(), nil
@@ -245,10 +275,44 @@ func (e *Engine) forwardResponse(w http.ResponseWriter, resp *http.Response) err
 	w.WriteHeader(resp.StatusCode)
 
 	// Stream body without full buffering
-	if _, err := io.Copy(w, resp.Body); err != nil {
-		return err
+	upstream := &upstreamResponseReader{reader: resp.Body}
+	downstream := &downstreamResponseWriter{writer: w}
+	if _, err := io.Copy(downstream, upstream); err != nil {
+		if downstream.writeErr != nil {
+			return fmt.Errorf("writing response to client: %w", downstream.writeErr)
+		}
+		if upstream.readErr != nil {
+			return fmt.Errorf("%w: %v", ErrUpstreamRead, upstream.readErr)
+		}
+		return fmt.Errorf("writing response to client: %w", err)
 	}
 	return nil
+}
+
+type downstreamResponseWriter struct {
+	writer   io.Writer
+	writeErr error
+}
+
+func (w *downstreamResponseWriter) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	if err != nil {
+		w.writeErr = err
+	}
+	return n, err
+}
+
+type upstreamResponseReader struct {
+	reader  io.Reader
+	readErr error
+}
+
+func (r *upstreamResponseReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) {
+		r.readErr = err
+	}
+	return n, err
 }
 
 // validateEgress checks if the target URL's domain is in the allowlist.

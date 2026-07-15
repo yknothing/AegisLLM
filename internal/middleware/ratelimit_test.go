@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -137,6 +138,43 @@ func TestRateLimiterEnforcesRPMWithMemoryLimiter(t *testing.T) {
 	}
 	if secondCtx.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("second status = %d, want %d", secondCtx.StatusCode, http.StatusTooManyRequests)
+	}
+}
+
+func TestMemoryLimiterEvictsExpiredWindowsDuringKeyChurn(t *testing.T) {
+	const cleanupTriggerRequests = 1024
+	limiter := newMemoryLimiter()
+	if allowed, err := limiter.Allow("expired-key", "rpm", 1, time.Minute); err != nil || !allowed {
+		t.Fatalf("initial Allow = allowed:%t err:%v, want success", allowed, err)
+	}
+	limiter.windows["expired-key:rpm"].counts[0].time = time.Now().Add(-2 * time.Minute)
+
+	for i := 0; i < cleanupTriggerRequests; i++ {
+		key := fmt.Sprintf("active-key-%d", i)
+		if allowed, err := limiter.Allow(key, "rpm", 1, time.Minute); err != nil || !allowed {
+			t.Fatalf("Allow(%q) = allowed:%t err:%v, want success", key, allowed, err)
+		}
+	}
+
+	if _, exists := limiter.windows["expired-key:rpm"]; exists {
+		t.Fatal("expired RPM window remained after periodic cleanup")
+	}
+}
+
+func TestMemoryLimiterDeletesIdleConcurrencyTrackerOnRelease(t *testing.T) {
+	limiter := newMemoryLimiter()
+	acquired, release := limiter.AcquireConcurrency("vk_test", 1)
+	if !acquired {
+		t.Fatal("AcquireConcurrency rejected the first slot")
+	}
+	if len(limiter.conc) != 1 {
+		t.Fatalf("tracker count = %d, want 1 while request is active", len(limiter.conc))
+	}
+
+	release()
+
+	if len(limiter.conc) != 0 {
+		t.Fatalf("tracker count = %d, want 0 after final release", len(limiter.conc))
 	}
 }
 
