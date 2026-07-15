@@ -103,7 +103,7 @@ AEGIS_JWT_KEY="$jwt_key" \
 cat "$issue_status" >&2
 virtual_key_id=$(sed -n 's/^virtual_key_issued kid=\([^ ]*\).*/\1/p' "$issue_status")
 test -n "$virtual_key_id"
-test "$(stat -f '%Lp' "$virtual_key_path" 2>/dev/null || stat -c '%a' "$virtual_key_path")" = "600"
+test "$(stat -c '%a' "$virtual_key_path" 2>/dev/null || stat -f '%Lp' "$virtual_key_path")" = "600"
 
 AEGIS_MASTER_KEY="$master_key" \
 AEGIS_JWT_KEY="$jwt_key" \
