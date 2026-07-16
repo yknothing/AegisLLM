@@ -22,6 +22,7 @@ Independent repository `yknothing/AegisLLM-QA`:
 - `internal/harness/workspace.go`: synthetic canaries, config, certificate, and state workspace.
 - `internal/suite/suite.go`: required-case fail-closed runner.
 - `internal/suite/baseline.go`: artifact, operator, HTTP, revocation, fail-closed, and confidentiality cases.
+- `Dockerfile.runner`: scratch test image containing only the already-built QA runner and SUT.
 - `.github/workflows/ci.yml`, `.github/CODEOWNERS`, `README.md`, `BASELINE.md`, `GOVERNANCE.md`.
 
 Source repository `yknothing/AegisLLM`:
@@ -182,6 +183,7 @@ Panic details must be classified without persisting the raw panic value.
 
 ```text
 artifact_identity
+network_namespace_isolation
 operator_lifecycle
 http_unauthenticated_no_egress
 http_authenticated_provider_success
@@ -191,7 +193,7 @@ unsupported_capabilities_fail_closed
 secret_canary_confinement
 ```
 
-- [ ] Give every registered case a fresh fixture and independent cleanup. `operator_lifecycle` performs init/import/issue as one coherent journey; authenticated and revoked HTTP cases each perform their own setup. Do not use package globals or rely on case order.
+- [ ] Give every registered case a fresh fixture and independent cleanup. `network_namespace_isolation` requires Linux, only `lo` under `/sys/class/net`, and no non-loopback/default route in `/proc/net/route`. `operator_lifecycle` performs init/import/issue as one coherent journey; authenticated and revoked HTTP cases each perform their own setup. Do not use package globals or rely on case order.
 - [ ] Execute the real binary to verify: pre-run digest; Go build info `vcs.revision`/`vcs.modified=false`/toolchain; exact version; `0600` revocation state; provider-key import via stdin without echo; exclusive `0600` token issue; health; unauthenticated `401` with provider hit delta zero; authenticated TLS provider `200`; PII redaction; correct provider credential and no client credential upstream; revocation propagation; unsupported routes/config fail closed; post-run digest unchanged; gateway logs, state, error bodies, and report projection obey per-surface canary allowlists.
 - [ ] Poll revocation with an authenticated but syntactically invalid body: accept `400` before refresh and require `401` after refresh, so polling can never reach the provider. After observing `401`, send one valid body and require `401` plus an unchanged provider hit count.
 - [ ] Keep expected provider-key/prompt/completion/error appearances only in explicitly scoped captures. Permit the virtual key only in its owner-only token file and client input. Every defer path, including failure and panic, scans logs/state before deletion; CLI output contains classifications only. Then delete the workspace and never copy a raw canary to evidence.
@@ -211,9 +213,10 @@ secret_canary_confinement
 
 ## Task 8: Add QA Governance, Documentation, and CI
 
-**Files:** Create `.github/workflows/ci.yml`, `.github/CODEOWNERS`, `README.md`, `BASELINE.md`, `GOVERNANCE.md`, `testdata/README.md`.
+**Files:** Create `.github/workflows/ci.yml`, `.github/CODEOWNERS`, `Dockerfile.runner`, `README.md`, `BASELINE.md`, `GOVERNANCE.md`, `testdata/README.md`.
 
 - [ ] Pin checkout/setup-go actions. Run Go 1.22.4 compatibility plus Go 1.26.5 race/shuffle. Use `permissions: contents: read`, no secrets, and assert `go list -m all` contains only the QA module.
+- [ ] `Dockerfile.runner` uses `FROM scratch` and only `COPY --chmod=0555` for prebuilt `aegis-qa` and `aegis`; it has no build stage and therefore cannot rebuild the SUT.
 - [ ] Document separate source/QA PRs, immutable binding tuple, synthetic-only data, P0 no-waiver, seven-day P1/P2 waiver, stale/latest-push review, no routine bypass, and evidence retention.
 - [ ] Bootstrap CODEOWNERS with `@yknothing` but explicitly mark this as repository administration, not independent-human completion. Future baseline changes remain blocked until a real QA reviewer is granted write access and added as owner.
 - [ ] Run `go test -race -shuffle=on -count=3 ./...`, `go vet ./...`, `gofmt -l .`, and `git diff --check`.
@@ -233,7 +236,7 @@ secret_canary_confinement
 **Files:** Create `qa-baseline.lock`, `.github/workflows/independent-qa.yml`, `.github/CODEOWNERS`, `docs/independent-qa.md`; modify `scripts/release_preflight.sh`.
 
 - [ ] Write a placeholder-free JSON lock containing schema `1`, repository `yknothing/AegisLLM-QA`, and the exact published 40-hex QA SHA.
-- [ ] Add workflow job `Independent QA baseline`: source checkout with `persist-credentials:false`; set tested SHA from `git rev-parse HEAD` and separately record PR head/base SHAs; Go 1.26.5; build Aegis once with full tested SHA and VCS metadata; compute digest; strictly parse a fixed repository/schema and 40-lowercase-hex lock; checkout exact QA commit into a separate workspace with `persist-credentials:false`; verify checkout SHA and that it is an ancestor of fetched QA `origin/main`; run QA unit tests; build the QA runner with its QA SHA embedded; run `run`, rehash, then run `verify` against external expectations.
+- [ ] Add workflow job `Independent QA baseline`: source checkout with `persist-credentials:false`; set tested SHA from `git rev-parse HEAD` and separately record PR head/base SHAs; Go 1.26.5; build Aegis once with full tested SHA and VCS metadata; compute digest; strictly parse a fixed repository/schema and 40-lowercase-hex lock; checkout exact QA commit into a separate workspace with `persist-credentials:false`; verify checkout SHA and that it is an ancestor of fetched QA `origin/main`; run QA unit tests; build the QA runner with its QA SHA embedded; create the scratch runner image without rebuilding SUT; run it as the host UID with `--network none --read-only`, a `noexec,nosuid` tmpfs, and a single evidence bind mount; rehash the host SUT, then run `verify` against external expectations.
 - [ ] Upload with `if: always()` only the exact `report-v1.json`, `if-no-files-found: error`, and 30-day retention. Record the returned artifact digest/run ID when available; never upload raw logs or captures.
 - [ ] Add `QA baseline change isolation`: after bootstrap, a PR changing `qa-baseline.lock` must change only that file. The bootstrap case may allow only the exact initial governance/workflow/design file set and ceases to apply once the base contains the lock.
 - [ ] Give workflow `contents: read` only. Pin action SHAs. Never use `pull_request_target`, real provider secrets, or an unpinned QA branch.
