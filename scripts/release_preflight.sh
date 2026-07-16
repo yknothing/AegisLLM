@@ -16,7 +16,18 @@ fi
 "$GO_BIN" test -race -count=1 ./...
 make lint GO="$GO_BIN"
 make security GO="$GO_BIN"
-"$GO_BIN" run "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}" .github/workflows/ci.yml
+workflow_count=0
+for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
+  if [ ! -f "$workflow" ]; then
+    continue
+  fi
+  "$GO_BIN" run "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}" "$workflow"
+  workflow_count=$((workflow_count + 1))
+done
+if [ "$workflow_count" -eq 0 ]; then
+  echo "no GitHub Actions workflows found" >&2
+  exit 1
+fi
 git diff --check
 
 default_tags=$(make -n docker VERSION="$VERSION")

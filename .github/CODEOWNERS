@@ -1,0 +1,9 @@
+# Bootstrap governance owner. Replace or join @yknothing with the real
+# independent QA reviewer before claiming independent-human ownership.
+/qa-baseline.lock @yknothing
+/.github/CODEOWNERS @yknothing
+/.github/workflows/** @yknothing
+/docs/independent-qa.md @yknothing
+/docs/superpowers/specs/2026-07-16-independent-qa-baseline-design.md @yknothing
+/docs/superpowers/plans/2026-07-16-independent-qa-baseline.md @yknothing
+/scripts/release_preflight.sh @yknothing

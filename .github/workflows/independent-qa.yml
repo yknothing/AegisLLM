@@ -1,0 +1,418 @@
+name: Independent QA
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+      - 'codex/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  independent-qa:
+    name: Independent QA baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      QA_REPOSITORY: yknothing/AegisLLM-QA
+      SOURCE_REPOSITORY: ${{ github.repository }}
+      SUT: /tmp/aegis-independent-qa-${{ github.run_id }}-${{ github.run_attempt }}/sut/aegis
+      QA_RUNNER: /tmp/aegis-independent-qa-${{ github.run_id }}-${{ github.run_attempt }}/aegis-qa
+      IMAGE_CONTEXT: /tmp/aegis-independent-qa-${{ github.run_id }}-${{ github.run_attempt }}/image
+      IMAGE_TAG: aegis-independent-qa:${{ github.run_id }}
+      EVIDENCE_DIR: /tmp/aegis-independent-qa-${{ github.run_id }}-${{ github.run_attempt }}/evidence
+      REPORT_PATH: /tmp/aegis-independent-qa-${{ github.run_id }}-${{ github.run_attempt }}/evidence/report-v1.json
+      UPLOAD_DIR: /tmp/aegis-independent-qa-${{ github.run_id }}-${{ github.run_attempt }}/upload
+      UPLOAD_PATH: /tmp/aegis-independent-qa-${{ github.run_id }}-${{ github.run_attempt }}/upload/report-v1.json
+      RUN_RC: '1'
+      VERIFY_RC: '1'
+      DIGEST_RC: '1'
+      REPORT_RC: '1'
+    steps:
+      - name: Checkout candidate source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up pinned Go toolchain
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.26.5'
+          cache: true
+
+      - name: Validate source identity, QA lock, and change isolation
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EXPECTED_SOURCE_SHA: ${{ github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          is_oid() {
+            [[ "$1" =~ ^[0-9a-f]{40}$ ]]
+          }
+
+          SOURCE_SHA="$(git rev-parse --verify 'HEAD^{commit}')"
+          is_oid "$SOURCE_SHA"
+          is_oid "$EXPECTED_SOURCE_SHA"
+          [[ "$SOURCE_SHA" == "$EXPECTED_SOURCE_SHA" ]] || {
+            echo "tested checkout does not match github.sha" >&2
+            exit 1
+          }
+
+          expected_origin="https://github.com/${SOURCE_REPOSITORY}"
+          actual_origin="$(git remote get-url origin)"
+          [[ "$actual_origin" == "$expected_origin" || "$actual_origin" == "${expected_origin}.git" ]] || {
+            echo "candidate checkout has an unexpected origin" >&2
+            exit 1
+          }
+          if git config --local --get-regexp '^http\..*\.extraheader$' >/dev/null 2>&1; then
+            echo "candidate checkout retained HTTP credentials" >&2
+            exit 1
+          fi
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            is_oid "$PR_HEAD_SHA"
+            is_oid "$PR_BASE_SHA"
+            HEAD_SHA="$PR_HEAD_SHA"
+            BASE_SHA="$PR_BASE_SHA"
+            git merge-base --is-ancestor "$HEAD_SHA" "$SOURCE_SHA"
+            git merge-base --is-ancestor "$BASE_SHA" "$SOURCE_SHA"
+          else
+            [[ -z "$PR_HEAD_SHA" && -z "$PR_BASE_SHA" ]] || {
+              echo "non-PR event unexpectedly supplied PR provenance" >&2
+              exit 1
+            }
+            HEAD_SHA="$SOURCE_SHA"
+            BASE_SHA=""
+          fi
+
+          QA_SHA="$(python3 - <<'PY'
+          import json
+          import os
+          import re
+          import stat
+
+          path = "qa-baseline.lock"
+          expected_repository = os.environ["QA_REPOSITORY"]
+
+          def no_duplicate_keys(pairs):
+              value = {}
+              for key, item in pairs:
+                  if key in value:
+                      raise ValueError("duplicate key")
+                  value[key] = item
+              return value
+
+          try:
+              info = os.lstat(path)
+              if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
+                  raise ValueError("invalid lock file")
+              with open(path, "r", encoding="utf-8") as handle:
+                  value = json.load(handle, object_pairs_hook=no_duplicate_keys)
+              if type(value) is not dict:
+                  raise ValueError("invalid root")
+              if set(value) != {"schema_version", "repository", "commit"}:
+                  raise ValueError("invalid keys")
+              if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+                  raise ValueError("invalid schema")
+              if type(value["repository"]) is not str or value["repository"] != expected_repository:
+                  raise ValueError("invalid repository")
+              commit = value["commit"]
+              if type(commit) is not str or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+                  raise ValueError("invalid commit")
+          except (OSError, UnicodeError, json.JSONDecodeError, ValueError, KeyError):
+              raise SystemExit("qa-baseline.lock failed strict validation")
+
+          print(commit)
+          PY
+          )"
+          is_oid "$QA_SHA"
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            mapfile -d '' -t changed < <(
+              git diff --name-only -z "$BASE_SHA...$HEAD_SHA"
+            )
+            lock_changed=false
+            for path in "${changed[@]}"; do
+              [[ "$path" == "qa-baseline.lock" ]] && lock_changed=true
+            done
+            if [[ "$lock_changed" == "true" ]]; then
+              if git cat-file -e "$BASE_SHA:qa-baseline.lock" 2>/dev/null; then
+                [[ "${#changed[@]}" -eq 1 && "${changed[0]}" == "qa-baseline.lock" ]] || {
+                  echo "post-bootstrap QA lock updates must change qa-baseline.lock only" >&2
+                  printf 'changed=%q\n' "${changed[@]}" >&2
+                  exit 1
+                }
+              else
+                allowed=(
+                  '.github/CODEOWNERS'
+                  '.github/workflows/independent-qa.yml'
+                  'docs/independent-qa.md'
+                  'docs/superpowers/plans/2026-07-16-independent-qa-baseline.md'
+                  'docs/superpowers/specs/2026-07-16-independent-qa-baseline-design.md'
+                  'qa-baseline.lock'
+                  'scripts/release_preflight.sh'
+                )
+                for path in "${changed[@]}"; do
+                  allowed_path=false
+                  for candidate in "${allowed[@]}"; do
+                    [[ "$path" == "$candidate" ]] && allowed_path=true
+                  done
+                  [[ "$allowed_path" == "true" ]] || {
+                    printf 'unexpected file in independent-QA bootstrap: %q\n' "$path" >&2
+                    exit 1
+                  }
+                done
+              fi
+            fi
+          fi
+
+          [[ -z "$(git status --porcelain --untracked-files=all)" ]] || {
+            echo "candidate checkout is not clean before the single SUT build" >&2
+            exit 1
+          }
+
+          {
+            echo "SOURCE_SHA=$SOURCE_SHA"
+            echo "HEAD_SHA=$HEAD_SHA"
+            echo "BASE_SHA=$BASE_SHA"
+            echo "QA_SHA=$QA_SHA"
+          } >> "$GITHUB_ENV"
+
+      - name: Build the SUT once
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$(dirname "$SUT")" "$EVIDENCE_DIR" "$UPLOAD_DIR"
+          [[ ! -e "$SUT" && ! -e "$REPORT_PATH" && ! -e "$UPLOAD_PATH" ]]
+          [[ -z "$(git status --porcelain)" ]] || {
+            echo "candidate source worktree is dirty before the single SUT build" >&2
+            exit 1
+          }
+          CGO_ENABLED=0 go build -buildvcs=true -trimpath \
+            -ldflags="-s -w -X main.version=independent-qa -X main.commit=$SOURCE_SHA -X main.buildDate=1970-01-01T00:00:00Z" \
+            -o "$SUT" ./cmd/aegis
+          [[ -f "$SUT" && ! -L "$SUT" && -x "$SUT" ]]
+          ARTIFACT_SHA256="$(sha256sum "$SUT" | awk '{print $1}')"
+          [[ "$ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          echo "ARTIFACT_SHA256=$ARTIFACT_SHA256" >> "$GITHUB_ENV"
+
+      - name: Checkout pinned independent QA
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: ${{ env.QA_REPOSITORY }}
+          ref: ${{ env.QA_SHA }}
+          path: .independent-qa
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify QA provenance and module isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_origin="https://github.com/${QA_REPOSITORY}"
+          actual_origin="$(git -C .independent-qa remote get-url origin)"
+          [[ "$actual_origin" == "$expected_origin" || "$actual_origin" == "${expected_origin}.git" ]] || {
+            echo "QA checkout has an unexpected origin" >&2
+            exit 1
+          }
+          if git -C .independent-qa config --local --get-regexp '^http\..*\.extraheader$' >/dev/null 2>&1; then
+            echo "QA checkout retained HTTP credentials" >&2
+            exit 1
+          fi
+          [[ "$(git -C .independent-qa rev-parse --verify 'HEAD^{commit}')" == "$QA_SHA" ]]
+          [[ "$(git -C .independent-qa cat-file -t "$QA_SHA")" == "commit" ]]
+          git -C .independent-qa fetch --no-tags \
+            "https://github.com/${QA_REPOSITORY}.git" \
+            +refs/heads/main:refs/remotes/origin/main
+          git -C .independent-qa merge-base --is-ancestor \
+            "$QA_SHA" refs/remotes/origin/main
+
+          module_json="$(cd .independent-qa && GOWORK=off go mod edit -json)"
+          jq -e --arg module "github.com/${QA_REPOSITORY}" '
+            .Module.Path == $module and
+            .Require == null and
+            .Exclude == null and
+            .Replace == null and
+            .Retract == null and
+            .Tool == null and
+            .Ignore == null
+          ' <<<"$module_json" >/dev/null
+          module_output="$(cd .independent-qa && GOWORK=off GOFLAGS=-mod=readonly go list -m all)"
+          [[ "$module_output" == "github.com/${QA_REPOSITORY}" ]]
+          [[ -z "$(git -C .independent-qa status --porcelain)" ]]
+
+      - name: Test and build independent QA runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd .independent-qa
+          GOWORK=off GOFLAGS=-mod=readonly go test -race -shuffle=on -count=1 ./...
+          GOWORK=off GOFLAGS=-mod=readonly go vet ./...
+          [[ -z "$(git status --porcelain)" ]]
+          CGO_ENABLED=0 GOWORK=off GOFLAGS=-mod=readonly go build \
+            -buildvcs=true -trimpath \
+            -ldflags="-s -w -X main.qaCommit=$QA_SHA" \
+            -o "$QA_RUNNER" ./cmd/aegis-qa
+          [[ -f "$QA_RUNNER" && ! -L "$QA_RUNNER" && -x "$QA_RUNNER" ]]
+
+      - name: Build fixed scratch runner image
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$IMAGE_CONTEXT"
+          cp "$SUT" "$IMAGE_CONTEXT/aegis"
+          cp "$QA_RUNNER" "$IMAGE_CONTEXT/aegis-qa"
+          printf '%s\n' \
+            'FROM scratch' \
+            '' \
+            'COPY --chmod=0555 aegis-qa /qa/aegis-qa' \
+            'COPY --chmod=0555 aegis /qa/aegis' \
+            '' \
+            'WORKDIR /qa' \
+            'USER 65532:65532' \
+            'ENTRYPOINT ["/qa/aegis-qa"]' \
+            > "$IMAGE_CONTEXT/Dockerfile"
+          cmp "$IMAGE_CONTEXT/Dockerfile" .independent-qa/Dockerfile.runner
+          [[ "$(sha256sum "$IMAGE_CONTEXT/aegis" | awk '{print $1}')" == "$ARTIFACT_SHA256" ]]
+          [[ "$(find "$IMAGE_CONTEXT" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" == "3" ]]
+          docker build --network=none --pull=false \
+            -t "$IMAGE_TAG" "$IMAGE_CONTEXT"
+
+          image_probe="${IMAGE_CONTEXT}-aegis-probe"
+          image_container="$(docker create "$IMAGE_TAG")"
+          cleanup() {
+            docker rm -f "$image_container" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker cp "$image_container:/qa/aegis" "$image_probe"
+          [[ "$(sha256sum "$image_probe" | awk '{print $1}')" == "$ARTIFACT_SHA256" ]]
+          cleanup
+          trap - EXIT
+
+      - name: Run black-box baseline
+        id: qa_run
+        shell: bash
+        run: |
+          set +e
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          docker run --rm \
+            --init \
+            --network none \
+            --pids-limit 64 \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --user "${runner_uid}:${runner_gid}" \
+            --tmpfs "/tmp:rw,noexec,nosuid,nodev,size=64m,mode=0700,uid=${runner_uid},gid=${runner_gid}" \
+            --mount "type=bind,src=$EVIDENCE_DIR,dst=/evidence" \
+            "$IMAGE_TAG" run \
+              --sut /qa/aegis \
+              --source-sha "$SOURCE_SHA" \
+              --head-sha "$HEAD_SHA" \
+              --base-sha "$BASE_SHA" \
+              --qa-sha "$QA_SHA" \
+              --artifact-sha256 "$ARTIFACT_SHA256" \
+              --workflow-run-id "$GITHUB_RUN_ID" \
+              --evidence /evidence/report-v1.json \
+              --timeout 120s
+          run_rc=$?
+          echo "RUN_RC=$run_rc" >> "$GITHUB_ENV"
+          exit 0
+
+      - name: Verify evidence and artifact stability
+        id: qa_verify
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          digest_rc=1
+          report_rc=1
+          verify_rc=1
+          report_sha256=""
+
+          if [[ -f "$SUT" && ! -L "$SUT" ]]; then
+            post_sha="$(sha256sum "$SUT" | awk '{print $1}')"
+            [[ "$post_sha" == "${ARTIFACT_SHA256:-}" ]] && digest_rc=0
+          fi
+
+          if [[ -f "$REPORT_PATH" && ! -L "$REPORT_PATH" ]] &&
+             [[ "$(stat -c '%u' "$REPORT_PATH")" == "$(id -u)" ]] &&
+             [[ "$(stat -c '%a' "$REPORT_PATH")" == "600" ]] &&
+             [[ "$(stat -c '%h' "$REPORT_PATH")" == "1" ]] &&
+             [[ "$(stat -c '%s' "$REPORT_PATH")" -le 1048576 ]]; then
+            report_sha256="$(sha256sum "$REPORT_PATH" | awk '{print $1}')"
+            runner_uid="$(id -u)"
+            runner_gid="$(id -g)"
+            docker run --rm \
+              --init \
+              --network none \
+              --pids-limit 64 \
+              --read-only \
+              --cap-drop ALL \
+              --security-opt no-new-privileges \
+              --user "${runner_uid}:${runner_gid}" \
+              --tmpfs "/tmp:rw,noexec,nosuid,nodev,size=64m,mode=0700,uid=${runner_uid},gid=${runner_gid}" \
+              --mount "type=bind,src=$EVIDENCE_DIR,dst=/evidence,readonly" \
+              "$IMAGE_TAG" verify \
+                --sut /qa/aegis \
+                --evidence /evidence/report-v1.json \
+                --expect-source-sha "$SOURCE_SHA" \
+                --expect-head-sha "$HEAD_SHA" \
+                --expect-base-sha "$BASE_SHA" \
+                --expect-qa-sha "$QA_SHA" \
+                --expect-artifact-sha256 "$ARTIFACT_SHA256" \
+                --expect-workflow-run-id "$GITHUB_RUN_ID"
+            verify_rc=$?
+
+            after_verify_sha256="$(sha256sum "$REPORT_PATH" | awk '{print $1}')"
+            if [[ "$after_verify_sha256" == "$report_sha256" ]]; then
+              install -m 0600 "$REPORT_PATH" "$UPLOAD_PATH"
+              if [[ -f "$UPLOAD_PATH" && ! -L "$UPLOAD_PATH" ]] &&
+                 [[ "$(sha256sum "$UPLOAD_PATH" | awk '{print $1}')" == "$report_sha256" ]]; then
+                report_rc=0
+              fi
+            fi
+          fi
+
+          {
+            echo "VERIFY_RC=$verify_rc"
+            echo "DIGEST_RC=$digest_rc"
+            echo "REPORT_RC=$report_rc"
+            echo "REPORT_SHA256=$report_sha256"
+          } >> "$GITHUB_ENV"
+          exit 0
+
+      - name: Upload sanitized QA evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: independent-qa-${{ github.run_id }}
+          path: ${{ env.UPLOAD_PATH }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Enforce independent QA verdict
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'run=%s verify=%s digest=%s report=%s\n' \
+            "$RUN_RC" "$VERIFY_RC" "$DIGEST_RC" "$REPORT_RC"
+          test "$RUN_RC" = "0"
+          test "$VERIFY_RC" = "0"
+          test "$DIGEST_RC" = "0"
+          test "$REPORT_RC" = "0"
+          test -n "${REPORT_SHA256:-}"
+          [[ -f "$UPLOAD_PATH" && ! -L "$UPLOAD_PATH" ]]
+          test "$(sha256sum "$UPLOAD_PATH" | awk '{print $1}')" = "$REPORT_SHA256"

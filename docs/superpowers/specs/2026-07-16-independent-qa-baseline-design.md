@@ -101,8 +101,10 @@ The source workflow performs these steps in order:
 4. Checkout the immutable QA SHA named in `qa-baseline.lock`.
 5. Verify the checked-out QA commit equals the lock.
 6. Run the QA module's own unit tests.
-7. Run the QA CLI against the already-built binary; rebuilding Aegis inside the
-   QA suite is forbidden.
+7. Copy the already-built SUT and QA runner into a minimal Linux test image and
+   run it read-only with `--network none`, a writable tmpfs, and a dedicated
+   evidence mount. The fake provider shares loopback inside that namespace;
+   rebuilding Aegis inside the QA suite or image is forbidden.
 8. Upload a non-secret evidence bundle containing the tested source SHA, PR
    head/base SHAs when applicable, QA SHA, binary SHA-256, toolchain, platform,
    case results, workflow run identity, and explicit gaps.
@@ -148,7 +150,11 @@ flowchart LR
 
 ### HTTP and security-order contract
 
-- Only the documented health and chat-completions routes are reachable.
+- The documented health and chat-completions method/path allowlist works, while
+  a curated sensitive-route/method deny matrix (`/`, `/metrics`,
+  `/debug/pprof`, `/v1/models`, admin paths, and method variants) remains
+  unreachable. This is a bounded black-box contract, not a claim to enumerate
+  every possible path; route fuzzing is a later lane.
 - An unauthenticated request returns `401` and produces zero fake-provider hits.
 - A valid token and supported model traverse a hermetic TLS provider and return
   its synthetic `200` response.
@@ -156,6 +162,9 @@ flowchart LR
 - Provider and client hop-by-hop credentials do not cross the wrong boundary.
 - Unsupported routes, methods, providers, Vault, Redis, quota, TPM, BYOK, and
   reserved adapters fail closed rather than silently degrading.
+- The Linux runner observes only loopback and no default route. Combined with
+  `--network none`, this makes an unexpected external-egress attempt impossible
+  in the required lane rather than merely invisible to fake-provider counters.
 
 ### Confidentiality oracle
 
@@ -249,7 +258,8 @@ The first baseline is accepted only when all of the following are true:
    with no import or filesystem dependency on Aegis source.
 2. Its framework unit tests pass with race detection and randomized order on
    macOS and Linux; the first exact-artifact black-box gate passes on Linux.
-3. The QA runner passes the artifact, operator, authenticated provider `200`,
+3. The QA runner passes network-namespace isolation, artifact, operator,
+   authenticated provider `200`,
    unauthenticated no-egress, revocation, fail-closed, and confidentiality cases
    against one exact locally built binary.
 4. The evidence schema and external-input verifier bind tested/head/base source
