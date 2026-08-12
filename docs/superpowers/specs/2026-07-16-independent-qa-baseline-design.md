@@ -162,8 +162,9 @@ flowchart LR
 - Provider and client hop-by-hop credentials do not cross the wrong boundary.
 - Unsupported routes, methods, providers, Vault, Redis, quota, TPM, BYOK, and
   reserved adapters fail closed rather than silently degrading.
-- The Linux runner observes only loopback and no default route. Combined with
-  `--network none`, this makes an unexpected external-egress attempt impossible
+- The Linux runner observes only loopback routes and no external or default
+  route. Unrouted kernel interfaces may still be visible on Docker Desktop.
+  Combined with `--network none`, this makes an unexpected external-egress attempt impossible
   in the required lane rather than merely invisible to fake-provider counters.
 
 ### Confidentiality oracle
