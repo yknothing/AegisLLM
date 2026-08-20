@@ -33,15 +33,40 @@ This repository currently provides the runtime framework and a minimal OpenAI-co
 
 - Implemented baseline: safe logger, strict config loading, fail-closed middleware composition, HS256 virtual-key issuance/validation, durable single-host revocation, in-memory rate limiting, PII redaction, provider routing, keyID-bound local encrypted file KMS, an offline Operator CLI, egress allowlist validation, and streaming response proxying.
 - Explicitly not production-ready yet: Admin API key issuance, BYOK key-source runtime, Vault KMS, Redis rate limiter, quota/TPM enforcement, durable control-plane store, and non-OpenAI protocol transformations.
-- Fail-fast behavior: unknown config fields, empty auth issuer, missing/unsupported JWT key source, unsupported Vault/Redis/quota/store/TPM capabilities, and an exhausted pipeline without a terminal response are rejected instead of silently running without controls.
+- Fail-fast behavior: unknown config fields, empty auth issuer, a missing durable local KMS path, enabled providers without a canonical non-empty model set, missing/unreadable enabled-provider credentials, disabled request limiting, missing/unsupported JWT key source, unsupported Vault/Redis/quota/store/TPM capabilities, and an exhausted pipeline without a terminal response are rejected instead of silently running without controls.
 
-## Development Smoke
+## Dedicated Test-Server Smoke
+
+Run smoke tests only on the dedicated `ssh ceo` test server (or its controlled
+Linux container), with an absolute Go 1.26.6 binary path. The bootstrap mode
+below is explicitly unverified iteration feedback, not release evidence or
+release approval. On that server, create fresh owner-only home, temporary, and
+Go build-cache directories for the run; use an independently prefilled,
+verified, read-only Go module cache; then launch from outside the candidate
+through a sterile environment:
 
 ```bash
-GOTOOLCHAIN=go1.26.5 make local-smoke VERSION=v0.2.1-rc-local
+cd /
+/usr/bin/env -i \
+  PATH=/usr/bin:/bin \
+  HOME=/absolute/path/to/new-run-home \
+  TMPDIR=/absolute/path/to/new-run-tmp \
+  GOCACHE=/absolute/path/to/new-run-go-build-cache \
+  GOMODCACHE=/absolute/path/to/verified-read-only-go-module-cache \
+  GOWORK=off GOFLAGS=-mod=readonly GOENV=off \
+  AEGIS_DISPOSABLE_CEO=1 ALLOW_UNVERIFIED_ITERATION=1 \
+  GO=/absolute/path/to/go1.26.6/bin/go \
+  VERSION=v0.2.1-rc-iteration \
+  /bin/sh /absolute/path/to/candidate/scripts/local_smoke.sh
 ```
 
-For manual smoke testing:
+Its terminal must be `local_smoke=TECHNICAL_ITERATION_PASS` with
+`evidence_mode=ITERATION_ONLY`, `final_evidence=false`, and
+`release_approved=false`. Destroy the three per-run scratch directories after
+the run and verify they no longer exist; do not treat their mutable contents as
+candidate evidence.
+
+For manual smoke testing on that same dedicated server:
 
 ```bash
 # Generate a 256-bit master key for local KMS
@@ -50,7 +75,11 @@ export AEGIS_JWT_KEY=$(openssl rand -hex 64)
 
 # Build, initialize durable revocation state, import one provider key from
 # bounded non-terminal stdin, and issue a virtual key into a new 0600 file.
-GOTOOLCHAIN=go1.26.5 make build
+make build \
+  GO=/absolute/path/to/go1.26.6/bin/go \
+  VERSION=v0.2.1-rc-iteration \
+  COMMIT=iteration-bootstrap-unverified \
+  BUILD_DATE=<utc-build-date>
 ./bin/aegis operator revocation init --config aegis.example.json
 printf '%s' "$OPENAI_API_KEY" | ./bin/aegis operator provider-key import \
   --config aegis.example.json --provider openai-primary
@@ -104,12 +133,12 @@ rollback.
 | OpenAI-compatible `POST /v1/chat/completions` path | Baseline framework implemented; other data-plane paths and methods do not enter the policy pipeline |
 | Virtual key auth | Offline HS256 issuance and runtime validation implemented; RS256 is planned |
 | Provider support | `openai` and OpenAI-compatible `deepseek` enabled; Anthropic/Gemini fail closed until adapters are implemented |
-| KMS | Local AES-GCM v2 envelope binds ciphertext to key ID as AAD; explicit compatibility migration ends in a strict-v2 format floor; Vault is planned |
-| Revocation | Versioned local snapshot, serialized atomic CLI writes, 500 ms polling, and in-memory request checks implemented for single-host deployments; shared backend is planned |
+| KMS | Local AES-GCM v2 envelope binds ciphertext to key ID as AAD; binary-loaded config requires an encrypted file store; the in-memory backend is limited to explicit programmatic tests; compatibility migration ends in a strict-v2 format floor; Vault is planned |
+| Revocation | Versioned local snapshot, serialized atomic CLI writes, 500 ms polling, in-memory request checks, and within-process monotonic preservation of unexpired tombstones implemented for single-host deployments; cross-restart trusted anchoring and a shared backend are planned |
 | Operator CLI | Offline revocation initialization, provider-key import, virtual-key issue/revoke, and KMS migration implemented; no network Admin API is mounted |
-| Rate limiting | In-memory RPM and default/per-key concurrency baseline implemented; non-zero `default_max_concurrency` is a deployment ceiling; non-zero TPM, Redis backend, and `redis_url` fail fast until implemented |
-| PII protection | Regex-based request redaction baseline implemented |
-| Request memory | One bounded request-scoped body buffer is shared across policy/adapter stages and zeroed after use; provider responses are streamed |
+| Rate limiting | In-memory per-virtual-key RPM and concurrency implemented and mandatory in v0.2.1; `enabled=false`, zero `default_rpm`, and zero `default_max_concurrency` fail fast; positive defaults are per-key policy ceilings, not aggregate process/IP limits; non-zero TPM, Redis backend, and `redis_url` fail fast until implemented |
+| PII protection | Bounded semantic-JSON redaction for the supported OpenAI-compatible schema; escaped strings, duplicate/ambiguous members, PII in keys or numeric positions, and PII split across text parts in one message fail closed or are redacted according to mode. This is lexical DLP, not a guarantee against model-level inference |
+| Request memory | The validated transport/semantic request ceiling is 4 MiB; PII additionally enforces a 512 KiB string/joined-text ceiling, 1 MiB content-array ceiling, and structural budgets. Superseded/final byte buffers are zeroed where owned; provider responses are streamed |
 | Cost management | Pricing/quota modules scaffolded; `quota.enabled=true` and reserved quota backend/DSN/default-budget fields are rejected until runtime enforcement exists |
 | Admin API / BYOK | Handler scaffold exists but is not mounted by the main gateway; mutating/query endpoints fail closed with `501`, and `key_source="byok"` virtual keys are rejected until owner/provider binding exists |
 | Streaming proxy | SSE forwarding baseline implemented; token counting is heuristic |
@@ -119,7 +148,7 @@ rollback.
 
 | Mode | Dependencies | Use Case |
 | :--- | :--- | :--- |
-| **Framework Smoke** | Local env vars + in-memory KMS | Development validation |
+| **Framework Smoke** | Explicit programmatic test injection + in-memory KMS | Development validation only |
 | **Standalone** | Local env vars + encrypted file KMS store | Development and small-team validation |
 | **Cluster** | Redis + Vault + durable quota store | Planned |
 
@@ -130,22 +159,31 @@ The image includes `/etc/aegis/aegis.json` derived from `aegis.example.json`, wi
 ```bash
 make docker VERSION=v0.2.1-rc-local
 
+# Generate once for this isolated smoke session. Docker inherits the values;
+# the secrets are not expanded into its command-line arguments.
+export AEGIS_MASTER_KEY
+export AEGIS_JWT_KEY
+AEGIS_MASTER_KEY="$(openssl rand -hex 32)"
+AEGIS_JWT_KEY="$(openssl rand -hex 64)"
+
 docker volume create aegis-data
 docker run --rm \
+  -e AEGIS_MASTER_KEY \
+  -e AEGIS_JWT_KEY \
   -v aegis-data:/var/lib/aegis \
   aegis:v0.2.1-rc-local \
   operator revocation init --config /etc/aegis/aegis.json
 
 docker run --rm \
   --read-only \
-  -e AEGIS_MASTER_KEY="$(openssl rand -hex 32)" \
-  -e AEGIS_JWT_KEY="$(openssl rand -hex 64)" \
+  -e AEGIS_MASTER_KEY \
+  -e AEGIS_JWT_KEY \
   -v aegis-data:/var/lib/aegis \
   -p 8080:8080 \
   aegis:v0.2.1-rc-local
 ```
 
-The bundled example config is non-secret and suitable only for smoke validation. If you mount a custom config, put both `kms.local.key_store_path` and `auth.revocation.file_path` on durable local storage. Import provider keys with `operator provider-key import` before real `/v1` traffic. Local revocation files are not a multi-host store and cannot detect restoration of an older valid snapshot before restart; recovery must preserve the union of unexpired tombstones.
+The bundled example config is non-secret and suitable only for smoke validation. The shell variables above are ephemeral smoke credentials: keep them for every command that reuses the volume, or destroy the smoke volume before generating replacements. Never use this command as a deployment secret store; inject stable values from an approved secret manager. Any binary-loaded config must provide `kms.local.key_store_path`; put it and `auth.revocation.file_path` on durable local storage. Import every enabled provider key before starting the gateway: startup decrypts each distinct configured `api_key_id` and fails closed if any credential is absent, corrupt, or empty. Local revocation files are not a multi-host store and cannot detect restoration of an older valid snapshot before restart; recovery must preserve the union of unexpired tombstones.
 
 The default Docker target tags only the explicit `VERSION`. Set `DOCKER_TAG_LATEST=true` only for a supported release.
 
@@ -159,8 +197,9 @@ Security is Aegis's highest priority. See [SECURITY.md](SECURITY.md) for:
 **Key security properties:**
 - API keys never exist in plaintext at rest
 - Memory is zeroed after credential use
-- Egress filtering constrains configured provider requests to allowlisted hosts; plain entries are exact hosts and `*.example.com` is required for subdomains
+- Egress filtering binds configured provider requests to allowlisted HTTPS host/port endpoints; host-only and `*.` rules mean port 443, non-default ports require exact entries, DNS answers fail closed if any address is non-public, and IP literals require an explicit exact IP+port rule
 - Unknown JSON configuration fields, an empty auth issuer, and a missing JWT `key_source` fail closed
+- Encoded virtual keys are limited to 16 KiB and HTTP headers to 64 KiB before signature work; semantic request processing is capped separately as documented above
 - No shell or package manager in production image
 
 ## Project Structure

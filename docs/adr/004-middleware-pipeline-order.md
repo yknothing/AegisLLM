@@ -25,7 +25,7 @@ The middleware pipeline will execute in this strict order:
 10. Proxy       → Forward to upstream provider
 ```
 
-The body-processing stages share one bounded request-scoped buffer. If an adapter or redaction stage replaces that buffer, the superseded bytes are zeroed; the final buffer is zeroed when the pipeline returns. A terminal middleware commits or aborts without calling `next()`; reaching the end of the chain without a response is an internal error and fails closed.
+The pipeline acquires one bounded transport body. PII validates it token by token under tighter semantic byte, string, content-array, depth, value, member, and match ceilings and may emit one bounded canonical replacement buffer; router and adapter reuse the resulting owned body. If an adapter or redaction stage replaces that buffer, the superseded bytes are zeroed; the final buffer is zeroed when the pipeline returns. A terminal middleware commits or aborts without calling `next()`; reaching the end of the chain without a response is an internal error and fails closed.
 
 ## Rationale
 

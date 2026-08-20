@@ -10,7 +10,7 @@ Accepted baseline for the current framework build-out.
 | --- | --- | --- | --- | --- | --- |
 | Security | A client sends an unauthenticated or forged virtual key request | Reject before body processing, routing, KMS, or proxy work | No provider egress and no KMS lookup before auth success | 1 | `SECURITY.md`, ADR-001 |
 | Secret handling | A provider key is needed for one upstream request | Fetch from KMS only after routing, hold in request scope, close after proxy returns | No plaintext provider key in config, logs, or long-lived caches | 2 | ADR-002, ADR-003 |
-| Egress control | A configured provider URL or transformed target is malicious | Validate normalized URL host against an allowlist before outbound request | Exact host by default; subdomains require explicit `*.` wildcard; wildcard allows nested subdomains but not the apex; empty allowlist fails closed | 3 | `AGENTS.md`, `SECURITY.md` |
+| Egress control | A configured provider URL, port, or DNS answer is malicious | Validate the HTTPS endpoint, allowlist binding, and every resolved address before each new connection; dial only a validated IP | Host-only/wildcard rules bind port 443; non-default ports and IP literals require exact rules; any non-public DNS answer and an empty/invalid allowlist fail closed | 3 | `AGENTS.md`, `SECURITY.md` |
 | Pipeline integrity | A new middleware is added | Preserve ADR-004 order unless a new ADR changes it | Composition tests cover middleware order | 4 | ADR-004 |
 | Configuration integrity | An operator mistypes a field or omits an auth boundary | Reject unknown JSON fields and require a non-empty issuer | Typo tests fail during config load at root and nested boundaries | 5 | Fail-closed operating policy |
 | Maintainability | Provider, KMS, or limiter implementation changes | Change the implementation behind a stable interface without changing server microkernel | `internal/server` does not import concrete middleware packages | 6 | Module design assumption |
@@ -22,7 +22,7 @@ Aegis remains a single-process modular gateway: a microkernel HTTP server plus a
 
 The composition root is `internal/runtime`. It owns concrete wiring from configuration to interfaces. `internal/server` owns only exact request dispatch, pipeline execution, recovery, request ID, and audit metadata. Middleware packages depend on `internal/server` for the `RequestContext` contract, but `internal/server` does not depend on middleware implementations.
 
-The data plane is deliberately narrow: `POST /v1/chat/completions` is the only provider route. PII scanning, routing, and adaptation share one bounded request-scoped body buffer; superseded buffers and the final buffer are zeroed. Provider circuit breakers are updated only from proxy-observed provider responses, never from gateway-local failures.
+The data plane is deliberately narrow: `POST /v1/chat/completions` is the only provider route. The pipeline owns the transport body once. PII performs bounded token-level semantic JSON processing and may produce one capped canonical replacement buffer before routing and adaptation reuse it; superseded and final owned byte buffers are zeroed. Provider circuit breakers are updated only from proxy-observed provider responses, never from gateway-local failures.
 
 ## Runtime Request Flow
 
@@ -63,17 +63,24 @@ flowchart LR
 | Capability | Current Runtime Behavior | Guardrail |
 | --- | --- | --- |
 | Virtual key auth | HS256 issuance/validation, issuer/expiry checks, and durable single-host revocation | RS256 and shared/network control-plane revocation are reserved |
-| Rate limiting | In-memory RPM and concurrency | Redis backend/URL and non-zero TPM fail fast until implemented |
+| Rate limiting | Mandatory in-memory RPM and concurrency for v0.2.1 | `enabled=false`, non-positive default RPM/concurrency, Redis backend/URL, and non-zero TPM fail fast until implemented |
 | Quota / budget | Package scaffold only, not in request pipeline | `quota.enabled=true`, quota backend/DSN/default-budget fields, and store config are rejected during config validation |
-| KMS | Local AES-256-GCM memory/file backends | Vault mode/config fails fast until the client and tests exist |
+| KMS | Local AES-256-GCM file backend for binary-loaded config; memory backend only for explicit programmatic tests | Missing local path, missing/corrupt/empty enabled-provider credentials, and Vault mode/config fail fast before server startup |
 | Admin / BYOK | Handler scaffold exists but main gateway does not mount it | Mutating/query endpoints return `501`; `key_source="byok"` virtual keys fail closed until owner/provider binding exists |
 | Provider adapters | OpenAI-compatible `openai` and `deepseek` request path | Anthropic/Gemini are rejected by runtime until adapters are implemented |
 
 ## Deployment Topology
 
-MVP topology is one Aegis process behind a trusted ingress or localhost development binding. Production topology should place `POST /v1/chat/completions` behind TLS or mTLS and keep any future admin API on a separate listener or internal-only network. The local KMS runtime supports an in-memory backend for smoke tests and an encrypted file backend for standalone validation; Vault remains a separate production hardening track.
+MVP topology is one Aegis process behind a trusted ingress or localhost development binding. Its limiter is per authenticated virtual key, not an aggregate process-wide, source-IP, or pre-authentication admission control; the ingress must supply those limits. Production topology should place `POST /v1/chat/completions` behind TLS or mTLS and keep any future admin API on a separate listener or internal-only network. Binary-loaded configuration requires an encrypted local KMS file backend; the in-memory backend remains available only to explicit programmatic tests. Vault remains a separate production hardening track.
 
 Container deployments must provide `AEGIS_MASTER_KEY`, `AEGIS_JWT_KEY`, and a writable local state volume at `/var/lib/aegis` for file-backed KMS and revocation. Initialize revocation state with the same release binary before server start. Production deployments should mount an explicit config at `/etc/aegis/aegis.json`; the bundled config is for smoke validation only.
+
+On shutdown, `server.shutdown_timeout` bounds the graceful phase. If that phase
+expires, Aegis force-closes connections and permits at most one additional
+equally bounded handler-drain phase before returning an error. If a handler
+still does not exit, secret-owning shutdown hooks are deliberately skipped and
+the supervisor must terminate the process; Aegis never clears shared runtime
+resources while an active handler may still use them.
 
 ## Hard Decisions and Exit Cost
 
@@ -90,9 +97,9 @@ Container deployments must provide `AEGIS_MASTER_KEY`, `AEGIS_JWT_KEY`, and a wr
 | --- | --- | --- |
 | Pipeline order test | ADR-004 order is preserved | Every PR touching runtime or middleware |
 | Strict config tests | `aegis.example.json` loads, while unknown root/nested fields and empty auth issuer fail closed | Every config change |
-| Egress validation tests | Empty allowlist fails closed; host matching is exact by default and wildcard-only for subdomains | Every proxy change |
+| Egress validation tests | Empty/invalid allowlist, URL metadata, port drift, private/special DNS answers, and DNS rebinding paths fail closed; exact loopback IP+port remains available for hermetic tests | Every proxy change |
 | Secret handling tests | KMS StoreKey zeroes plaintext and SecureBytes closes after use | Every KMS change |
 | Auth tests | Invalid, expired, wrong issuer, and bad signature JWTs fail closed | Every auth change |
-| Body ownership tests | Middleware reuses one bounded buffer and zeroes superseded/final buffers | Every body-processing change |
+| Body ownership tests | Transport bytes have one owner; semantic processing respects byte/shape/allocation ceilings and zeroes owned superseded/final buffers | Every body-processing change |
 | Provider health tests | Provider 429/5xx opens the circuit; gateway-local failures do not | Every router/proxy change |
 | Release security tests | Source and final binary `govulncheck` pass under the pinned release toolchain | Every release candidate |

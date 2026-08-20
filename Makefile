@@ -8,11 +8,12 @@
 #   make security    - Run security checks
 #   make clean       - Remove build artifacts
 
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-DATE    ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
-BUILD_DATE ?= $(DATE)
+VERSION ?= dev
+COMMIT  ?= unknown
+BUILD_DATE ?= unknown
 GO      ?= go
+
+export GO VERSION BUILD_DATE
 
 GOVULNCHECK_VERSION ?= v1.4.0
 GOSEC_VERSION       ?= v2.27.1
@@ -30,7 +31,7 @@ ifeq ($(DOCKER_TAG_LATEST),true)
 DOCKER_TAGS += -t aegis:latest
 endif
 
-.PHONY: all build build-linux test test-coverage lint fmt vet security govulncheck govulncheck-binary gosec docker local-smoke release-preflight ceo-docker-smoke generate-key clean help
+.PHONY: all build build-linux test test-coverage lint fmt vet security govulncheck govulncheck-binary gosec docker local-smoke release-preflight ceo-docker-smoke rollback-drill release-manifest-schema release-closure-schema generate-key clean help
 
 all: lint test build
 
@@ -91,13 +92,54 @@ docker:
 		.
 
 local-smoke:
-	GO=$(GO) VERSION=$(VERSION) COMMIT=$(COMMIT) BUILD_DATE=$(BUILD_DATE) scripts/local_smoke.sh
+	@source_dir="$${CANDIDATE_SOURCE_DIR:-$$(/bin/pwd -P)}"; \
+		cd /; \
+		/bin/sh "$${source_dir}/scripts/local_smoke.sh"
 
 release-preflight:
-	GO=$(GO) VERSION=$(VERSION) scripts/release_preflight.sh
+	@source_dir="$${CANDIDATE_SOURCE_DIR:-$$(/bin/pwd -P)}"; \
+		cd /; \
+		/bin/sh "$${source_dir}/scripts/release_preflight.sh"
 
 ceo-docker-smoke:
-	VERSION=$(VERSION) COMMIT=$(COMMIT) BUILD_DATE=$(BUILD_DATE) scripts/ceo_docker_smoke.sh
+	@source_dir="$${CANDIDATE_SOURCE_DIR:-$$(/bin/pwd -P)}"; \
+		cd /; \
+		/bin/sh "$${source_dir}/scripts/ceo_docker_smoke.sh"
+
+# Execute the Linux-only v0.2.1 -> v0.2.0 KMS migration/rollback drill with a
+# caller-supplied, already-built runner and Aegis binaries plus an independently
+# verified strict input lock. Add
+# ROLLBACK_DRILL_FLAGS=--allow-dirty-iteration only for non-final remediation.
+rollback-drill:
+	@test -n "$(RUNNER_BIN)" || (echo "RUNNER_BIN is required" >&2; exit 2)
+	@test -x "$(RUNNER_BIN)" || (echo "RUNNER_BIN must be a prebuilt executable" >&2; exit 2)
+	@test -n "$(CANDIDATE_BIN)" || (echo "CANDIDATE_BIN is required" >&2; exit 2)
+	@test -n "$(ROLLBACK_BIN)" || (echo "ROLLBACK_BIN is required" >&2; exit 2)
+	@test -n "$(INPUT_LOCK)" || (echo "INPUT_LOCK is required" >&2; exit 2)
+	@test -n "$(INPUT_LOCK_SHA256)" || (echo "INPUT_LOCK_SHA256 is required" >&2; exit 2)
+	"$(RUNNER_BIN)" \
+		--candidate-bin "$(CANDIDATE_BIN)" \
+		--rollback-bin "$(ROLLBACK_BIN)" \
+		--input-lock "$(INPUT_LOCK)" \
+		--input-lock-sha256 "$(INPUT_LOCK_SHA256)" \
+		--repo-root "$(CURDIR)" \
+		$(ROLLBACK_DRILL_FLAGS)
+
+# This repository can validate manifest structure and exact evidence bindings,
+# but cannot establish independent-human trust from caller-selected keys.
+release-manifest-schema:
+	@test -n "$(RELEASE_MANIFEST)" || (echo "RELEASE_MANIFEST is required" >&2; exit 2)
+	$(GO) run ./cmd/aegis-release-manifest --manifest "$(RELEASE_MANIFEST)" --schema-only
+
+# Validate a detached post-publication closure record against the exact final
+# manifest bytes. This checks structure and identity bindings, not authority.
+release-closure-schema:
+	@test -n "$(RELEASE_MANIFEST)" || (echo "RELEASE_MANIFEST is required" >&2; exit 2)
+	@test -n "$(RELEASE_CLOSURE)" || (echo "RELEASE_CLOSURE is required" >&2; exit 2)
+	$(GO) run ./cmd/aegis-release-manifest \
+		--manifest "$(RELEASE_MANIFEST)" \
+		--closure "$(RELEASE_CLOSURE)" \
+		--schema-only
 
 ## Utilities
 
@@ -119,8 +161,11 @@ help:
 	@echo "  lint           Run golangci-lint"
 	@echo "  security       Run source/binary govulncheck and gosec"
 	@echo "  docker         Build Docker image"
-	@echo "  local-smoke    Run local process smoke test"
-	@echo "  release-preflight  Run local release gates"
-	@echo "  ceo-docker-smoke   Run Docker smoke on the ceo Mac mini"
+	@echo "  local-smoke    Convenience-only non-final smoke wrapper (not a trusted release launcher)"
+	@echo "  release-preflight  Convenience-only non-final gate wrapper (not a trusted release launcher)"
+	@echo "  ceo-docker-smoke   Convenience-only non-final Docker wrapper (not a trusted release launcher)"
+	@echo "  rollback-drill     Run the prebuilt Linux v0.2.1 -> v0.2.0 rollback drill"
+	@echo "  release-manifest-schema  Validate external manifest schema (not release approval)"
+	@echo "  release-closure-schema  Validate post-publication closure bindings (not release approval)"
 	@echo "  generate-key   Generate random encryption keys"
 	@echo "  clean          Remove build artifacts"

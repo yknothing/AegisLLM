@@ -93,7 +93,7 @@ Future BYOK tokens are reserved until server-side owner/provider binding exists.
 }
 ```
 
-Current runtime accepts non-zero virtual-key `rpm` claims for per-key request limiting and non-zero `max_concurrency` claims for per-key concurrent request limits. When `rate_limit.default_max_concurrency` is non-zero, it is a deployment-wide ceiling; a token claim can only tighten that limit. Provider config `max_rpm` and `max_tpm` values are reserved and must be `0` until provider-level throttle and TPM enforcement are implemented. Virtual-key `tpm` and `budget` claims are also reserved and must be `0` until TPM and quota enforcement are implemented.
+Current runtime accepts non-zero virtual-key `rpm` claims for per-key request limiting and non-zero `max_concurrency` claims for per-key concurrent request limits. When `rate_limit.default_max_concurrency` is non-zero, it is the policy ceiling applied independently to each key; a token claim can only tighten that per-key limit. It is not an aggregate process-wide or source-IP ceiling. Provider config `max_rpm` and `max_tpm` values are reserved and must be `0` until provider-level throttle and TPM enforcement are implemented. Virtual-key `tpm` and `budget` claims are also reserved and must be `0` until TPM and quota enforcement are implemented.
 
 Current `v0.2.1` routing supports configured `openai` and OpenAI-compatible `deepseek` providers only. The Operator CLI refuses to issue tokens for models absent from enabled providers.
 

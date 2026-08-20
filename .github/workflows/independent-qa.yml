@@ -42,7 +42,7 @@ jobs:
       - name: Set up pinned Go toolchain
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.26.5'
+          go-version: '1.26.6'
           cache: true
 
       - name: Validate source identity, QA lock, and change isolation
@@ -66,6 +66,8 @@ jobs:
             echo "tested checkout does not match github.sha" >&2
             exit 1
           }
+          SOURCE_TREE="$(git rev-parse --verify "${SOURCE_SHA}^{tree}")"
+          is_oid "$SOURCE_TREE"
 
           expected_origin="https://github.com/${SOURCE_REPOSITORY}"
           actual_origin="$(git remote get-url origin)"
@@ -137,15 +139,28 @@ jobs:
           is_oid "$QA_SHA"
 
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            mapfile -d '' -t changed < <(
-              git diff --name-only -z "$BASE_SHA...$HEAD_SHA"
-            )
+            changed_file="$(mktemp)"
+            if ! git diff --name-only -z "$BASE_SHA...$HEAD_SHA" >"$changed_file"; then
+              rm -f "$changed_file"
+              echo "could not inspect pull-request changes" >&2
+              exit 1
+            fi
+            mapfile -d '' -t changed <"$changed_file"
+            rm -f "$changed_file"
             lock_changed=false
             for path in "${changed[@]}"; do
               [[ "$path" == "qa-baseline.lock" ]] && lock_changed=true
             done
             if [[ "$lock_changed" == "true" ]]; then
-              if git cat-file -e "$BASE_SHA:qa-baseline.lock" 2>/dev/null; then
+              if ! base_lock_entry="$(git ls-tree "$BASE_SHA" -- qa-baseline.lock)"; then
+                echo "could not inspect base QA lock identity" >&2
+                exit 1
+              fi
+              if [[ -n "$base_lock_entry" ]]; then
+                [[ "$base_lock_entry" =~ ^100644[[:space:]]blob[[:space:]][0-9a-f]{40}[[:space:]]qa-baseline\.lock$ ]] || {
+                  echo "base QA lock is not an ordinary 100644 blob" >&2
+                  exit 1
+                }
                 [[ "${#changed[@]}" -eq 1 && "${changed[0]}" == "qa-baseline.lock" ]] || {
                   echo "post-bootstrap QA lock updates must change qa-baseline.lock only" >&2
                   printf 'changed=%q\n' "${changed[@]}" >&2
@@ -175,7 +190,11 @@ jobs:
             fi
           fi
 
-          [[ -z "$(git status --porcelain --untracked-files=all)" ]] || {
+          if ! candidate_status="$(git status --porcelain --untracked-files=all)"; then
+            echo "could not inspect candidate checkout status" >&2
+            exit 1
+          fi
+          [[ -z "$candidate_status" ]] || {
             echo "candidate checkout is not clean before the single SUT build" >&2
             exit 1
           }
@@ -185,6 +204,7 @@ jobs:
             echo "HEAD_SHA=$HEAD_SHA"
             echo "BASE_SHA=$BASE_SHA"
             echo "QA_SHA=$QA_SHA"
+            echo "SOURCE_TREE=$SOURCE_TREE"
           } >> "$GITHUB_ENV"
 
       - name: Build the SUT once
@@ -194,13 +214,41 @@ jobs:
           umask 077
           mkdir -p "$(dirname "$SUT")" "$EVIDENCE_DIR" "$UPLOAD_DIR"
           [[ ! -e "$SUT" && ! -e "$REPORT_PATH" && ! -e "$UPLOAD_PATH" ]]
-          [[ -z "$(git status --porcelain)" ]] || {
+          if ! candidate_status="$(git status --porcelain --untracked-files=all)"; then
+            echo "could not inspect candidate source status before build" >&2
+            exit 1
+          fi
+          [[ -z "$candidate_status" ]] || {
             echo "candidate source worktree is dirty before the single SUT build" >&2
             exit 1
           }
-          CGO_ENABLED=0 go build -buildvcs=true -trimpath \
+          [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "$SOURCE_SHA" ]] || {
+            echo "candidate source HEAD drifted before the single SUT build" >&2
+            exit 1
+          }
+          [[ "$(git rev-parse --verify "${SOURCE_SHA}^{tree}")" == "$SOURCE_TREE" ]] || {
+            echo "candidate source tree drifted before the single SUT build" >&2
+            exit 1
+          }
+          GOWORK=off GOFLAGS=-mod=readonly CGO_ENABLED=0 go build -buildvcs=true -trimpath \
             -ldflags="-s -w -X main.version=independent-qa -X main.commit=$SOURCE_SHA -X main.buildDate=1970-01-01T00:00:00Z" \
             -o "$SUT" ./cmd/aegis
+          if ! candidate_status="$(git status --porcelain --untracked-files=all)"; then
+            echo "could not inspect candidate source status after build" >&2
+            exit 1
+          fi
+          [[ -z "$candidate_status" ]] || {
+            echo "candidate source worktree is dirty after the single SUT build" >&2
+            exit 1
+          }
+          [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "$SOURCE_SHA" ]] || {
+            echo "candidate source HEAD drifted during the single SUT build" >&2
+            exit 1
+          }
+          [[ "$(git rev-parse --verify "${SOURCE_SHA}^{tree}")" == "$SOURCE_TREE" ]] || {
+            echo "candidate source tree drifted during the single SUT build" >&2
+            exit 1
+          }
           [[ -f "$SUT" && ! -L "$SUT" && -x "$SUT" ]]
           ARTIFACT_SHA256="$(sha256sum "$SUT" | awk '{print $1}')"
           [[ "$ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]]
@@ -249,7 +297,11 @@ jobs:
           ' <<<"$module_json" >/dev/null
           module_output="$(cd .independent-qa && GOWORK=off GOFLAGS=-mod=readonly go list -m all)"
           [[ "$module_output" == "github.com/${QA_REPOSITORY}" ]]
-          [[ -z "$(git -C .independent-qa status --porcelain)" ]]
+          if ! qa_status="$(git -C .independent-qa status --porcelain --untracked-files=all)"; then
+            echo "could not inspect independent QA checkout status" >&2
+            exit 1
+          fi
+          [[ -z "$qa_status" ]]
 
       - name: Test and build independent QA runner
         shell: bash
@@ -258,7 +310,11 @@ jobs:
           cd .independent-qa
           GOWORK=off GOFLAGS=-mod=readonly go test -race -shuffle=on -count=1 ./...
           GOWORK=off GOFLAGS=-mod=readonly go vet ./...
-          [[ -z "$(git status --porcelain)" ]]
+          if ! qa_status="$(git status --porcelain --untracked-files=all)"; then
+            echo "could not inspect independent QA status after tests" >&2
+            exit 1
+          fi
+          [[ -z "$qa_status" ]]
           CGO_ENABLED=0 GOWORK=off GOFLAGS=-mod=readonly go build \
             -buildvcs=true -trimpath \
             -ldflags="-s -w -X main.qaCommit=$QA_SHA" \
