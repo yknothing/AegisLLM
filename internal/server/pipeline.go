@@ -258,21 +258,36 @@ func RequestIDMiddleware() Middleware {
 // AuditMiddleware logs request metadata (never content) for compliance.
 func AuditMiddleware(logger *slog.Logger) Middleware {
 	return func(ctx *RequestContext, next func()) {
-		next()
+		defer func() {
+			recovered := recover()
+			statusCode := ctx.StatusCode
+			if ctx.response != nil && ctx.response.committed {
+				statusCode = ctx.response.statusCode
+			} else if recovered != nil {
+				// RecoveryMiddleware is outside AuditMiddleware and will produce
+				// this client status after the panic resumes unwinding.
+				statusCode = http.StatusInternalServerError
+			}
 
-		// SECURITY: Only log metadata, NEVER log request/response bodies
-		duration := time.Since(ctx.StartTime)
-		logger.Info("request completed",
-			"method", ctx.Request.Method,
-			"path", ctx.Request.URL.Path,
-			"status", ctx.StatusCode,
-			"duration_ms", duration.Milliseconds(),
-			"input_tokens", ctx.InputTokens,
-			"output_tokens", ctx.OutputTokens,
-			"provider", ctx.ProviderID,
-			"model", ctx.Model,
-			"virtual_key_id", ctx.VirtualKeyID,
-			// NEVER: "body", "prompt", "completion", "headers"
-		)
+			// SECURITY: Only log metadata, NEVER log request/response bodies.
+			// A panic value may contain client content or secrets and is never logged.
+			duration := time.Since(ctx.StartTime)
+			logger.Info("request completed",
+				"method", ctx.Request.Method,
+				"path", ctx.Request.URL.Path,
+				"status", statusCode,
+				"duration_ms", duration.Milliseconds(),
+				"input_tokens", ctx.InputTokens,
+				"output_tokens", ctx.OutputTokens,
+				"provider", ctx.ProviderID,
+				"virtual_key_id", ctx.VirtualKeyID,
+				// NEVER: "body", "prompt", "completion", "headers"
+			)
+			if recovered != nil {
+				panic(recovered)
+			}
+		}()
+
+		next()
 	}
 }

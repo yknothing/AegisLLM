@@ -8,7 +8,8 @@
 //
 // SECURITY:
 //   - Never buffers complete response bodies in memory
-//   - API keys are injected per-request and zeroed after the upstream request is sent
+//   - API keys are validated, injected per-request, and zeroed immediately after
+//     the outbound header is constructed
 //   - Response bodies are never logged (only token counts)
 //   - Egress validation ensures requests only go to allowed domains
 package proxy
@@ -21,8 +22,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
-	"net/url"
+	"net/netip"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -51,8 +53,18 @@ type StreamConfig struct {
 
 // Engine is the core streaming proxy that forwards requests to LLM providers.
 type Engine struct {
-	client *http.Client
-	config StreamConfig
+	client   *http.Client
+	config   StreamConfig
+	resolver ipResolver
+	dialer   contextDialer
+}
+
+type ipResolver interface {
+	LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error)
+}
+
+type contextDialer interface {
+	DialContext(ctx context.Context, network, address string) (net.Conn, error)
 }
 
 var allowedRequestHeaders = map[string]struct{}{
@@ -108,11 +120,20 @@ func NewEngine(cfg StreamConfig) *Engine {
 	if cfg.RootCAs != nil {
 		rootCAs = cfg.RootCAs.Clone()
 	}
+	engine := &Engine{
+		config:   cfg,
+		resolver: net.DefaultResolver,
+		dialer: &net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		},
+	}
 
 	// Configure HTTP client with security-hardened settings
 	transport := &http.Transport{
 		MaxIdleConnsPerHost: 100,
 		IdleConnTimeout:     90 * time.Second,
+		DialContext:         engine.dialContext,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS13,
 			RootCAs:    rootCAs,
@@ -128,17 +149,63 @@ func NewEngine(cfg StreamConfig) *Engine {
 		},
 	}
 
-	return &Engine{
-		client: client,
-		config: cfg,
+	engine.client = client
+	return engine
+}
+
+func (e *Engine) dialContext(ctx context.Context, network, authority string) (net.Conn, error) {
+	rules, err := egress.ParseAllowlist(e.config.AllowedDomains)
+	if err != nil {
+		return nil, err
 	}
+	endpoint, err := egress.ParseAuthority(authority)
+	if err != nil {
+		return nil, fmt.Errorf("invalid egress dial authority: %w", err)
+	}
+	if !egress.EndpointAllowed(endpoint, rules) {
+		return nil, fmt.Errorf("dial endpoint not in egress allowlist: %s:%s", endpoint.Host, endpoint.Port)
+	}
+
+	if endpoint.IPLiteral {
+		return e.dialer.DialContext(ctx, network, net.JoinHostPort(endpoint.IP.String(), endpoint.Port))
+	}
+
+	addresses, err := e.resolver.LookupNetIP(ctx, "ip", endpoint.Host)
+	if err != nil {
+		return nil, fmt.Errorf("resolving egress host: %w", err)
+	}
+	if len(addresses) == 0 {
+		return nil, errors.New("egress host resolved to no addresses")
+	}
+	validated := make([]netip.Addr, 0, len(addresses))
+	for _, address := range addresses {
+		address = address.Unmap()
+		if !egress.PublicDNSAddress(address) {
+			return nil, fmt.Errorf("egress host resolved to a disallowed address: %s", address)
+		}
+		validated = append(validated, address)
+	}
+
+	var dialErrors []error
+	for _, address := range validated {
+		conn, dialErr := e.dialer.DialContext(ctx, network, net.JoinHostPort(address.String(), endpoint.Port))
+		if dialErr == nil {
+			return conn, nil
+		}
+		dialErrors = append(dialErrors, dialErr)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+	}
+	return nil, fmt.Errorf("dialing validated egress addresses: %w", errors.Join(dialErrors...))
 }
 
 // ProxyRequest forwards a request to the upstream LLM provider.
 // It handles both streaming (SSE) and non-streaming responses.
 //
 // SECURITY:
-//   - apiKey is zeroed after the request is sent
+//   - apiKey is validated before transport and zeroed immediately after the
+//     outbound header is constructed
 //   - Only allowed domains are contacted
 //   - Response body is never fully buffered
 func (e *Engine) ProxyRequest(
@@ -151,6 +218,10 @@ func (e *Engine) ProxyRequest(
 ) (*ProxyResult, error) {
 	if apiKey == nil {
 		return nil, fmt.Errorf("provider API key is missing")
+	}
+	defer apiKey.Close()
+	if err := utils.ValidateProviderCredentialHeaderValue(apiKey.Bytes()); err != nil {
+		return nil, errors.New("provider API key is invalid")
 	}
 
 	// SECURITY: Validate target domain against allowlist
@@ -172,9 +243,11 @@ func (e *Engine) ProxyRequest(
 	copyHeaders(upstreamReq.Header, originalReq.Header)
 
 	// Inject API key for the outbound request. The header string cannot be
-	// zeroed by Go, so remove the header and close SecureBytes as soon as the
-	// transport returns response headers.
+	// zeroed by Go, so close SecureBytes immediately after constructing the
+	// header and remove the immutable header string as soon as the transport
+	// returns response headers.
 	upstreamReq.Header.Set("Authorization", "Bearer "+string(apiKey.Bytes()))
+	apiKey.Close()
 
 	// Set request timeout
 	reqCtx, cancel := context.WithTimeout(ctx, e.config.StreamTimeout)
@@ -184,7 +257,6 @@ func (e *Engine) ProxyRequest(
 	// Execute request
 	resp, err := e.client.Do(upstreamReq) // #nosec G704 -- targetURL is parsed, HTTPS-only, and host-allowlisted by validateEgress above.
 	upstreamReq.Header.Del("Authorization")
-	apiKey.Close()
 	if err != nil {
 		if ctx.Err() == nil {
 			return nil, fmt.Errorf("%w: %v", ErrUpstreamTransport, err)
@@ -322,23 +394,20 @@ func (e *Engine) validateEgress(targetURL string) error {
 		return fmt.Errorf("no egress allowlist configured")
 	}
 
-	parsed, err := url.Parse(targetURL)
+	rules, err := egress.ParseAllowlist(e.config.AllowedDomains)
 	if err != nil {
-		return fmt.Errorf("invalid target URL: %w", err)
+		return err
 	}
-	if parsed.Scheme != "https" {
-		return fmt.Errorf("target URL must use https")
-	}
-	host := egress.NormalizeHost(parsed.Hostname())
-	if host == "" {
-		return fmt.Errorf("target URL has no host")
+	endpoint, err := egress.ParseHTTPSURL(targetURL)
+	if err != nil {
+		return err
 	}
 
-	if egress.HostAllowed(host, e.config.AllowedDomains) {
+	if egress.EndpointAllowed(endpoint, rules) {
 		return nil
 	}
 
-	return fmt.Errorf("domain not in egress allowlist: %s", host)
+	return fmt.Errorf("endpoint not in egress allowlist: %s:%s", endpoint.Host, endpoint.Port)
 }
 
 // copyHeaders copies the minimal safe client headers needed by provider APIs.

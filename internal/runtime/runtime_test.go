@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,7 +34,9 @@ func TestRuntimeHermeticTLSProviderSuccessPath(t *testing.T) {
 		providerKey  = "provider-secret"
 	)
 
+	var upstreamCalls atomic.Int32
 	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
 			t.Errorf("upstream request = %s %s, want POST /v1/chat/completions", r.Method, r.URL.Path)
 		}
@@ -89,7 +92,7 @@ func TestRuntimeHermeticTLSProviderSuccessPath(t *testing.T) {
 	cfg.Auth.JWTSigningKeyEnv = jwtKeyEnv
 	cfg.Auth.Revocation.FilePath = filepath.Join(t.TempDir(), "revocations.json")
 	cfg.Providers[0].BaseURL = upstream.URL
-	cfg.Egress.AllowedDomains = []string{"127.0.0.1"}
+	cfg.Egress.AllowedDomains = []string{upstream.Listener.Addr().String()}
 	if _, err := revocation.NewWriter(cfg.Auth.Revocation.FilePath, 2*time.Second).Init(context.Background(), time.Now()); err != nil {
 		t.Fatalf("initialize revocation state: %v", err)
 	}
@@ -152,7 +155,7 @@ func TestRuntimeHermeticTLSProviderSuccessPath(t *testing.T) {
 		ExpiresAt:      now.Add(time.Hour).Unix(),
 		Issuer:         "aegis",
 	})
-	requestBody := `{"model":"gpt-4o-mini","messages":[{"role":"user","content":"email me at alice@example.com"}]}`
+	requestBody := `{"model":"gpt-4o-mini","messages":[{"role":"user","content":"email me at alice\u0040example.com"}]}`
 	req, err := http.NewRequest(http.MethodPost, gatewayURL+"/v1/chat/completions", strings.NewReader(requestBody))
 	if err != nil {
 		t.Fatalf("build gateway request: %v", err)
@@ -180,6 +183,43 @@ func TestRuntimeHermeticTLSProviderSuccessPath(t *testing.T) {
 	}
 	if got, want := string(responseBody), `{"id":"chatcmpl-e2e","choices":[]}`; got != want {
 		t.Fatalf("response body = %q, want %q", got, want)
+	}
+	if got := upstreamCalls.Load(); got != 1 {
+		t.Fatalf("upstream calls = %d, want one successful request", got)
+	}
+
+	// A duplicate model member must be rejected before routing or proxying.
+	// The gateway authorizes the decoded model, while an upstream parser could
+	// otherwise choose a different occurrence from the forwarded bytes.
+	ambiguousBodies := []string{
+		`{"model":"forbidden-model","model":"gpt-4o-mini","messages":[]}`,
+		`{"model":"forbidden-model","Model":"gpt-4o-mini","messages":[]}`,
+		`{"model":"gpt-4o-mini","messages":[],"user\u0040example.com":"safe"}`,
+		`{"model":"gpt-4o-mini","messages":[],"phone":5551234567}`,
+	}
+	for _, ambiguousBody := range ambiguousBodies {
+		ambiguousRequest, err := http.NewRequest(
+			http.MethodPost,
+			gatewayURL+"/v1/chat/completions",
+			strings.NewReader(ambiguousBody),
+		)
+		if err != nil {
+			t.Fatalf("build ambiguous request: %v", err)
+		}
+		ambiguousRequest.Header.Set("Authorization", "Bearer "+token)
+		ambiguousRequest.Header.Set("Content-Type", "application/json")
+		ambiguousResponse, err := client.Do(ambiguousRequest)
+		if err != nil {
+			t.Fatalf("ambiguous gateway request: %v", err)
+		}
+		_, _ = io.Copy(io.Discard, ambiguousResponse.Body)
+		_ = ambiguousResponse.Body.Close()
+		if ambiguousResponse.StatusCode != http.StatusBadRequest {
+			t.Fatalf("ambiguous request status = %d, want %d", ambiguousResponse.StatusCode, http.StatusBadRequest)
+		}
+		if got := upstreamCalls.Load(); got != 1 {
+			t.Fatalf("ambiguous request reached upstream; calls = %d, want 1", got)
+		}
 	}
 
 	if _, err := revocation.NewWriter(cfg.Auth.Revocation.FilePath, 2*time.Second).Revoke(
@@ -231,6 +271,7 @@ func TestNewServerRejectsMissingRevocationSnapshot(t *testing.T) {
 
 	cfg := minimalRuntimeConfig()
 	cfg.KMS.Local.MasterKeyEnv = masterKeyEnv
+	cfg.KMS.Local.KeyStorePath = filepath.Join(t.TempDir(), "keys")
 	cfg.Auth.JWTSigningKeyEnv = jwtKeyEnv
 	cfg.Auth.Revocation = config.RevocationConfig{
 		Backend:         "file",
@@ -241,6 +282,158 @@ func TestNewServerRejectsMissingRevocationSnapshot(t *testing.T) {
 	if _, err := NewServer(cfg, nil); err == nil || !strings.Contains(err.Error(), "revocation") {
 		t.Fatalf("NewServer missing revocation error = %v, want startup rejection", err)
 	}
+}
+
+func TestNewServerRejectsUnavailableProviderCredentialsAtStartup(t *testing.T) {
+	tests := []struct {
+		name    string
+		corrupt bool
+	}{
+		{name: "missing"},
+		{name: "corrupt", corrupt: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := initializedRuntimeConfig(t)
+			const keyIDCanary = "CANARY-provider-key-id-7f642a"
+			cfg.Providers[0].APIKeyID = keyIDCanary
+
+			if tt.corrupt {
+				seedStore, err := newKMSProvider(cfg.KMS)
+				if err != nil {
+					t.Fatalf("open seed KMS: %v", err)
+				}
+				if err := seedStore.StoreKey(context.Background(), keyIDCanary, []byte("provider-secret")); err != nil {
+					_ = seedStore.Close()
+					t.Fatalf("seed provider key: %v", err)
+				}
+				if err := seedStore.Close(); err != nil {
+					t.Fatalf("close seed KMS: %v", err)
+				}
+
+				entries, err := os.ReadDir(cfg.KMS.Local.KeyStorePath)
+				if err != nil {
+					t.Fatalf("read key store: %v", err)
+				}
+				if len(entries) != 1 {
+					t.Fatalf("key store entries = %d, want 1", len(entries))
+				}
+				blobPath := filepath.Join(cfg.KMS.Local.KeyStorePath, entries[0].Name())
+				if err := os.WriteFile(blobPath, []byte("corrupt encrypted blob"), 0o600); err != nil {
+					t.Fatalf("corrupt provider key blob: %v", err)
+				}
+			}
+
+			_, err := NewServer(cfg, nil)
+			if err == nil || !strings.Contains(err.Error(), "provider credential preflight failed") {
+				t.Fatalf("NewServer error = %v, want provider credential preflight rejection", err)
+			}
+			if strings.Contains(err.Error(), keyIDCanary) {
+				t.Fatalf("NewServer error leaked provider key ID: %v", err)
+			}
+		})
+	}
+}
+
+func TestNewServerRejectsUnsafeProviderCredentialsAtStartup(t *testing.T) {
+	tests := []struct {
+		name       string
+		credential []byte
+	}{
+		{name: "embedded newline", credential: []byte("sk-first\nsk-second")},
+		{name: "embedded carriage return", credential: []byte("sk-first\rsk-second")},
+		{name: "NUL", credential: []byte{'s', 'k', 0, 'x'}},
+		{name: "control", credential: []byte{'s', 'k', 0x1f, 'x'}},
+		{name: "DEL", credential: []byte{'s', 'k', 0x7f, 'x'}},
+		{name: "non ASCII", credential: []byte("sk-密钥")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := initializedRuntimeConfig(t)
+			seedStore, err := newKMSProvider(cfg.KMS)
+			if err != nil {
+				t.Fatalf("open seed KMS: %v", err)
+			}
+			plaintext := append([]byte(nil), tt.credential...)
+			secret := string(plaintext)
+			if err := seedStore.StoreKey(context.Background(), cfg.Providers[0].APIKeyID, plaintext); err != nil {
+				_ = seedStore.Close()
+				t.Fatalf("seed provider key: %v", err)
+			}
+			if err := seedStore.Close(); err != nil {
+				t.Fatalf("close seed KMS: %v", err)
+			}
+
+			_, err = NewServer(cfg, nil)
+			if err == nil || !strings.Contains(err.Error(), "provider credential preflight failed") {
+				t.Fatalf("NewServer error = %v, want provider credential preflight rejection", err)
+			}
+			if secret != "" && strings.Contains(err.Error(), secret) {
+				t.Fatal("NewServer reflected the rejected provider credential")
+			}
+		})
+	}
+}
+
+func initializedRuntimeConfig(t *testing.T) *config.Config {
+	t.Helper()
+
+	const (
+		masterKeyEnv = "TEST_AEGIS_STARTUP_MASTER_KEY"
+		jwtKeyEnv    = "TEST_AEGIS_STARTUP_JWT_KEY"
+	)
+	t.Setenv(masterKeyEnv, hex.EncodeToString(make([]byte, 32)))
+	t.Setenv(jwtKeyEnv, "0123456789abcdef0123456789abcdef")
+
+	cfg := minimalRuntimeConfig()
+	cfg.KMS.Local.MasterKeyEnv = masterKeyEnv
+	cfg.KMS.Local.KeyStorePath = filepath.Join(t.TempDir(), "keys")
+	cfg.Auth.JWTSigningKeyEnv = jwtKeyEnv
+	cfg.Auth.Revocation.FilePath = filepath.Join(t.TempDir(), "revocations.json")
+	if _, err := revocation.NewWriter(cfg.Auth.Revocation.FilePath, 2*time.Second).Init(context.Background(), time.Now()); err != nil {
+		t.Fatalf("initialize revocation state: %v", err)
+	}
+	return cfg
+}
+
+func TestCloseRuntimeResourcesZerosSecretsAndClosesKMSFirst(t *testing.T) {
+	signingKey := []byte("runtime-signing-secret")
+	order := make([]string, 0, 2)
+	signingKeyWasZeroed := false
+
+	kmsCloser := runtimeTestCloser(func() error {
+		signingKeyWasZeroed = true
+		for _, b := range signingKey {
+			if b != 0 {
+				signingKeyWasZeroed = false
+				break
+			}
+		}
+		order = append(order, "kms")
+		return nil
+	})
+	revocationCloser := runtimeTestCloser(func() error {
+		order = append(order, "revocation")
+		return nil
+	})
+
+	if err := closeRuntimeResources(signingKey, kmsCloser, revocationCloser); err != nil {
+		t.Fatalf("closeRuntimeResources returned error: %v", err)
+	}
+	if !signingKeyWasZeroed {
+		t.Fatal("KMS close ran before the signing key was zeroed")
+	}
+	if got, want := strings.Join(order, ","), "kms,revocation"; got != want {
+		t.Fatalf("close order = %q, want %q", got, want)
+	}
+}
+
+type runtimeTestCloser func() error
+
+func (close runtimeTestCloser) Close() error {
+	return close()
 }
 
 func signRuntimeTestToken(t *testing.T, key []byte, claims middleware.VirtualKeyClaims) string {
@@ -342,6 +535,50 @@ func TestProviderRuntimeRejectsDuplicateEnabledProviderIDs(t *testing.T) {
 	}
 }
 
+func TestProviderRuntimeRejectsUnroutableEnabledProviderModelsWithoutLeakingMetadata(t *testing.T) {
+	const (
+		providerCanary = "provider-model-contract-canary-5f81"
+		modelCanary    = "model-contract-canary-40c3"
+	)
+	tests := []struct {
+		name       string
+		models     []string
+		disableAll bool
+	}{
+		{name: "no enabled provider", disableAll: true},
+		{name: "enabled provider has no models", models: []string{}},
+		{name: "enabled provider has empty model", models: []string{""}},
+		{name: "enabled provider has whitespace-only model", models: []string{" \t "}},
+		{name: "enabled provider model is not trim-stable", models: []string{" " + modelCanary + " "}},
+		{name: "enabled provider has duplicate model", models: []string{modelCanary, modelCanary}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := minimalRuntimeConfig()
+			if tt.disableAll {
+				cfg.Providers[0].ID = providerCanary
+				cfg.Providers[0].Enabled = false
+			} else {
+				invalid := cfg.Providers[0]
+				invalid.ID = providerCanary
+				invalid.Name = "Provider Model Contract Canary"
+				invalid.APIKeyID = "provider-model-contract-key"
+				invalid.Models = tt.models
+				cfg.Providers = append(cfg.Providers, invalid)
+			}
+
+			_, _, _, err := providerRuntime(cfg)
+			if err == nil {
+				t.Fatal("providerRuntime accepted an enabled-provider model contract violation")
+			}
+			if strings.Contains(err.Error(), providerCanary) || strings.Contains(err.Error(), modelCanary) {
+				t.Fatalf("providerRuntime error leaked provider or model metadata: %v", err)
+			}
+		})
+	}
+}
+
 func TestProviderRuntimeRejectsHTTPProvider(t *testing.T) {
 	cfg := &config.Config{
 		Providers: []config.Provider{
@@ -361,6 +598,35 @@ func TestProviderRuntimeRejectsHTTPProvider(t *testing.T) {
 
 	if _, _, _, err := providerRuntime(cfg); err == nil {
 		t.Fatal("providerRuntime accepted a non-HTTPS provider")
+	}
+}
+
+func TestProviderRuntimeRejectsUnsafeProviderURLMetadata(t *testing.T) {
+	tests := []string{
+		"https://user:password@api.openai.com",
+		"https://api.openai.com#unexpected",
+	}
+	for _, baseURL := range tests {
+		t.Run(baseURL, func(t *testing.T) {
+			cfg := minimalRuntimeConfig()
+			cfg.Providers[0].BaseURL = baseURL
+			if _, _, _, err := providerRuntime(cfg); err == nil {
+				t.Fatalf("providerRuntime accepted unsafe base_url %q", baseURL)
+			}
+		})
+	}
+}
+
+func TestProviderRuntimeRequiresExactNonDefaultPort(t *testing.T) {
+	cfg := minimalRuntimeConfig()
+	cfg.Providers[0].BaseURL = "https://api.openai.com:8443"
+	if _, _, _, err := providerRuntime(cfg); err == nil {
+		t.Fatal("providerRuntime let a host-only rule authorize a non-default port")
+	}
+
+	cfg.Egress.AllowedDomains = []string{"api.openai.com:8443"}
+	if _, _, _, err := providerRuntime(cfg); err != nil {
+		t.Fatalf("providerRuntime rejected exact non-default port: %v", err)
 	}
 }
 
@@ -522,9 +788,10 @@ func TestLoadJWTSigningKeyEnvAcceptsStrongSecret(t *testing.T) {
 
 func TestNewServerRejectsUnsupportedRuntimeControls(t *testing.T) {
 	tests := []struct {
-		name    string
-		mutate  func(*config.Config)
-		wantErr string
+		name      string
+		mutate    func(*config.Config)
+		wantErr   string
+		forbidden string
 	}{
 		{
 			name: "token expiry",
@@ -539,6 +806,35 @@ func TestNewServerRejectsUnsupportedRuntimeControls(t *testing.T) {
 				cfg.Auth.Issuer = ""
 			},
 			wantErr: "auth.issuer must not be empty",
+		},
+		{
+			name: "auth issuer above revocation bound",
+			mutate: func(cfg *config.Config) {
+				cfg.Auth.Issuer = strings.Repeat("i", 1025)
+			},
+			wantErr: "auth.issuer must not exceed 1024 bytes",
+		},
+		{
+			name: "auth issuer with surrounding whitespace",
+			mutate: func(cfg *config.Config) {
+				cfg.Auth.Issuer = " aegis "
+			},
+			wantErr: "auth.issuer must not contain leading or trailing whitespace",
+		},
+		{
+			name: "token expiry above safe retention bound",
+			mutate: func(cfg *config.Config) {
+				cfg.Auth.TokenExpiry = time.Duration(1<<63 - 1)
+			},
+			wantErr: "auth.token_expiry must not exceed the maximum supported lifetime",
+		},
+		{
+			name: "malformed provider URL does not leak userinfo",
+			mutate: func(cfg *config.Config) {
+				cfg.Providers[0].BaseURL = "https://user:CANARY-runtime-url-secret-5e2d91@api.openai.com/%zz"
+			},
+			wantErr:   "invalid target URL",
+			forbidden: "CANARY-runtime-url-secret-5e2d91",
 		},
 		{
 			name: "zero read timeout",
@@ -660,6 +956,32 @@ func TestNewServerRejectsUnsupportedRuntimeControls(t *testing.T) {
 			wantErr: "kms.vault is reserved",
 		},
 		{
+			name:    "missing durable local KMS path",
+			mutate:  func(*config.Config) {},
+			wantErr: "kms.local.key_store_path must not be empty",
+		},
+		{
+			name: "disabled rate limit",
+			mutate: func(cfg *config.Config) {
+				cfg.RateLimit.Enabled = false
+			},
+			wantErr: "rate_limit.enabled must be true",
+		},
+		{
+			name: "zero default RPM",
+			mutate: func(cfg *config.Config) {
+				cfg.RateLimit.DefaultRPM = 0
+			},
+			wantErr: "rate_limit.default_rpm must be positive",
+		},
+		{
+			name: "zero default concurrency",
+			mutate: func(cfg *config.Config) {
+				cfg.RateLimit.DefaultMaxConcurrency = 0
+			},
+			wantErr: "rate_limit.default_max_concurrency must be positive",
+		},
+		{
 			name: "unknown rate limit backend",
 			mutate: func(cfg *config.Config) {
 				cfg.RateLimit.Enabled = false
@@ -725,6 +1047,9 @@ func TestNewServerRejectsUnsupportedRuntimeControls(t *testing.T) {
 			_, err := NewServer(cfg, nil)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("NewServer error = %v, want %q", err, tt.wantErr)
+			}
+			if tt.forbidden != "" && strings.Contains(err.Error(), tt.forbidden) {
+				t.Fatalf("NewServer error leaked forbidden value %q: %v", tt.forbidden, err)
 			}
 		})
 	}

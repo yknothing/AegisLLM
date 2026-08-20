@@ -6,8 +6,10 @@ import (
 	"crypto/x509"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -75,6 +77,54 @@ func TestValidateEgressRejectsNonHTTPS(t *testing.T) {
 	}
 }
 
+func TestValidateEgressRejectsUserinfoAndFragment(t *testing.T) {
+	engine := NewEngine(StreamConfig{
+		AllowedDomains: []string{"api.openai.com"},
+	})
+
+	tests := []string{
+		"https://user:password@api.openai.com/v1/chat/completions",
+		"https://api.openai.com/v1/chat/completions#unexpected",
+		"https://api.openai.com/v1/chat/completions#",
+		"https://api.openai.com:/v1/chat/completions",
+	}
+	for _, target := range tests {
+		t.Run(target, func(t *testing.T) {
+			if err := engine.validateEgress(target); err == nil {
+				t.Fatalf("validateEgress accepted unsafe target %q", target)
+			}
+		})
+	}
+}
+
+func TestValidateEgressRequiresExactNonDefaultPort(t *testing.T) {
+	hostOnly := NewEngine(StreamConfig{
+		AllowedDomains: []string{"api.openai.com"},
+	})
+	if err := hostOnly.validateEgress("https://api.openai.com:8443/v1/chat/completions"); err == nil {
+		t.Fatal("validateEgress let a host-only rule authorize a non-default port")
+	}
+
+	exactPort := NewEngine(StreamConfig{
+		AllowedDomains: []string{"api.openai.com:8443"},
+	})
+	if err := exactPort.validateEgress("https://api.openai.com:8443/v1/chat/completions"); err != nil {
+		t.Fatalf("validateEgress rejected exact non-default port: %v", err)
+	}
+}
+
+func TestValidateEgressRequiresExactIPLiteralAndPort(t *testing.T) {
+	engine := NewEngine(StreamConfig{
+		AllowedDomains: []string{"127.0.0.1:8443"},
+	})
+	if err := engine.validateEgress("https://127.0.0.1:8443/v1/chat/completions"); err != nil {
+		t.Fatalf("validateEgress rejected exact IP literal and port: %v", err)
+	}
+	if err := engine.validateEgress("https://127.0.0.1:443/v1/chat/completions"); err == nil {
+		t.Fatal("validateEgress accepted an IP literal on a different port")
+	}
+}
+
 func TestNewEngineRequiresTLS13ForUpstreamTransport(t *testing.T) {
 	engine := NewEngine(StreamConfig{})
 
@@ -88,6 +138,235 @@ func TestNewEngineRequiresTLS13ForUpstreamTransport(t *testing.T) {
 	if transport.TLSClientConfig.MinVersion != tls.VersionTLS13 {
 		t.Fatalf("MinVersion = %x, want TLS 1.3", transport.TLSClientConfig.MinVersion)
 	}
+}
+
+func TestDialContextRejectsAnyUnsafeDNSAnswerBeforeDial(t *testing.T) {
+	unsafeAddresses := []string{
+		"127.0.0.1",
+		"10.0.0.1",
+		"169.254.169.254",
+		"0.0.0.0",
+		"224.0.0.1",
+		"192.0.2.1",
+		"192.31.196.1",
+		"192.52.193.1",
+		"192.88.99.1",
+		"192.175.48.1",
+		"::1",
+		"fc00::1",
+		"fe80::1",
+		"ff02::1",
+		"100:0:0:1::1",
+		"2001:100::1",
+		"2001:db8::1",
+		"2620:4f:8000::1",
+		"3000::1",
+		"3ffe::1",
+		"4000::1",
+		"6000::1",
+	}
+	for _, unsafeAddress := range unsafeAddresses {
+		t.Run(unsafeAddress, func(t *testing.T) {
+			resolver := &staticIPResolver{addresses: []netip.Addr{
+				netip.MustParseAddr("93.184.216.34"),
+				netip.MustParseAddr(unsafeAddress),
+			}}
+			dialer := &recordingContextDialer{err: errors.New("dial should not run")}
+			engine := NewEngine(StreamConfig{AllowedDomains: []string{"api.openai.com"}})
+			engine.resolver = resolver
+			engine.dialer = dialer
+
+			if _, err := engine.dialContext(context.Background(), "tcp", "api.openai.com:443"); err == nil {
+				t.Fatal("dialContext accepted an unsafe DNS answer")
+			}
+			if len(dialer.addresses) != 0 {
+				t.Fatalf("dialContext dialed %v before rejecting unsafe DNS answer", dialer.addresses)
+			}
+		})
+	}
+}
+
+func TestDialContextDialsValidatedIPWithoutReresolving(t *testing.T) {
+	stopErr := errors.New("stop after recording validated address")
+	resolver := &staticIPResolver{addresses: []netip.Addr{netip.MustParseAddr("93.184.216.34")}}
+	dialer := &recordingContextDialer{err: stopErr}
+	engine := NewEngine(StreamConfig{AllowedDomains: []string{"api.openai.com"}})
+	engine.resolver = resolver
+	engine.dialer = dialer
+
+	if _, err := engine.dialContext(context.Background(), "tcp", "api.openai.com:443"); !errors.Is(err, stopErr) {
+		t.Fatalf("dialContext error = %v, want recording dialer error", err)
+	}
+	if resolver.calls != 1 {
+		t.Fatalf("resolver calls = %d, want 1", resolver.calls)
+	}
+	if got, want := dialer.addresses, []string{"93.184.216.34:443"}; !slicesEqual(got, want) {
+		t.Fatalf("dial addresses = %v, want %v", got, want)
+	}
+}
+
+func TestDialContextAllowsOnlyExplicitExactIPLiteral(t *testing.T) {
+	stopErr := errors.New("stop after recording explicit IP")
+	resolver := &staticIPResolver{err: errors.New("IP literal must not use DNS")}
+	dialer := &recordingContextDialer{err: stopErr}
+	engine := NewEngine(StreamConfig{AllowedDomains: []string{"127.0.0.1:8443"}})
+	engine.resolver = resolver
+	engine.dialer = dialer
+
+	if _, err := engine.dialContext(context.Background(), "tcp", "127.0.0.1:8443"); !errors.Is(err, stopErr) {
+		t.Fatalf("dialContext error = %v, want recording dialer error", err)
+	}
+	if resolver.calls != 0 {
+		t.Fatalf("resolver calls = %d, want 0", resolver.calls)
+	}
+	if got, want := dialer.addresses, []string{"127.0.0.1:8443"}; !slicesEqual(got, want) {
+		t.Fatalf("dial addresses = %v, want %v", got, want)
+	}
+
+	dialer.addresses = nil
+	if _, err := engine.dialContext(context.Background(), "tcp", "127.0.0.1:443"); err == nil {
+		t.Fatal("dialContext accepted an IP literal on an unauthorized port")
+	}
+	if len(dialer.addresses) != 0 {
+		t.Fatalf("dialContext dialed unauthorized IP endpoint %v", dialer.addresses)
+	}
+}
+
+func TestProxyRequestResolvesAndDialsValidatedIPWhileTLSUsesOriginalHostname(t *testing.T) {
+	type providerObservation struct {
+		serverName    string
+		host          string
+		authorization string
+	}
+	observations := make(chan providerObservation, 2)
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		observation := providerObservation{host: r.Host, authorization: r.Header.Get("Authorization")}
+		if r.TLS != nil {
+			observation.serverName = r.TLS.ServerName
+		}
+		observations <- observation
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"provider-response","choices":[]}`)
+	}))
+	upstream.TLS = &tls.Config{MinVersion: tls.VersionTLS13}
+	upstream.StartTLS()
+	t.Cleanup(upstream.Close)
+
+	certificate := upstream.Certificate()
+	if len(certificate.DNSNames) == 0 {
+		t.Fatal("httptest TLS certificate has no DNS name for hostname verification")
+	}
+	providerHost := certificate.DNSNames[0]
+	_, providerPort, err := net.SplitHostPort(upstream.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("split upstream listener address: %v", err)
+	}
+	providerAuthority := net.JoinHostPort(providerHost, providerPort)
+
+	roots := x509.NewCertPool()
+	roots.AddCert(certificate)
+	resolver := &staticIPResolver{addresses: []netip.Addr{netip.MustParseAddr("93.184.216.34")}}
+	dialer := &redirectingContextDialer{target: upstream.Listener.Addr().String()}
+	engine := NewEngine(StreamConfig{
+		AllowedDomains: []string{providerAuthority},
+		RootCAs:        roots,
+	})
+	engine.resolver = resolver
+	engine.dialer = dialer
+	transport := engine.client.Transport.(*http.Transport).Clone()
+	transport.DisableKeepAlives = true
+	engine.client.Transport = transport
+
+	targetURL := "https://" + providerAuthority + "/v1/chat/completions"
+	for requestNumber := 1; requestNumber <= 2; requestNumber++ {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
+		recorder := httptest.NewRecorder()
+		apiKey := utils.NewSecureBytes([]byte("provider-secret"))
+		result, err := engine.ProxyRequest(req.Context(), recorder, req, targetURL, apiKey, false)
+		if err != nil {
+			t.Fatalf("request %d: ProxyRequest returned error: %v", requestNumber, err)
+		}
+		if result.StatusCode != http.StatusOK {
+			t.Fatalf("request %d: status = %d, want %d", requestNumber, result.StatusCode, http.StatusOK)
+		}
+	}
+
+	if resolver.calls != 2 {
+		t.Fatalf("resolver calls = %d, want one per fresh connection", resolver.calls)
+	}
+	for index, host := range resolver.hosts {
+		if host != providerHost {
+			t.Fatalf("resolver host %d = %q, want original hostname %q", index, host, providerHost)
+		}
+	}
+	for index, network := range resolver.networks {
+		if network != "ip" {
+			t.Fatalf("resolver network %d = %q, want ip", index, network)
+		}
+	}
+	expectedDialAuthority := net.JoinHostPort("93.184.216.34", providerPort)
+	if got, want := dialer.addresses, []string{expectedDialAuthority, expectedDialAuthority}; !slicesEqual(got, want) {
+		t.Fatalf("dial addresses = %v, want validated IP authorities %v", got, want)
+	}
+	for requestNumber := 1; requestNumber <= 2; requestNumber++ {
+		observation := <-observations
+		if observation.serverName != providerHost {
+			t.Fatalf("request %d: TLS SNI = %q, want original hostname %q", requestNumber, observation.serverName, providerHost)
+		}
+		if observation.host != providerAuthority {
+			t.Fatalf("request %d: provider Host = %q, want %q", requestNumber, observation.host, providerAuthority)
+		}
+		if observation.authorization != "Bearer provider-secret" {
+			t.Fatalf("request %d: authorization = %q, want provider credential", requestNumber, observation.authorization)
+		}
+	}
+}
+
+type staticIPResolver struct {
+	addresses []netip.Addr
+	err       error
+	calls     int
+	networks  []string
+	hosts     []string
+}
+
+func (r *staticIPResolver) LookupNetIP(_ context.Context, network, host string) ([]netip.Addr, error) {
+	r.calls++
+	r.networks = append(r.networks, network)
+	r.hosts = append(r.hosts, host)
+	return append([]netip.Addr(nil), r.addresses...), r.err
+}
+
+type recordingContextDialer struct {
+	addresses []string
+	err       error
+}
+
+func (d *recordingContextDialer) DialContext(_ context.Context, _, address string) (net.Conn, error) {
+	d.addresses = append(d.addresses, address)
+	return nil, d.err
+}
+
+type redirectingContextDialer struct {
+	target    string
+	addresses []string
+}
+
+func (d *redirectingContextDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	d.addresses = append(d.addresses, address)
+	return (&net.Dialer{}).DialContext(ctx, network, d.target)
+}
+
+func slicesEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestProxyRequestTLS13EndToEnd(t *testing.T) {
@@ -122,7 +401,7 @@ func TestProxyRequestTLS13EndToEnd(t *testing.T) {
 	t.Cleanup(upstream.Close)
 
 	engine := NewEngine(StreamConfig{
-		AllowedDomains: []string{"127.0.0.1"},
+		AllowedDomains: []string{upstream.Listener.Addr().String()},
 	})
 	transport := engine.client.Transport.(*http.Transport).Clone()
 	transport.TLSClientConfig = transport.TLSClientConfig.Clone()
@@ -181,6 +460,55 @@ func TestProxyRequestClassifiesUpstreamTransportFailure(t *testing.T) {
 	}
 	if apiKey.Len() != 0 {
 		t.Fatal("provider credential was not zeroed after transport failure")
+	}
+}
+
+func TestProxyRequestRejectsUnsafeProviderCredentialBeforeTransport(t *testing.T) {
+	tests := []struct {
+		name       string
+		credential []byte
+	}{
+		{name: "embedded newline", credential: []byte("sk-first\nsk-second")},
+		{name: "embedded carriage return", credential: []byte("sk-first\rsk-second")},
+		{name: "NUL", credential: []byte{'s', 'k', 0, 'x'}},
+		{name: "control", credential: []byte{'s', 'k', 0x1f, 'x'}},
+		{name: "DEL", credential: []byte{'s', 'k', 0x7f, 'x'}},
+		{name: "non ASCII", credential: []byte("sk-密钥")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transportCalled := false
+			engine := NewEngine(StreamConfig{AllowedDomains: []string{"api.openai.com"}})
+			engine.client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+				transportCalled = true
+				return nil, errors.New("transport must not be called")
+			})
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+			apiKey := utils.NewSecureBytes(append([]byte(nil), tt.credential...))
+			secret := string(tt.credential)
+
+			result, err := engine.ProxyRequest(
+				req.Context(),
+				httptest.NewRecorder(),
+				req,
+				"https://api.openai.com/v1/chat/completions",
+				apiKey,
+				false,
+			)
+			if result != nil || err == nil {
+				t.Fatalf("ProxyRequest result=%v error=%v, want pre-transport rejection", result, err)
+			}
+			if secret != "" && strings.Contains(err.Error(), secret) {
+				t.Fatal("ProxyRequest reflected the rejected provider credential")
+			}
+			if transportCalled {
+				t.Fatal("ProxyRequest reached the transport with an unsafe credential")
+			}
+			if apiKey.Len() != 0 {
+				t.Fatal("ProxyRequest did not zero the rejected provider credential")
+			}
+		})
 	}
 }
 

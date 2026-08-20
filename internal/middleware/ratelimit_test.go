@@ -18,6 +18,7 @@ import (
 
 type recordingLimiter struct {
 	allowDimensions []string
+	allowLimits     []int
 	concurrencyKeys []string
 }
 
@@ -31,9 +32,46 @@ const (
 	memoryLimiterTestHigherDefault   = 2
 )
 
-func (r *recordingLimiter) Allow(_ string, dimension string, _ int, _ time.Duration) (bool, error) {
+func (r *recordingLimiter) Allow(_ string, dimension string, limit int, _ time.Duration) (bool, error) {
 	r.allowDimensions = append(r.allowDimensions, dimension)
+	r.allowLimits = append(r.allowLimits, limit)
 	return true, nil
+}
+
+func TestRateLimiterCapsTokenRPMAtDeploymentDefault(t *testing.T) {
+	limiter := &recordingLimiter{}
+	ctx := &server.RequestContext{
+		Request:      httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		VirtualKeyID: "vk_test",
+		MaxRPM:       1_000_000,
+	}
+
+	rateLimiter(RateLimitConfig{
+		DefaultRPM:     tokenRetentionTestRPM,
+		DefaultMaxConc: tokenRetentionTestMaxConcurrency,
+	}, limiter, nil)(ctx, func() {})
+
+	if len(limiter.allowLimits) != 1 || limiter.allowLimits[0] != tokenRetentionTestRPM {
+		t.Fatalf("RPM limits = %v, want deployment ceiling %d", limiter.allowLimits, tokenRetentionTestRPM)
+	}
+}
+
+func TestRateLimiterUsesStricterTokenRPM(t *testing.T) {
+	limiter := &recordingLimiter{}
+	ctx := &server.RequestContext{
+		Request:      httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		VirtualKeyID: "vk_test",
+		MaxRPM:       7,
+	}
+
+	rateLimiter(RateLimitConfig{
+		DefaultRPM:     tokenRetentionTestRPM,
+		DefaultMaxConc: tokenRetentionTestMaxConcurrency,
+	}, limiter, nil)(ctx, func() {})
+
+	if len(limiter.allowLimits) != 1 || limiter.allowLimits[0] != 7 {
+		t.Fatalf("RPM limits = %v, want stricter token limit 7", limiter.allowLimits)
+	}
 }
 
 func (r *recordingLimiter) AcquireConcurrency(key string, _ int) (bool, func()) {
@@ -158,6 +196,29 @@ func TestMemoryLimiterEvictsExpiredWindowsDuringKeyChurn(t *testing.T) {
 
 	if _, exists := limiter.windows["expired-key:rpm"]; exists {
 		t.Fatal("expired RPM window remained after periodic cleanup")
+	}
+}
+
+func TestMemoryLimiterPrunesExpiredPrefixWithoutRescanningActiveEntries(t *testing.T) {
+	limiter := newMemoryLimiter()
+	now := time.Now()
+	limiter.windows["vk_test:rpm"] = &slidingWindow{
+		window: time.Minute,
+		counts: []timestampedCount{
+			{time: now.Add(-2 * time.Minute), count: 1},
+			{time: now.Add(-30 * time.Second), count: 1},
+			{time: now.Add(-20 * time.Second), count: 1},
+		},
+		total: 3,
+	}
+
+	allowed, err := limiter.Allow("vk_test", "rpm", 2, time.Minute)
+	if err != nil || allowed {
+		t.Fatalf("Allow = allowed:%t err:%v, want active total at limit", allowed, err)
+	}
+	window := limiter.windows["vk_test:rpm"]
+	if window.total != 2 || window.head != 1 {
+		t.Fatalf("window total/head = %d/%d, want 2/1 after prefix prune", window.total, window.head)
 	}
 }
 

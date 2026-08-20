@@ -82,6 +82,7 @@ func TestIssueRejectsInvalidClaimsBeforeSigning(t *testing.T) {
 		{name: "negative rpm", mutate: func(o *IssueOptions) { o.MaxRPM = -1 }},
 		{name: "negative concurrency", mutate: func(o *IssueOptions) { o.MaxConcurrency = -1 }},
 		{name: "empty issuer", mutate: func(o *IssueOptions) { o.Issuer = "" }},
+		{name: "unrevocable key id", mutate: func(o *IssueOptions) { o.KeyID = strings.Repeat("k", MaxRevocableIdentifierBytes+1) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -98,5 +99,72 @@ func TestIssueRejectsInvalidClaimsBeforeSigning(t *testing.T) {
 				t.Fatal("Issue accepted invalid claims")
 			}
 		})
+	}
+}
+
+func TestValidateAtRejectsUnrevocableKeyID(t *testing.T) {
+	key := []byte("0123456789abcdef0123456789abcdef")
+	now := time.Now().UTC()
+	token, err := sign(key, &Claims{
+		KeyID:     strings.Repeat("k", MaxRevocableIdentifierBytes+1),
+		Subject:   "operator-1",
+		Models:    []string{"gpt-4o-mini"},
+		KeySource: KeySourcePool,
+		IssuedAt:  now.Add(-time.Minute).Unix(),
+		ExpiresAt: now.Add(time.Hour).Unix(),
+		Issuer:    "aegis",
+	})
+	if err != nil {
+		t.Fatalf("sign returned error: %v", err)
+	}
+
+	_, err = ValidateAt(token, key, "aegis", 24*time.Hour, now)
+	if err == nil || !strings.Contains(err.Error(), "key id") {
+		t.Fatalf("ValidateAt oversized key id error = %v, want key-id rejection", err)
+	}
+}
+
+func TestTokenTTLRejectsRetentionOverflow(t *testing.T) {
+	key := []byte("0123456789abcdef0123456789abcdef")
+	now := time.Now().UTC()
+	unsafeTTL := MaxTokenTTL + time.Nanosecond
+
+	if _, _, err := Issue(key, IssueOptions{
+		Subject: "operator-1",
+		Models:  []string{"gpt-4o-mini"},
+		TTL:     time.Hour,
+		MaxTTL:  unsafeTTL,
+		Issuer:  "aegis",
+		Now:     now,
+	}); err == nil || !strings.Contains(err.Error(), "maximum supported") {
+		t.Fatalf("Issue unsafe maximum TTL error = %v, want supported-maximum rejection", err)
+	}
+
+	if _, err := ValidateAt("invalid", key, "aegis", unsafeTTL, now); err == nil || !strings.Contains(err.Error(), "maximum supported") {
+		t.Fatalf("ValidateAt unsafe maximum TTL error = %v, want supported-maximum rejection", err)
+	}
+}
+
+func TestValidateAtRejectsOversizedTokenBeforeParsing(t *testing.T) {
+	key := []byte("0123456789abcdef0123456789abcdef")
+	token := strings.Repeat("A", MaxEncodedTokenBytes+1)
+
+	_, err := ValidateAt(token, key, "aegis", 24*time.Hour, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "maximum size") {
+		t.Fatalf("ValidateAt oversized token error = %v, want maximum-size rejection", err)
+	}
+}
+
+func TestIssueRejectsEncodedTokenAboveMaximum(t *testing.T) {
+	_, _, err := Issue([]byte("0123456789abcdef0123456789abcdef"), IssueOptions{
+		Subject: strings.Repeat("s", MaxEncodedTokenBytes),
+		Models:  []string{"gpt-4o-mini"},
+		TTL:     time.Hour,
+		MaxTTL:  24 * time.Hour,
+		Issuer:  "aegis",
+		Now:     time.Now(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "maximum size") {
+		t.Fatalf("Issue oversized token error = %v, want maximum-size rejection", err)
 	}
 }

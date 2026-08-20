@@ -11,11 +11,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
+	"reflect"
 	"strings"
 	"time"
 
+	"github.com/yknothing/AegisLLM/internal/egress"
 	"github.com/yknothing/AegisLLM/internal/kms"
+	"github.com/yknothing/AegisLLM/internal/virtualkey"
 )
 
 // Config is the root configuration structure for Aegis.
@@ -31,10 +33,14 @@ type Config struct {
 }
 
 const (
+	maxConfigFileBytes int64 = 1 << 20
 	// DefaultMaxRequestBodySize is the standalone runtime request-body limit.
-	DefaultMaxRequestBodySize int64 = 10 << 20
+	// It matches the semantic PII processing envelope used by every data-plane
+	// request, so a validated configuration never advertises a wider limit than
+	// the mandatory policy pipeline can accept.
+	DefaultMaxRequestBodySize int64 = 4 << 20
 	// MaxRequestBodySizeLimit is the largest accepted configured body limit.
-	MaxRequestBodySizeLimit int64 = 64 << 20
+	MaxRequestBodySizeLimit int64 = 4 << 20
 )
 
 // ServerConfig defines the HTTP server settings.
@@ -271,7 +277,7 @@ func parseDuration(raw json.RawMessage, field string) (time.Duration, error) {
 	if err := json.Unmarshal(raw, &value); err == nil {
 		d, parseErr := time.ParseDuration(value)
 		if parseErr != nil {
-			return 0, fmt.Errorf("%s must be a valid duration: %w", field, parseErr)
+			return 0, fmt.Errorf("%s must be a valid duration", field)
 		}
 		return d, nil
 	}
@@ -281,13 +287,20 @@ func parseDuration(raw json.RawMessage, field string) (time.Duration, error) {
 		return time.Duration(nanos), nil
 	}
 
-	return 0, fmt.Errorf("%s must be a duration string or integer nanoseconds, got %s", field, strconv.Quote(string(raw)))
+	return 0, fmt.Errorf("%s must be a duration string or integer nanoseconds", field)
 }
 
 func unmarshalStrict(data []byte, dst any) error {
+	if err := validateJSONMembers(data, reflect.TypeOf(dst)); err != nil {
+		return err
+	}
+
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
+		if strings.HasPrefix(err.Error(), "json: unknown field ") {
+			return errors.New("json: unknown field in configuration")
+		}
 		return err
 	}
 
@@ -299,6 +312,164 @@ func unmarshalStrict(data []byte, dst any) error {
 		return err
 	}
 	return nil
+}
+
+func validateJSONMembers(data []byte, dstType reflect.Type) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	return scanJSONValue(decoder, dstType)
+}
+
+func scanJSONValue(decoder *json.Decoder, expectedType reflect.Type) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return errors.New("invalid JSON configuration")
+	}
+	if token == nil {
+		if expectedType != nil {
+			return errors.New("json: null is not allowed in configuration")
+		}
+		return nil
+	}
+
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+
+	switch delim {
+	case '{':
+		return scanJSONObject(decoder, expectedType)
+	case '[':
+		return scanJSONArray(decoder, expectedType)
+	default:
+		return errors.New("invalid JSON configuration")
+	}
+}
+
+func scanJSONObject(decoder *json.Decoder, expectedType reflect.Type) error {
+	exactFields, requireExactFields := exactJSONFields(expectedType)
+	mapValueType := jsonMapValueType(expectedType)
+	seenExact := make(map[string]struct{})
+	seenFolded := make(map[string]string)
+	hasUnknownField := false
+
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return errors.New("invalid JSON configuration")
+		}
+		name, ok := token.(string)
+		if !ok {
+			return errors.New("invalid JSON configuration")
+		}
+
+		if _, exists := seenExact[name]; exists {
+			return errors.New("json: duplicate object member in configuration")
+		}
+		seenExact[name] = struct{}{}
+
+		folded := asciiFoldJSONMember(name)
+		if previous, exists := seenFolded[folded]; exists && previous != name {
+			return errors.New("json: ambiguous object member in configuration")
+		}
+		seenFolded[folded] = name
+
+		valueType := mapValueType
+		if requireExactFields {
+			var exists bool
+			valueType, exists = exactFields[name]
+			if !exists {
+				hasUnknownField = true
+				valueType = nil
+			}
+		}
+		if err := scanJSONValue(decoder, valueType); err != nil {
+			return err
+		}
+	}
+
+	closing, err := decoder.Token()
+	if err != nil || closing != json.Delim('}') {
+		return errors.New("invalid JSON configuration")
+	}
+	if hasUnknownField {
+		return errors.New("json: unknown field in configuration")
+	}
+	return nil
+}
+
+func scanJSONArray(decoder *json.Decoder, expectedType reflect.Type) error {
+	elementType := jsonElementType(expectedType)
+	for decoder.More() {
+		if err := scanJSONValue(decoder, elementType); err != nil {
+			return err
+		}
+	}
+
+	closing, err := decoder.Token()
+	if err != nil || closing != json.Delim(']') {
+		return errors.New("invalid JSON configuration")
+	}
+	return nil
+}
+
+func exactJSONFields(valueType reflect.Type) (map[string]reflect.Type, bool) {
+	valueType = indirectJSONType(valueType)
+	if valueType == nil || valueType.Kind() != reflect.Struct {
+		return nil, false
+	}
+
+	fields := make(map[string]reflect.Type)
+	for i := 0; i < valueType.NumField(); i++ {
+		field := valueType.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			name = field.Name
+		}
+		fields[name] = field.Type
+	}
+	return fields, true
+}
+
+func jsonMapValueType(valueType reflect.Type) reflect.Type {
+	valueType = indirectJSONType(valueType)
+	if valueType != nil && valueType.Kind() == reflect.Map {
+		return valueType.Elem()
+	}
+	return nil
+}
+
+func jsonElementType(valueType reflect.Type) reflect.Type {
+	valueType = indirectJSONType(valueType)
+	if valueType != nil && (valueType.Kind() == reflect.Array || valueType.Kind() == reflect.Slice) {
+		return valueType.Elem()
+	}
+	return nil
+}
+
+func indirectJSONType(valueType reflect.Type) reflect.Type {
+	for valueType != nil && valueType.Kind() == reflect.Pointer {
+		valueType = valueType.Elem()
+	}
+	return valueType
+}
+
+func asciiFoldJSONMember(name string) string {
+	folded := []byte(name)
+	for i, char := range folded {
+		if char >= 'A' && char <= 'Z' {
+			folded[i] = char + ('a' - 'A')
+		}
+	}
+	return string(folded)
 }
 
 func rejectReservedConfigFields(data []byte) error {
@@ -378,7 +549,7 @@ func load(path string, requireSecretEnv bool) (*Config, error) {
 	cfg := defaultConfig()
 
 	if path != "" {
-		data, err := os.ReadFile(path) // #nosec G304 -- path is the explicit operator-supplied config file path.
+		data, err := readBoundedConfigFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("reading config file: %w", err)
 		}
@@ -395,6 +566,32 @@ func load(path string, requireSecretEnv bool) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func readBoundedConfigFile(path string) ([]byte, error) {
+	file, err := openConfigNoFollow(path)
+	if err != nil {
+		return nil, errors.New("unable to open config file")
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, errors.New("config input must be a regular non-symlink file")
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return nil, fmt.Errorf("config input permissions %o allow group/other writes", info.Mode().Perm())
+	}
+	if info.Size() < 0 || info.Size() > maxConfigFileBytes {
+		return nil, fmt.Errorf("config input exceeds %d-byte size limit", maxConfigFileBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxConfigFileBytes+1))
+	if err != nil {
+		return nil, errors.New("unable to read config file")
+	}
+	if int64(len(data)) > maxConfigFileBytes {
+		return nil, fmt.Errorf("config input exceeds %d-byte size limit", maxConfigFileBytes)
+	}
+	return data, nil
 }
 
 // defaultConfig returns a sensible default configuration for standalone mode.
@@ -478,14 +675,26 @@ func (c *Config) validate(requireSecretEnv bool) error {
 	if c.Auth.TokenExpiry <= 0 {
 		return errors.New("auth.token_expiry must be positive")
 	}
+	if c.Auth.TokenExpiry > virtualkey.MaxTokenTTL {
+		return errors.New("auth.token_expiry must not exceed the maximum supported lifetime")
+	}
 	if strings.TrimSpace(c.Auth.Issuer) == "" {
 		return errors.New("auth.issuer must not be empty")
+	}
+	if c.Auth.Issuer != strings.TrimSpace(c.Auth.Issuer) {
+		return errors.New("auth.issuer must not contain leading or trailing whitespace")
+	}
+	if len(c.Auth.Issuer) > virtualkey.MaxRevocableIdentifierBytes {
+		return fmt.Errorf("auth.issuer must not exceed %d bytes", virtualkey.MaxRevocableIdentifierBytes)
 	}
 	if err := ValidateRevocationConfig(c.Auth.Revocation); err != nil {
 		return err
 	}
 
 	if err := ValidateEnabledProviderIDs(c.Providers); err != nil {
+		return err
+	}
+	if err := ValidateEnabledProviderModels(c.Providers); err != nil {
 		return err
 	}
 	enabledProviders := 0
@@ -525,6 +734,9 @@ func (c *Config) validate(requireSecretEnv bool) error {
 	if len(c.Egress.AllowedDomains) == 0 {
 		return errors.New("egress.allowed_domains must contain at least one host")
 	}
+	if err := egress.ValidateAllowlist(c.Egress.AllowedDomains); err != nil {
+		return fmt.Errorf("egress.allowed_domains: %w", err)
+	}
 
 	switch c.RateLimit.Backend {
 	case "memory":
@@ -536,17 +748,26 @@ func (c *Config) validate(requireSecretEnv bool) error {
 	if c.RateLimit.DefaultRPM < 0 {
 		return errors.New("rate_limit.default_rpm must not be negative")
 	}
+	if c.RateLimit.DefaultRPM == 0 {
+		return errors.New("rate_limit.default_rpm must be positive")
+	}
 	if c.RateLimit.DefaultTPM < 0 {
 		return errors.New("rate_limit.default_tpm must not be negative")
 	}
 	if c.RateLimit.DefaultMaxConcurrency < 0 {
 		return errors.New("rate_limit.default_max_concurrency must not be negative")
 	}
+	if c.RateLimit.DefaultMaxConcurrency == 0 {
+		return errors.New("rate_limit.default_max_concurrency must be positive")
+	}
 	if c.RateLimit.DefaultTPM > 0 {
 		return errors.New("rate_limit.default_tpm is reserved; TPM enforcement is not implemented")
 	}
 	if c.RateLimit.RedisURL != "" {
 		return errors.New("rate_limit.redis_url is reserved; redis rate limiter backend is not implemented")
+	}
+	if !c.RateLimit.Enabled {
+		return errors.New("rate_limit.enabled must be true for the v0.2.1 runtime")
 	}
 
 	if c.Quota.Backend != "" {
@@ -575,6 +796,9 @@ func (c *Config) validate(requireSecretEnv bool) error {
 		}
 		if c.KMS.Local.MasterKeyEnv == "" {
 			return errors.New("local KMS requires master_key_env to be set")
+		}
+		if strings.TrimSpace(c.KMS.Local.KeyStorePath) == "" {
+			return errors.New("kms.local.key_store_path must not be empty")
 		}
 		if c.KMS.Local.MinimumEnvelopeVersion != 1 && c.KMS.Local.MinimumEnvelopeVersion != 2 {
 			return errors.New("kms.local.minimum_envelope_version must be 1 or 2")
@@ -607,6 +831,37 @@ func ValidateEnabledProviderIDs(providers []Provider) error {
 			return fmt.Errorf("enabled provider id %q is duplicated", provider.ID)
 		}
 		seen[provider.ID] = struct{}{}
+	}
+	return nil
+}
+
+// ValidateEnabledProviderModels prevents healthy-but-unroutable runtimes by
+// requiring every enabled provider to declare a canonical, unique model set.
+// Errors intentionally omit provider and model values because configuration
+// metadata may be deployment-sensitive.
+func ValidateEnabledProviderModels(providers []Provider) error {
+	for _, provider := range providers {
+		if !provider.Enabled {
+			continue
+		}
+		if len(provider.Models) == 0 {
+			return errors.New("enabled provider must configure at least one model")
+		}
+
+		seen := make(map[string]struct{}, len(provider.Models))
+		for _, model := range provider.Models {
+			trimmed := strings.TrimSpace(model)
+			if trimmed == "" {
+				return errors.New("enabled provider model must not be empty")
+			}
+			if trimmed != model {
+				return errors.New("enabled provider model must not contain leading or trailing whitespace")
+			}
+			if _, exists := seen[model]; exists {
+				return errors.New("enabled provider models must not contain duplicates")
+			}
+			seen[model] = struct{}{}
+		}
 	}
 	return nil
 }

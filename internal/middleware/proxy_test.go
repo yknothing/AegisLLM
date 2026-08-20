@@ -40,7 +40,7 @@ func TestProxyDoesNotRecordLocalEngineErrorAsProviderFailure(t *testing.T) {
 	}
 }
 
-func TestProxyMarksPartialUpstreamFailureAsBadGateway(t *testing.T) {
+func TestProxyPreservesCommittedStatusAfterPartialUpstreamError(t *testing.T) {
 	engine := stubProxyEngine{
 		result: &proxy.ProxyResult{StatusCode: http.StatusOK, OutputTokens: 7},
 		err:    errors.New("stream failed"),
@@ -52,8 +52,8 @@ func TestProxyMarksPartialUpstreamFailureAsBadGateway(t *testing.T) {
 	if ctx.IsAborted() {
 		t.Fatal("proxy middleware aborted after upstream response may have been written")
 	}
-	if ctx.StatusCode != http.StatusBadGateway {
-		t.Fatalf("status = %d, want %d", ctx.StatusCode, http.StatusBadGateway)
+	if ctx.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want committed upstream status %d", ctx.StatusCode, http.StatusOK)
 	}
 	if ctx.OutputTokens != 7 {
 		t.Fatalf("output tokens = %d, want 7", ctx.OutputTokens)
@@ -63,7 +63,7 @@ func TestProxyMarksPartialUpstreamFailureAsBadGateway(t *testing.T) {
 	}
 }
 
-func TestProxyRecordsUpstreamResponseReadFailure(t *testing.T) {
+func TestProxyRecordsReadFailureWithoutRewritingCommittedStatus(t *testing.T) {
 	engine := stubProxyEngine{
 		result: &proxy.ProxyResult{StatusCode: http.StatusOK},
 		err:    fmt.Errorf("stream interrupted: %w", proxy.ErrUpstreamRead),
@@ -78,8 +78,8 @@ func TestProxyRecordsUpstreamResponseReadFailure(t *testing.T) {
 	if !ctx.ProviderFailure {
 		t.Fatal("upstream response read failure was not recorded as a provider failure")
 	}
-	if ctx.StatusCode != http.StatusBadGateway {
-		t.Fatalf("status = %d, want %d", ctx.StatusCode, http.StatusBadGateway)
+	if ctx.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want committed upstream status %d", ctx.StatusCode, http.StatusOK)
 	}
 }
 

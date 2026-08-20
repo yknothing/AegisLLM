@@ -72,11 +72,11 @@ func rateLimiter(cfg RateLimitConfig, limiter Limiter, initErr error) server.Mid
 
 		rpmLimit := cfg.DefaultRPM
 		if ctx.MaxRPM > 0 {
-			rpmLimit = ctx.MaxRPM
+			rpmLimit = effectivePolicyLimit(cfg.DefaultRPM, ctx.MaxRPM)
 		}
 		maxConcurrency := cfg.DefaultMaxConc
 		if ctx.MaxConcurrency > 0 {
-			maxConcurrency = effectiveMaxConcurrency(cfg.DefaultMaxConc, ctx.MaxConcurrency)
+			maxConcurrency = effectivePolicyLimit(cfg.DefaultMaxConc, ctx.MaxConcurrency)
 		}
 
 		// Check RPM limit
@@ -120,6 +120,8 @@ type memoryLimiter struct {
 type slidingWindow struct {
 	counts []timestampedCount
 	window time.Duration
+	head   int
+	total  int
 }
 
 type timestampedCount struct {
@@ -162,24 +164,35 @@ func (m *memoryLimiter) Allow(key, dimension string, limit int, window time.Dura
 	}
 	sw.window = window
 
-	// Evict expired entries
-	cutoff := now.Add(-window)
-	valid := sw.counts[:0]
-	total := 0
-	for _, tc := range sw.counts {
-		if tc.time.After(cutoff) {
-			valid = append(valid, tc)
-			total += tc.count
-		}
-	}
-	sw.counts = valid
+	sw.prune(now)
 
-	if total >= limit {
+	if sw.total >= limit {
 		return false, nil
 	}
 
 	sw.counts = append(sw.counts, timestampedCount{time: now, count: 1})
+	sw.total++
 	return true, nil
+}
+
+func (sw *slidingWindow) prune(now time.Time) {
+	cutoff := now.Add(-sw.window)
+	for sw.head < len(sw.counts) && !sw.counts[sw.head].time.After(cutoff) {
+		sw.total -= sw.counts[sw.head].count
+		sw.head++
+	}
+	if sw.head == len(sw.counts) {
+		sw.counts = nil
+		sw.head = 0
+		sw.total = 0
+		return
+	}
+	// Periodically compact an active window without rescanning its live tail.
+	if sw.head >= 1024 && sw.head*2 >= len(sw.counts) {
+		remaining := copy(sw.counts, sw.counts[sw.head:])
+		sw.counts = sw.counts[:remaining]
+		sw.head = 0
+	}
 }
 
 func (m *memoryLimiter) cleanupExpiredWindows(now time.Time) {
@@ -188,18 +201,10 @@ func (m *memoryLimiter) cleanupExpiredWindows(now time.Time) {
 			delete(m.windows, key)
 			continue
 		}
-		cutoff := now.Add(-sw.window)
-		valid := sw.counts[:0]
-		for _, tc := range sw.counts {
-			if tc.time.After(cutoff) {
-				valid = append(valid, tc)
-			}
-		}
-		if len(valid) == 0 {
+		sw.prune(now)
+		if sw.total == 0 {
 			delete(m.windows, key)
-			continue
 		}
-		sw.counts = valid
 	}
 }
 
@@ -239,8 +244,9 @@ func (m *memoryLimiter) AcquireConcurrency(key string, maxConc int) (bool, func(
 	return true, release
 }
 
-func effectiveMaxConcurrency(defaultMax, keyMax int) int {
-	// A non-zero default is both fallback and deployment-wide ceiling.
+func effectivePolicyLimit(defaultMax, keyMax int) int {
+	// A non-zero default is both fallback and a policy ceiling for each key.
+	// This limiter does not implement an aggregate process-wide ceiling.
 	if keyMax <= 0 {
 		return defaultMax
 	}

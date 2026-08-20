@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +16,7 @@ import (
 
 	"github.com/yknothing/AegisLLM/internal/config"
 	"github.com/yknothing/AegisLLM/internal/kms/factory"
+	"github.com/yknothing/AegisLLM/internal/kms/local"
 	"github.com/yknothing/AegisLLM/internal/virtualkey"
 )
 
@@ -221,6 +225,133 @@ func TestOperatorKMSMigrateDryRunAndApply(t *testing.T) {
 	if info, err := os.Stat(backupDir); err != nil || !info.IsDir() {
 		t.Fatalf("KMS backup directory info=%v err=%v", info, err)
 	}
+}
+
+func TestOperatorKMSMigrationAndEncryptedBackupRestoreWithFileBackend(t *testing.T) {
+	const (
+		masterEnv = "TEST_CLI_MIGRATION_MASTER"
+		keyID     = "openai-key-1"
+		secret    = "sk-legacy-provider-secret"
+	)
+	root := t.TempDir()
+	keyDir := filepath.Join(root, "keys")
+	backupDir := filepath.Join(root, "pre-migration-backup")
+	masterKey := bytes.Repeat([]byte{0x5a}, 32)
+	t.Setenv(masterEnv, hex.EncodeToString(masterKey))
+	configPath := writeOperatorMigrationTestConfig(t, root, keyDir, masterEnv)
+
+	block, err := aes.NewCipher(masterKey)
+	if err != nil {
+		t.Fatalf("aes.NewCipher returned error: %v", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatalf("cipher.NewGCM returned error: %v", err)
+	}
+	nonce := bytes.Repeat([]byte{0x3c}, gcm.NonceSize())
+	legacyBlob := gcm.Seal(append([]byte(nil), nonce...), nonce, []byte(secret), nil)
+	source, err := local.NewFileBackend(keyDir)
+	if err != nil {
+		t.Fatalf("NewFileBackend source returned error: %v", err)
+	}
+	if err := source.Put(keyID, legacyBlob); err != nil {
+		t.Fatalf("seed legacy blob: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runOperator(
+		[]string{"kms", "migrate", "--config", configPath, "--dry-run"},
+		strings.NewReader(""), false, &stdout, &stderr,
+	); code != 0 || !strings.Contains(stderr.String(), "total=1 legacy=1 v2=0 migrated=0") {
+		t.Fatalf("legacy dry-run exit=%d stderr=%q", code, stderr.String())
+	}
+
+	stderr.Reset()
+	if code := runOperator(
+		[]string{"kms", "migrate", "--config", configPath, "--apply", "--backup-dir", backupDir},
+		strings.NewReader(""), false, &stdout, &stderr,
+	); code != 0 || !strings.Contains(stderr.String(), "total=1 legacy=1 v2=0 migrated=1") {
+		t.Fatalf("migration apply exit=%d stderr=%q", code, stderr.String())
+	}
+
+	backup, err := local.NewFileBackend(backupDir)
+	if err != nil {
+		t.Fatalf("NewFileBackend backup returned error: %v", err)
+	}
+	backedUpBlob, err := backup.Get(keyID)
+	if err != nil {
+		t.Fatalf("backup.Get returned error: %v", err)
+	}
+	if !bytes.Equal(backedUpBlob, legacyBlob) {
+		t.Fatal("encrypted backup does not exactly match the pre-migration legacy blob")
+	}
+
+	strictStore, err := local.NewWithMinimumEnvelopeVersion(masterEnv, source, 2)
+	if err != nil {
+		t.Fatalf("NewWithMinimumEnvelopeVersion strict returned error: %v", err)
+	}
+	migratedKey, err := strictStore.GetKey(context.Background(), keyID)
+	if err != nil {
+		_ = strictStore.Close()
+		t.Fatalf("strict v2 GetKey after migration returned error: %v", err)
+	}
+	if got := string(migratedKey.Bytes()); got != secret {
+		migratedKey.Close()
+		_ = strictStore.Close()
+		t.Fatalf("migrated plaintext = %q, want original", got)
+	}
+	migratedKey.Close()
+	if err := strictStore.Close(); err != nil {
+		t.Fatalf("strict store Close returned error: %v", err)
+	}
+
+	if err := source.Put(keyID, backedUpBlob); err != nil {
+		t.Fatalf("restore encrypted backup: %v", err)
+	}
+	strictRestored, err := local.NewWithMinimumEnvelopeVersion(masterEnv, source, 2)
+	if err != nil {
+		t.Fatalf("NewWithMinimumEnvelopeVersion restored strict returned error: %v", err)
+	}
+	if _, err := strictRestored.GetKey(context.Background(), keyID); !errors.Is(err, local.ErrLegacyEnvelopeDisabled) {
+		_ = strictRestored.Close()
+		t.Fatalf("strict restored GetKey error = %v, want ErrLegacyEnvelopeDisabled", err)
+	}
+	_ = strictRestored.Close()
+
+	compatStore, err := local.NewWithMinimumEnvelopeVersion(masterEnv, source, 1)
+	if err != nil {
+		t.Fatalf("NewWithMinimumEnvelopeVersion compatibility returned error: %v", err)
+	}
+	restoredKey, err := compatStore.GetKey(context.Background(), keyID)
+	if err != nil {
+		_ = compatStore.Close()
+		t.Fatalf("compatibility GetKey after restore returned error: %v", err)
+	}
+	if got := string(restoredKey.Bytes()); got != secret {
+		restoredKey.Close()
+		_ = compatStore.Close()
+		t.Fatalf("restored plaintext = %q, want original", got)
+	}
+	restoredKey.Close()
+	if err := compatStore.Close(); err != nil {
+		t.Fatalf("compatibility store Close returned error: %v", err)
+	}
+}
+
+func writeOperatorMigrationTestConfig(t *testing.T, root, keyDir, masterEnv string) string {
+	t.Helper()
+	path := filepath.Join(root, "aegis-migration.json")
+	data := fmt.Sprintf(`{
+  "kms": {"mode":"local","local":{"master_key_env":%q,"key_store_path":%q,"minimum_envelope_version":1}},
+  "providers": [{"id":"openai-primary","name":"OpenAI","type":"openai","base_url":"https://api.openai.com","api_key_id":"openai-key-1","models":["gpt-4o-mini"],"enabled":true}],
+  "auth": {"jwt_signing_key_env":"UNUSED_TEST_CLI_MIGRATION_JWT","token_expiry":"24h","issuer":"aegis","revocation":{"backend":"file","file_path":%q,"refresh_interval":"500ms"}},
+  "quota": {"enabled":false},
+  "egress": {"allowed_domains":["api.openai.com"]}
+}`, masterEnv, keyDir, filepath.Join(root, "revocation", "state.json"))
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatalf("write migration config: %v", err)
+	}
+	return path
 }
 
 type failingReader struct {

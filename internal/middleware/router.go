@@ -45,8 +45,10 @@ type RouterConfig struct {
 // Router creates the routing middleware.
 // It selects the best available provider for the requested model.
 func Router(cfg RouterConfig) server.Middleware {
-	rt := newRouterTable(cfg.Channels)
+	return routerWithTable(cfg, newRouterTable(cfg.Channels))
+}
 
+func routerWithTable(cfg RouterConfig, rt *routerTable) server.Middleware {
 	return func(ctx *server.RequestContext, next func()) {
 		// Extract requested model from the request
 		model, streaming, err := extractModelFromRequest(ctx, cfg.MaxRequestBodySize)
@@ -70,7 +72,7 @@ func Router(cfg RouterConfig) server.Middleware {
 		}
 
 		// Find the best available channel for this model
-		channel := rt.Route(model)
+		channel, lease := rt.Route(model)
 		if channel == nil {
 			ctx.Abort(http.StatusServiceUnavailable, []byte(`{"error":{"message":"no available provider for requested model","type":"service_error"}}`))
 			return
@@ -84,15 +86,19 @@ func Router(cfg RouterConfig) server.Middleware {
 		ctx.BaseURL = channel.BaseURL
 		ctx.IsStreaming = streaming
 
-		next()
-
 		// After request: only the proxy boundary may update provider health.
 		// Gateway-local KMS, adapter, or policy failures must not poison it.
-		if ctx.ProviderFailure {
-			rt.RecordFailure(channel.ID)
-		} else if ctx.ProviderResponded && ctx.StatusCode > 0 && ctx.StatusCode < 400 {
-			rt.RecordSuccess(channel.ID)
-		}
+		defer func() {
+			if ctx.ProviderFailure {
+				rt.RecordFailure(channel.ID, lease)
+			} else if ctx.ProviderResponded {
+				rt.RecordSuccess(channel.ID, lease)
+			} else if lease.probe {
+				rt.ReleaseProbe(channel.ID, lease)
+			}
+		}()
+
+		next()
 	}
 }
 
@@ -102,6 +108,11 @@ type routerTable struct {
 	mu       sync.RWMutex
 	channels []ProviderChannel
 	breakers map[string]*circuitBreaker
+}
+
+type circuitLease struct {
+	generation uint64
+	probe      bool
 }
 
 func newRouterTable(channels []ProviderChannel) *routerTable {
@@ -118,7 +129,7 @@ func newRouterTable(channels []ProviderChannel) *routerTable {
 // Route finds the best available channel for the given model.
 // Strategy: same-model priority routing with weight as a deterministic tie-breaker
 // and circuit breaker health checks.
-func (rt *routerTable) Route(model string) *ProviderChannel {
+func (rt *routerTable) Route(model string) (*ProviderChannel, circuitLease) {
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
 
@@ -143,8 +154,8 @@ func (rt *routerTable) Route(model string) *ProviderChannel {
 	// Select the first healthy channel (lowest priority number = highest priority)
 	for _, ch := range candidates {
 		if breaker, ok := rt.breakers[ch.ID]; ok {
-			if breaker.IsHealthy() {
-				return ch
+			if lease, acquired := breaker.AcquireClosed(); acquired {
+				return ch, lease
 			}
 		}
 	}
@@ -152,28 +163,36 @@ func (rt *routerTable) Route(model string) *ProviderChannel {
 	// All channels are unhealthy - try half-open ones
 	for _, ch := range candidates {
 		if breaker, ok := rt.breakers[ch.ID]; ok {
-			if breaker.AllowProbe() {
-				return ch
+			if lease, acquired := breaker.AllowProbe(); acquired {
+				return ch, lease
 			}
 		}
 	}
 
-	return nil
+	return nil, circuitLease{}
 }
 
-func (rt *routerTable) RecordFailure(channelID string) {
+func (rt *routerTable) RecordFailure(channelID string, lease circuitLease) {
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
 	if b, ok := rt.breakers[channelID]; ok {
-		b.RecordFailure()
+		b.RecordFailure(lease)
 	}
 }
 
-func (rt *routerTable) RecordSuccess(channelID string) {
+func (rt *routerTable) RecordSuccess(channelID string, lease circuitLease) {
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
 	if b, ok := rt.breakers[channelID]; ok {
-		b.RecordSuccess()
+		b.RecordSuccess(lease)
+	}
+}
+
+func (rt *routerTable) ReleaseProbe(channelID string, lease circuitLease) {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	if b, ok := rt.breakers[channelID]; ok {
+		b.ReleaseProbe(lease)
 	}
 }
 
@@ -187,10 +206,12 @@ const (
 )
 
 type circuitBreaker struct {
+	mu           sync.Mutex
 	state        atomic.Int32
 	failures     atomic.Int64
 	lastFailure  atomic.Int64 // Unix timestamp
-	threshold    int64        // Failures before opening
+	generation   uint64
+	threshold    int64 // Failures before opening
 	recoveryTime time.Duration
 }
 
@@ -203,34 +224,90 @@ func newCircuitBreaker() *circuitBreaker {
 	return cb
 }
 
-func (cb *circuitBreaker) IsHealthy() bool {
-	return cb.state.Load() == stateClosed
+func (cb *circuitBreaker) AcquireClosed() (circuitLease, bool) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if cb.state.Load() != stateClosed {
+		return circuitLease{}, false
+	}
+	return circuitLease{generation: cb.generation}, true
 }
 
-func (cb *circuitBreaker) AllowProbe() bool {
+func (cb *circuitBreaker) AllowProbe() (circuitLease, bool) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
 	if cb.state.Load() != stateOpen {
-		return false
+		return circuitLease{}, false
 	}
 	// Check if recovery time has elapsed
 	lastFail := time.Unix(cb.lastFailure.Load(), 0)
 	if time.Since(lastFail) > cb.recoveryTime {
-		cb.state.Store(stateHalfOpen)
-		return true
+		if cb.state.CompareAndSwap(stateOpen, stateHalfOpen) {
+			return circuitLease{generation: cb.generation, probe: true}, true
+		}
 	}
-	return false
+	return circuitLease{}, false
 }
 
-func (cb *circuitBreaker) RecordFailure() {
-	cb.failures.Add(1)
+func (cb *circuitBreaker) RecordFailure(lease circuitLease) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if cb.generation != lease.generation {
+		return
+	}
+
+	if lease.probe {
+		if cb.state.Load() != stateHalfOpen {
+			return
+		}
+		cb.failures.Add(1)
+		cb.lastFailure.Store(time.Now().Unix())
+		if cb.state.CompareAndSwap(stateHalfOpen, stateOpen) {
+			cb.generation++
+		}
+		return
+	}
+
+	if cb.state.Load() != stateClosed {
+		return
+	}
+	if cb.failures.Add(1) >= cb.threshold {
+		cb.lastFailure.Store(time.Now().Unix())
+		if cb.state.CompareAndSwap(stateClosed, stateOpen) {
+			cb.generation++
+		}
+		return
+	}
 	cb.lastFailure.Store(time.Now().Unix())
-	if cb.failures.Load() >= cb.threshold {
-		cb.state.Store(stateOpen)
+}
+
+func (cb *circuitBreaker) RecordSuccess(lease circuitLease) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if cb.generation != lease.generation {
+		return
+	}
+
+	if lease.probe {
+		if cb.state.CompareAndSwap(stateHalfOpen, stateClosed) {
+			cb.failures.Store(0)
+			cb.generation++
+		}
+		return
+	}
+
+	if cb.state.Load() == stateClosed {
+		cb.failures.Store(0)
 	}
 }
 
-func (cb *circuitBreaker) RecordSuccess() {
-	cb.failures.Store(0)
-	cb.state.Store(stateClosed)
+func (cb *circuitBreaker) ReleaseProbe(lease circuitLease) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if !lease.probe || cb.generation != lease.generation {
+		return
+	}
+	cb.state.CompareAndSwap(stateHalfOpen, stateOpen)
 }
 
 // --- Helper Functions ---

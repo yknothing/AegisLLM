@@ -280,6 +280,7 @@ func TestRequestIDMiddlewareRegeneratesUnsafeClientRequestID(t *testing.T) {
 }
 
 func TestAuditMiddlewareLogsVirtualKeyIDNotVirtualKeyToken(t *testing.T) {
+	const modelCanary = "CANARY-private-user-model-7f3c1e9b"
 	var logs bytes.Buffer
 	logger := utils.NewAuditLogger(&logs, slog.LevelInfo)
 	pipeline := &Pipeline{logger: logger}
@@ -287,7 +288,7 @@ func TestAuditMiddlewareLogsVirtualKeyIDNotVirtualKeyToken(t *testing.T) {
 	pipeline.Use(func(ctx *RequestContext, next func()) {
 		ctx.VirtualKeyID = "vk_test_id"
 		ctx.ProviderID = "openai-main"
-		ctx.Model = "gpt-4o"
+		ctx.Model = modelCanary
 		ctx.StatusCode = http.StatusOK
 		next()
 	})
@@ -300,6 +301,68 @@ func TestAuditMiddlewareLogsVirtualKeyIDNotVirtualKeyToken(t *testing.T) {
 	}
 	if strings.Contains(logOutput, `"virtual_key":`) {
 		t.Fatalf("audit log used ambiguous virtual_key field: %s", logOutput)
+	}
+	if strings.Contains(logOutput, modelCanary) {
+		t.Fatalf("audit log leaked the request-controlled model: %s", logOutput)
+	}
+}
+
+func TestAuditMiddlewareLogsCompletionForPanicBeforeCommit(t *testing.T) {
+	const panicCanary = "CANARY-panic-secret-before-commit"
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	pipeline := &Pipeline{logger: logger}
+	pipeline.Use(RecoveryMiddleware(logger))
+	pipeline.Use(AuditMiddleware(logger))
+	pipeline.Use(func(*RequestContext, func()) {
+		panic(panicCanary)
+	})
+
+	recorder := httptest.NewRecorder()
+	pipeline.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", recorder.Code)
+	}
+	logOutput := logs.String()
+	if strings.Count(logOutput, `"msg":"request completed"`) != 1 {
+		t.Fatalf("audit log = %s, want exactly one completion record", logOutput)
+	}
+	if !strings.Contains(logOutput, `"status":500`) {
+		t.Fatalf("audit log = %s, want client status 500", logOutput)
+	}
+	if strings.Contains(logOutput, panicCanary) {
+		t.Fatalf("audit log leaked panic value: %s", logOutput)
+	}
+}
+
+func TestAuditMiddlewareUsesCommittedStatusForPanicAfterCommit(t *testing.T) {
+	const panicCanary = "CANARY-panic-secret-after-commit"
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	pipeline := &Pipeline{logger: logger}
+	pipeline.Use(RecoveryMiddleware(logger))
+	pipeline.Use(AuditMiddleware(logger))
+	pipeline.Use(func(ctx *RequestContext, _ func()) {
+		ctx.Writer.WriteHeader(http.StatusNoContent)
+		panic(panicCanary)
+	})
+
+	recorder := httptest.NewRecorder()
+	pipeline.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want committed 204", recorder.Code)
+	}
+	logOutput := logs.String()
+	if strings.Count(logOutput, `"msg":"request completed"`) != 1 {
+		t.Fatalf("audit log = %s, want exactly one completion record", logOutput)
+	}
+	if !strings.Contains(logOutput, `"status":204`) {
+		t.Fatalf("audit log = %s, want committed client status 204", logOutput)
+	}
+	if strings.Contains(logOutput, panicCanary) {
+		t.Fatalf("audit log leaked panic value: %s", logOutput)
 	}
 }
 

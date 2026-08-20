@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -16,7 +15,7 @@ import (
 	"github.com/yknothing/AegisLLM/internal/utils"
 )
 
-const maxProviderKeyBytes = 16 << 10
+const maxProviderKeyBytes = utils.MaxProviderCredentialBytes
 
 func runOperator(args []string, stdin io.Reader, stdinIsTTY bool, stdout, stderr io.Writer) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
@@ -105,8 +104,8 @@ func runProviderKeyImport(args []string, stdin io.Reader, stdinIsTTY bool, _ io.
 	if len(plaintext) == 0 {
 		return errors.New("provider key stdin is empty")
 	}
-	if bytes.IndexByte(plaintext, 0) >= 0 {
-		return errors.New("provider key stdin contains a NUL byte")
+	if err := utils.ValidateProviderCredentialHeaderValue(plaintext); err != nil {
+		return err
 	}
 	service, _, err := loadOperatorService(*configPath)
 	if err != nil {

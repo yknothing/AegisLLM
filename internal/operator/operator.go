@@ -56,8 +56,9 @@ func New(cfg *config.Config) (*Service, error) {
 	return &Service{cfg: cfg, now: time.Now}, nil
 }
 
-// ImportProviderKey stores a key under the api_key_id of an enabled configured
-// provider. Existing values require explicit replacement approval.
+// ImportProviderKey stores a header-safe key under the api_key_id of an enabled
+// configured provider. Existing values require explicit replacement approval.
+// The caller-owned plaintext buffer is zeroed on every return path.
 func (s *Service) ImportProviderKey(ctx context.Context, providerID string, plaintext []byte, replace bool) error {
 	defer utils.MemZero(plaintext)
 	provider, err := s.enabledProvider(providerID)
@@ -66,6 +67,9 @@ func (s *Service) ImportProviderKey(ctx context.Context, providerID string, plai
 	}
 	if len(plaintext) == 0 {
 		return errors.New("provider key input must not be empty")
+	}
+	if err := utils.ValidateProviderCredentialHeaderValue(plaintext); err != nil {
+		return err
 	}
 	store, err := factory.NewOperatorStore(s.cfg.KMS)
 	if err != nil {

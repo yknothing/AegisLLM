@@ -61,10 +61,10 @@ func Proxy(engine proxyEngine) server.Middleware {
 			if errors.Is(err, proxy.ErrUpstreamTransport) || errors.Is(err, proxy.ErrUpstreamRead) {
 				ctx.ProviderFailure = true
 			}
-			ctx.StatusCode = http.StatusBadGateway
 			if result != nil {
 				// The upstream response may already have been partially written.
-				// Preserve failure accounting without appending a second JSON body.
+				// Preserve its committed status and failure accounting without
+				// appending a second JSON body.
 				return
 			}
 			ctx.Abort(http.StatusBadGateway, []byte(`{"error":{"message":"upstream request failed","type":"server_error"}}`))

@@ -6,10 +6,11 @@
 package runtime
 
 import (
+	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"strings"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/yknothing/AegisLLM/internal/revocation"
 	"github.com/yknothing/AegisLLM/internal/server"
 	"github.com/yknothing/AegisLLM/internal/utils"
+	"github.com/yknothing/AegisLLM/internal/virtualkey"
 )
 
 // NewServer builds a runnable Aegis server with middleware registered in the
@@ -57,16 +59,17 @@ func newServer(cfg *config.Config, logger *slog.Logger, proxyRootCAs *x509.CertP
 		cfg.Auth.Revocation.RefreshInterval,
 	)
 	if err != nil {
-		utils.MemZero(signingKey)
-		_ = kmsProvider.Close()
+		_ = closeRuntimeResources(signingKey, kmsProvider, nil)
 		return nil, fmt.Errorf("loading revocation state: %w", err)
 	}
 
 	channels, poolKeyMapping, providerTypes, err := providerRuntime(cfg)
 	if err != nil {
-		_ = revocationReader.Close()
-		utils.MemZero(signingKey)
-		_ = kmsProvider.Close()
+		_ = closeRuntimeResources(signingKey, kmsProvider, revocationReader)
+		return nil, err
+	}
+	if err := verifyProviderCredentials(context.Background(), kmsProvider, channels); err != nil {
+		_ = closeRuntimeResources(signingKey, kmsProvider, revocationReader)
 		return nil, err
 	}
 
@@ -79,29 +82,67 @@ func newServer(cfg *config.Config, logger *slog.Logger, proxyRootCAs *x509.CertP
 
 	opts, err := runtimeMiddlewareOptions(cfg, signingKey, revocationReader, kmsProvider, channels, poolKeyMapping, providerTypes, engine)
 	if err != nil {
-		_ = revocationReader.Close()
-		utils.MemZero(signingKey)
-		_ = kmsProvider.Close()
+		_ = closeRuntimeResources(signingKey, kmsProvider, revocationReader)
 		return nil, err
 	}
 	opts = append(opts, server.WithShutdownHook(func() error {
-		utils.MemZero(signingKey)
-		revocationErr := revocationReader.Close()
-		kmsErr := kmsProvider.Close()
-		if revocationErr != nil {
-			return revocationErr
-		}
-		return kmsErr
+		return closeRuntimeResources(signingKey, kmsProvider, revocationReader)
 	}))
 
 	srv, err := server.New(cfg, logger, opts...)
 	if err != nil {
-		_ = revocationReader.Close()
-		utils.MemZero(signingKey)
-		_ = kmsProvider.Close()
+		_ = closeRuntimeResources(signingKey, kmsProvider, revocationReader)
 		return nil, err
 	}
 	return srv, nil
+}
+
+// verifyProviderCredentials fails startup unless every distinct enabled
+// provider credential can be decrypted and satisfies the outbound header-value
+// contract. It intentionally does not include key IDs or backend errors in the
+// returned error because both can contain deployment secrets. Every decrypted
+// buffer is zeroed before returning.
+func verifyProviderCredentials(ctx context.Context, provider kms.Provider, channels []middleware.ProviderChannel) error {
+	seen := make(map[string]struct{}, len(channels))
+	for _, channel := range channels {
+		if _, ok := seen[channel.KeyID]; ok {
+			continue
+		}
+		seen[channel.KeyID] = struct{}{}
+
+		credential, err := provider.GetKey(ctx, channel.KeyID)
+		if err != nil || credential == nil {
+			if credential != nil {
+				credential.Close()
+			}
+			return errors.New("provider credential preflight failed")
+		}
+		credentialErr := utils.ValidateProviderCredentialHeaderValue(credential.Bytes())
+		credential.Close()
+		if credentialErr != nil {
+			return errors.New("provider credential preflight failed")
+		}
+	}
+	return nil
+}
+
+type runtimeResourceCloser interface {
+	Close() error
+}
+
+// closeRuntimeResources removes live signing and provider key material before
+// stopping the non-secret revocation poller. All close errors are retained.
+func closeRuntimeResources(signingKey []byte, kmsProvider, revocationReader runtimeResourceCloser) error {
+	utils.MemZero(signingKey)
+	var kmsErr error
+	if kmsProvider != nil {
+		kmsErr = kmsProvider.Close()
+	}
+	var revocationErr error
+	if revocationReader != nil {
+		revocationErr = revocationReader.Close()
+	}
+	return errors.Join(kmsErr, revocationErr)
 }
 
 const (
@@ -194,8 +235,17 @@ func validateRuntimeConfig(cfg *config.Config) error {
 	if cfg.Auth.TokenExpiry <= 0 {
 		return fmt.Errorf("auth.token_expiry must be positive")
 	}
+	if cfg.Auth.TokenExpiry > virtualkey.MaxTokenTTL {
+		return fmt.Errorf("auth.token_expiry must not exceed the maximum supported lifetime")
+	}
 	if strings.TrimSpace(cfg.Auth.Issuer) == "" {
 		return fmt.Errorf("auth.issuer must not be empty")
+	}
+	if cfg.Auth.Issuer != strings.TrimSpace(cfg.Auth.Issuer) {
+		return fmt.Errorf("auth.issuer must not contain leading or trailing whitespace")
+	}
+	if len(cfg.Auth.Issuer) > virtualkey.MaxRevocableIdentifierBytes {
+		return fmt.Errorf("auth.issuer must not exceed %d bytes", virtualkey.MaxRevocableIdentifierBytes)
 	}
 	if err := config.ValidateRevocationConfig(cfg.Auth.Revocation); err != nil {
 		return err
@@ -210,17 +260,26 @@ func validateRuntimeConfig(cfg *config.Config) error {
 	if cfg.RateLimit.DefaultRPM < 0 {
 		return fmt.Errorf("rate_limit.default_rpm must not be negative")
 	}
+	if cfg.RateLimit.DefaultRPM == 0 {
+		return fmt.Errorf("rate_limit.default_rpm must be positive")
+	}
 	if cfg.RateLimit.DefaultTPM < 0 {
 		return fmt.Errorf("rate_limit.default_tpm must not be negative")
 	}
 	if cfg.RateLimit.DefaultMaxConcurrency < 0 {
 		return fmt.Errorf("rate_limit.default_max_concurrency must not be negative")
 	}
+	if cfg.RateLimit.DefaultMaxConcurrency == 0 {
+		return fmt.Errorf("rate_limit.default_max_concurrency must be positive")
+	}
 	if cfg.RateLimit.DefaultTPM > 0 {
 		return fmt.Errorf("rate_limit.default_tpm is reserved; TPM enforcement is not implemented")
 	}
 	if cfg.RateLimit.RedisURL != "" {
 		return fmt.Errorf("rate_limit.redis_url is reserved; redis rate limiter backend is not implemented")
+	}
+	if !cfg.RateLimit.Enabled {
+		return fmt.Errorf("rate_limit.enabled must be true for the v0.2.1 runtime")
 	}
 	if cfg.Quota.Backend != "" {
 		return fmt.Errorf("quota.backend is reserved; quota enforcement is not implemented")
@@ -264,6 +323,12 @@ func validateRuntimeConfig(cfg *config.Config) error {
 			return fmt.Errorf("provider %q: max_tpm is reserved; TPM enforcement is not implemented", providerID)
 		}
 	}
+	if _, _, _, err := providerRuntime(cfg); err != nil {
+		return err
+	}
+	if cfg.KMS.Mode == "local" && strings.TrimSpace(cfg.KMS.Local.KeyStorePath) == "" {
+		return fmt.Errorf("kms.local.key_store_path must not be empty")
+	}
 	return nil
 }
 
@@ -298,12 +363,16 @@ func providerRuntime(cfg *config.Config) ([]middleware.ProviderChannel, map[stri
 	if err := config.ValidateEnabledProviderIDs(cfg.Providers); err != nil {
 		return nil, nil, nil, err
 	}
+	if err := config.ValidateEnabledProviderModels(cfg.Providers); err != nil {
+		return nil, nil, nil, err
+	}
 	channels := make([]middleware.ProviderChannel, 0, len(cfg.Providers))
 	poolKeyMapping := make(map[string]string, len(cfg.Providers))
 	providerTypes := make(map[string]string, len(cfg.Providers))
 
-	if len(cfg.Egress.AllowedDomains) == 0 {
-		return nil, nil, nil, fmt.Errorf("egress.allowed_domains must contain at least one host")
+	rules, err := egress.ParseAllowlist(cfg.Egress.AllowedDomains)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("egress.allowed_domains: %w", err)
 	}
 
 	for _, p := range cfg.Providers {
@@ -316,12 +385,12 @@ func providerRuntime(cfg *config.Config) ([]middleware.ProviderChannel, map[stri
 		if !isSupportedProviderType(p.Type) {
 			return nil, nil, nil, fmt.Errorf("provider %q: provider type %q is not implemented", p.ID, p.Type)
 		}
-		host, err := providerHost(p.BaseURL)
+		endpoint, err := egress.ParseHTTPSURL(p.BaseURL)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("provider %q: %w", p.ID, err)
 		}
-		if !egress.HostAllowed(host, cfg.Egress.AllowedDomains) {
-			return nil, nil, nil, fmt.Errorf("provider %q: base_url host %q is not in egress.allowed_domains", p.ID, host)
+		if !egress.EndpointAllowed(endpoint, rules) {
+			return nil, nil, nil, fmt.Errorf("provider %q: base_url endpoint %q is not in egress.allowed_domains", p.ID, endpoint.Host+":"+endpoint.Port)
 		}
 
 		channels = append(channels, middleware.ProviderChannel{
@@ -347,17 +416,11 @@ func providerRuntime(cfg *config.Config) ([]middleware.ProviderChannel, map[stri
 }
 
 func providerHost(rawURL string) (string, error) {
-	parsed, err := url.Parse(rawURL)
+	endpoint, err := egress.ParseHTTPSURL(rawURL)
 	if err != nil {
-		return "", fmt.Errorf("invalid base_url: %w", err)
+		return "", err
 	}
-	if parsed.Scheme != "https" {
-		return "", fmt.Errorf("base_url must use https")
-	}
-	if parsed.Hostname() == "" {
-		return "", fmt.Errorf("base_url must include a host")
-	}
-	return parsed.Hostname(), nil
+	return endpoint.Host, nil
 }
 
 func isSupportedProviderType(providerType string) bool {

@@ -6,13 +6,17 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/yknothing/AegisLLM/internal/config"
 	"github.com/yknothing/AegisLLM/internal/server"
+	"github.com/yknothing/AegisLLM/internal/virtualkey"
 )
 
 var testSigningKey = []byte("0123456789abcdef0123456789abcdef")
@@ -397,10 +401,55 @@ func TestAuthRejectsRevokedToken(t *testing.T) {
 	}
 }
 
+func TestAuthRejectsOversizedTokenBeforeDownstreamWork(t *testing.T) {
+	checker := &countingRevocationChecker{}
+	pipeline, err := server.NewPipeline(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewPipeline returned error: %v", err)
+	}
+	pipeline.Use(Auth(AuthConfig{
+		SigningKey: testSigningKey,
+		Issuer:     "aegis",
+		Expiry:     testTokenMaxTTL,
+		Revocation: checker,
+	}))
+	downstreamCalls := 0
+	pipeline.Use(func(ctx *server.RequestContext, _ func()) {
+		downstreamCalls++
+		ctx.Writer.WriteHeader(http.StatusNoContent)
+	})
+
+	token := "eyJhbGciOiJIUzI1NiJ9." + strings.Repeat("A", virtualkey.MaxEncodedTokenBytes) + ".AA"
+	for range 3 {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		recorder := httptest.NewRecorder()
+		pipeline.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", recorder.Code)
+		}
+	}
+	if checker.calls != 0 {
+		t.Fatalf("revocation checks = %d, want 0", checker.calls)
+	}
+	if downstreamCalls != 0 {
+		t.Fatalf("downstream calls = %d, want 0", downstreamCalls)
+	}
+}
+
 type failingRevocationChecker struct{}
 
 func (failingRevocationChecker) Check(context.Context, string, string) (bool, error) {
 	return false, context.DeadlineExceeded
+}
+
+type countingRevocationChecker struct {
+	calls int
+}
+
+func (c *countingRevocationChecker) Check(context.Context, string, string) (bool, error) {
+	c.calls++
+	return false, nil
 }
 
 func validAuthClaims(keyID string) VirtualKeyClaims {
