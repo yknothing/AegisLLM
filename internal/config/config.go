@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/netip"
 	"os"
 	"reflect"
 	"strings"
@@ -559,6 +561,7 @@ func load(path string, requireSecretEnv bool) (*Config, error) {
 		if err := rejectReservedConfigFields(data); err != nil {
 			return nil, fmt.Errorf("config validation: %w", err)
 		}
+		bindLegacyLoopbackAllowlistPorts(cfg)
 	}
 
 	if err := cfg.validate(requireSecretEnv); err != nil {
@@ -566,6 +569,54 @@ func load(path string, requireSecretEnv bool) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// bindLegacyLoopbackAllowlistPorts preserves the existing configuration
+// contract for local provider fixtures without restoring host-wide port
+// authorization. A bare loopback IP is expanded only to the exact HTTPS ports
+// declared by enabled providers on that same address. Bare non-loopback IPs and
+// unmatched loopback entries remain invalid and fail the strict egress gate.
+func bindLegacyLoopbackAllowlistPorts(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+
+	bound := make([]string, 0, len(cfg.Egress.AllowedDomains))
+	seen := make(map[string]struct{}, len(cfg.Egress.AllowedDomains))
+	appendUnique := func(entry string) {
+		if _, exists := seen[entry]; exists {
+			return
+		}
+		seen[entry] = struct{}{}
+		bound = append(bound, entry)
+	}
+
+	for _, entry := range cfg.Egress.AllowedDomains {
+		address, err := netip.ParseAddr(entry)
+		if err != nil || address.Zone() != "" || !address.IsLoopback() {
+			appendUnique(entry)
+			continue
+		}
+		address = address.Unmap()
+
+		matched := false
+		for _, provider := range cfg.Providers {
+			if !provider.Enabled {
+				continue
+			}
+			endpoint, err := egress.ParseHTTPSURL(provider.BaseURL)
+			if err != nil || !endpoint.IPLiteral || !endpoint.IP.IsLoopback() || endpoint.IP.Unmap() != address {
+				continue
+			}
+			appendUnique(net.JoinHostPort(endpoint.IP.String(), endpoint.Port))
+			matched = true
+		}
+		if !matched {
+			appendUnique(entry)
+		}
+	}
+
+	cfg.Egress.AllowedDomains = bound
 }
 
 func readBoundedConfigFile(path string) ([]byte, error) {

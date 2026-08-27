@@ -560,6 +560,32 @@ func TestLoadRejectsMalformedEgressAllowlistEntries(t *testing.T) {
 	}
 }
 
+func TestLoadBindsLegacyLoopbackAllowlistToConfiguredProviderPorts(t *testing.T) {
+	example, err := os.ReadFile(filepath.Join("..", "..", "aegis.example.json"))
+	if err != nil {
+		t.Fatalf("read example config: %v", err)
+	}
+	var document any
+	if err := json.Unmarshal(example, &document); err != nil {
+		t.Fatalf("decode example config: %v", err)
+	}
+	setConfigJSONValue(t, document, []any{"providers", 0, "base_url"}, "https://127.0.0.1:18443")
+	setConfigJSONValue(t, document, []any{"providers", 1, "base_url"}, "https://127.0.0.1:28443")
+	setConfigJSONValue(t, document, []any{"egress", "allowed_domains"}, []string{"127.0.0.1"})
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		t.Fatalf("encode loopback config: %v", err)
+	}
+
+	cfg, err := LoadForOperator(writeConfig(t, string(encoded)))
+	if err != nil {
+		t.Fatalf("LoadForOperator loopback compatibility config: %v", err)
+	}
+	if got, want := strings.Join(cfg.Egress.AllowedDomains, ","), "127.0.0.1:18443,127.0.0.1:28443"; got != want {
+		t.Fatalf("bound loopback allowlist = %q, want %q", got, want)
+	}
+}
+
 func TestLoadParsesDurationStrings(t *testing.T) {
 	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
 
