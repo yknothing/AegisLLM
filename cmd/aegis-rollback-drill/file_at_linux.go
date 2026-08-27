@@ -10,6 +10,10 @@ import (
 	"unsafe"
 )
 
+// linuxOpenPath is O_PATH from the Linux UAPI. Go 1.22's syscall package does
+// not expose it, but the flag value is stable across supported Linux targets.
+const linuxOpenPath = 0x200000
+
 func openFileAt(directory *os.File, name string, flags int, mode uint32) (*os.File, error) {
 	if directory == nil || name == "" {
 		return nil, errors.New("directory and entry name are required")
@@ -56,7 +60,7 @@ func readlinkAt(directory *os.File, name string, maxBytes int) ([]byte, error) {
 }
 
 func entryInfoAt(directory *os.File, name string, _ os.FileMode) (os.FileInfo, error) {
-	file, err := openFileAt(directory, name, syscall.O_PATH|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	file, err := openFileAt(directory, name, linuxOpenPath|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
