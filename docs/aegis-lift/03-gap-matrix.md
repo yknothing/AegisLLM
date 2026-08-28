@@ -5,9 +5,9 @@ Legend: P0 this change-set; P1 later; P2 deferred; Out excluded.
 | Capability | LiteLLM | Aegis before | Target | Priority | After this change-set |
 | --- | --- | --- | --- | --- | --- |
 | Chat completions stream+nonstream | Yes | Yes | Keep | P0 | Yes; SSE e2e `TestRuntimeChatSSE` |
-| `GET /v1/models` | Yes | No | Auth + intersection of key and catalog | P0 | Yes; hermetic + Admin-issued key |
+| `GET /v1/models` | Yes | No | Auth + intersection of key and catalog | P0 | Handler present; data-plane path stays 404 until QA lock |
 | Virtual key RPM/concurrency | Yes | Yes | Keep | P0 | Yes |
-| Virtual key TPM | Yes | Reject | Memory sliding window + estimate/reconcile | P0 | Yes |
+| Virtual key TPM | Yes | Reject | Memory sliding window + estimate/reconcile | P0 | Gateway-wide `default_tpm` only; JWT `tpm` stays fail-closed |
 | Key budget fail-closed | Yes | Reject | Memory quota + JWT/config budget | P0 | Yes; `quota_test.go` unknown model |
 | Retry + in-request fallback | Yes | Circuit only | Same-request next channel on 429/5xx/transport | P0 | Yes; `TestRuntimeInRequestFailover` |
 | Weighted LB | Yes | Deterministic weight | Weighted pick among same priority | P0 | Yes; `TestPickWeightedPrefersHeavierChannel` |

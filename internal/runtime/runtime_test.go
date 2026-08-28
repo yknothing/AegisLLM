@@ -25,6 +25,7 @@ import (
 	"github.com/yknothing/AegisLLM/internal/middleware"
 	"github.com/yknothing/AegisLLM/internal/requestid"
 	"github.com/yknothing/AegisLLM/internal/revocation"
+	"github.com/yknothing/AegisLLM/internal/virtualkey"
 )
 
 func TestRuntimeHermeticTLSProviderSuccessPath(t *testing.T) {
@@ -197,25 +198,10 @@ func TestRuntimeHermeticTLSProviderSuccessPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("models request: %v", err)
 	}
-	modelsBody, modelsReadErr := io.ReadAll(modelsResp.Body)
+	_, _ = io.Copy(io.Discard, modelsResp.Body)
 	_ = modelsResp.Body.Close()
-	if modelsReadErr != nil {
-		t.Fatalf("read models response: %v", modelsReadErr)
-	}
-	if modelsResp.StatusCode != http.StatusOK {
-		t.Fatalf("models status = %d body=%s, want 200", modelsResp.StatusCode, modelsBody)
-	}
-	var modelsPayload struct {
-		Object string `json:"object"`
-		Data   []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(modelsBody, &modelsPayload); err != nil {
-		t.Fatalf("decode models: %v", err)
-	}
-	if modelsPayload.Object != "list" || len(modelsPayload.Data) != 1 || modelsPayload.Data[0].ID != "gpt-4o-mini" {
-		t.Fatalf("models payload = %+v, want gpt-4o-mini", modelsPayload)
+	if modelsResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("models status = %d, want 404", modelsResp.StatusCode)
 	}
 
 	unauthModels, err := http.NewRequest(http.MethodGet, gatewayURL+"/v1/models", nil)
@@ -228,8 +214,40 @@ func TestRuntimeHermeticTLSProviderSuccessPath(t *testing.T) {
 	}
 	_, _ = io.Copy(io.Discard, unauthResp.Body)
 	_ = unauthResp.Body.Close()
-	if unauthResp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("unauthenticated models status = %d, want 401", unauthResp.StatusCode)
+	if unauthResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unauthenticated models status = %d, want 404", unauthResp.StatusCode)
+	}
+
+	tpmToken := signRuntimeTestToken(t, jwtKey, middleware.VirtualKeyClaims{
+		KeyID:          "virtual-key-tpm",
+		Subject:        "operator-e2e",
+		Models:         []string{"gpt-4o-mini"},
+		MaxRPM:         10,
+		MaxTPM:         virtualkey.UnlimitedPerKeyTPM + 1,
+		MaxConcurrency: 2,
+		KeySource:      middleware.KeySourcePool,
+		IssuedAt:       now.Add(-time.Minute).Unix(),
+		ExpiresAt:      now.Add(time.Hour).Unix(),
+		Issuer:         "aegis",
+	})
+	tpmHitsBefore := upstreamCalls.Load()
+	tpmReq, err := http.NewRequest(http.MethodPost, gatewayURL+"/v1/chat/completions", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatalf("build tpm request: %v", err)
+	}
+	tpmReq.Header.Set("Authorization", "Bearer "+tpmToken)
+	tpmReq.Header.Set("Content-Type", "application/json")
+	tpmResp, err := client.Do(tpmReq)
+	if err != nil {
+		t.Fatalf("tpm request: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, tpmResp.Body)
+	_ = tpmResp.Body.Close()
+	if tpmResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("tpm claim status = %d, want 401", tpmResp.StatusCode)
+	}
+	if got := upstreamCalls.Load(); got != tpmHitsBefore {
+		t.Fatalf("tpm claim caused provider egress: hits %d -> %d", tpmHitsBefore, got)
 	}
 
 	// A duplicate model member must be rejected before routing or proxying.

@@ -34,7 +34,14 @@ const (
 	MaxTokenTTL   = time.Duration(1<<63-1) - ClockSkew
 	KeySourcePool = "pool"
 	keySourceBYOK = "byok"
+	// UnlimitedPerKeyTPM is the only JWT tpm value Independent QA accepts.
+	// Non-zero per-key TPM remains reserved; gateway-wide rate_limit.default_tpm
+	// still applies when configured.
+	UnlimitedPerKeyTPM = 0
 )
+
+// ErrTPMClaimReserved is returned when a virtual key claims per-key TPM.
+var ErrTPMClaimReserved = errors.New("tpm claim is reserved; per-key TPM is not implemented")
 
 // Claims represents the JWT payload for an Aegis virtual key.
 type Claims struct {
@@ -86,6 +93,9 @@ func Issue(signingKey []byte, opts IssueOptions) (string, *Claims, error) {
 	}
 	if opts.MaxRPM < 0 || opts.MaxConcurrency < 0 || opts.MaxTPM < 0 || opts.BudgetUSD < 0 {
 		return "", nil, errors.New("virtual key limits must not be negative")
+	}
+	if err := rejectReservedTPMClaim(opts.MaxTPM); err != nil {
+		return "", nil, err
 	}
 	if opts.MaxTTL <= 0 {
 		return "", nil, errors.New("configured maximum token lifetime must be positive")
@@ -263,6 +273,14 @@ func validateClaims(claims Claims, expectedIssuer string, maxTokenTTL time.Durat
 	}
 	if claims.MaxRPM < 0 || claims.BudgetUSD < 0 || claims.MaxTPM < 0 || claims.MaxConcurrency < 0 {
 		return errors.New("virtual key limits must not be negative")
+	}
+	return rejectReservedTPMClaim(claims.MaxTPM)
+}
+
+// rejectReservedTPMClaim fails closed on non-zero JWT tpm claims.
+func rejectReservedTPMClaim(maxTPM int) error {
+	if maxTPM > UnlimitedPerKeyTPM {
+		return ErrTPMClaimReserved
 	}
 	return nil
 }

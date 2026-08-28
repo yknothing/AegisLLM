@@ -73,7 +73,7 @@ func TestOperatorVirtualKeyIssueRequiresExplicitSecretOutput(t *testing.T) {
 	args := []string{
 		"virtual-key", "issue", "--config", configPath,
 		"--subject", "client-1", "--models", "gpt-4o-mini", "--ttl", "1h",
-		"--tpm", "4000", "--budget", "5",
+		"--budget", "5",
 	}
 	var stdout, stderr bytes.Buffer
 	if code := runOperator(args, strings.NewReader(""), false, &stdout, &stderr); code == 0 {
@@ -96,8 +96,28 @@ func TestOperatorVirtualKeyIssueRequiresExplicitSecretOutput(t *testing.T) {
 	if validated.Subject != "client-1" {
 		t.Fatalf("subject = %q, want client-1", validated.Subject)
 	}
-	if validated.MaxTPM != 4000 || validated.BudgetUSD != 5 {
-		t.Fatalf("tpm=%d budget=%f, want 4000/5", validated.MaxTPM, validated.BudgetUSD)
+	if validated.BudgetUSD != 5 {
+		t.Fatalf("budget=%f, want 5", validated.BudgetUSD)
+	}
+	if validated.MaxTPM != virtualkey.UnlimitedPerKeyTPM {
+		t.Fatalf("tpm=%d, want reserved unlimited value", validated.MaxTPM)
+	}
+}
+
+func TestOperatorVirtualKeyIssueRejectsTPM(t *testing.T) {
+	configPath := writeOperatorTestConfig(t)
+	args := []string{
+		"virtual-key", "issue", "--config", configPath,
+		"--subject", "client-1", "--models", "gpt-4o-mini", "--ttl", "1h",
+		"--tpm", fmt.Sprintf("%d", virtualkey.UnlimitedPerKeyTPM+1),
+		"--stdout",
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runOperator(args, strings.NewReader(""), false, &stdout, &stderr); code == 0 {
+		t.Fatal("virtual-key issue accepted reserved --tpm")
+	}
+	if !strings.Contains(stderr.String(), "tpm claim is reserved") {
+		t.Fatalf("stderr=%q, want reserved TPM rejection", stderr.String())
 	}
 }
 

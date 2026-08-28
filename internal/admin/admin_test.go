@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -155,7 +156,7 @@ func TestIssueVirtualKeyReturnsJWT(t *testing.T) {
 	mux := http.NewServeMux()
 	handler.RegisterRoutes(mux)
 
-	req := httptest.NewRequest(http.MethodPost, "/admin/keys/virtual", strings.NewReader(`{"subject":"client-1","models":["gpt-4o-mini"],"ttl":"1h","tpm":4000,"budget":5}`))
+	req := httptest.NewRequest(http.MethodPost, "/admin/keys/virtual", strings.NewReader(`{"subject":"client-1","models":["gpt-4o-mini"],"ttl":"1h","budget":5}`))
 	req.Header.Set(adminTokenHeader, adminTestToken)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -170,8 +171,30 @@ func TestIssueVirtualKeyReturnsJWT(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ValidateAt: %v", err)
 	}
-	if claims.MaxTPM != 4000 || claims.BudgetUSD != 5 {
+	if claims.MaxTPM != virtualkey.UnlimitedPerKeyTPM || claims.BudgetUSD != 5 {
 		t.Fatalf("claims tpm=%d budget=%f", claims.MaxTPM, claims.BudgetUSD)
+	}
+}
+
+func TestIssueVirtualKeyRejectsPositiveTPM(t *testing.T) {
+	handler := NewHandlerWithServices(&recordingKMS{}, slog.New(slog.NewTextHandler(io.Discard, nil)), []byte(adminTestToken), Services{
+		SigningKey:    []byte("0123456789abcdef0123456789abcdef"),
+		Issuer:        "aegis",
+		MaxTTL:        24 * time.Hour,
+		AllowedModels: []string{"gpt-4o-mini"},
+	})
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/keys/virtual", strings.NewReader(fmt.Sprintf(
+		`{"subject":"client-1","models":["gpt-4o-mini"],"ttl":"1h","tpm":%d}`,
+		virtualkey.UnlimitedPerKeyTPM+1,
+	)))
+	req.Header.Set(adminTokenHeader, adminTestToken)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s, want 400", rec.Code, rec.Body.String())
 	}
 }
 

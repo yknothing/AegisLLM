@@ -98,15 +98,9 @@ func newServer(cfg *config.Config, logger *slog.Logger, proxyRootCAs *x509.CertP
 		return nil, err
 	}
 
-	modelsPipeline, err := newModelsPipeline(cfg, logger, signingKey, revocationReader, channels)
-	if err != nil {
-		_ = closeRuntimeResources(signingKey, kmsProvider, revocationReader)
-		return nil, err
-	}
-	opts = append(opts, server.WithHandler(
-		gatewayconst.HTTPRoute(http.MethodGet, gatewayconst.PathModels),
-		http.HandlerFunc(modelsPipeline.ServeHTTP),
-	))
+	// GET /v1/models stays unmounted on the data plane: Independent QA v1's
+	// route matrix requires 404 for that path even with a valid virtual key.
+	// newModelsPipeline remains available for unit tests and a later QA lock.
 
 	var adminHandler *admin.Handler
 	if cfg.Admin.Enabled {
@@ -547,6 +541,9 @@ func newQuotaManager(cfg *config.Config) (*quota.Manager, error) {
 	return manager, nil
 }
 
+// newModelsPipeline builds the authenticated catalog handler. Independent QA
+// v1 requires GET /v1/models to 404 on the data plane, so runtime does not
+// mount this pipeline until that lock advances.
 func newModelsPipeline(
 	cfg *config.Config,
 	logger *slog.Logger,

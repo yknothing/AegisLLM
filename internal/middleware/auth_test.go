@@ -129,45 +129,40 @@ func TestValidateTokenRejectsMissingIssuedAtWhenMaxTTLConfigured(t *testing.T) {
 	}
 }
 
-func TestValidateTokenAcceptsBudgetAndTPMClaims(t *testing.T) {
-	tests := []struct {
-		name   string
-		claims VirtualKeyClaims
-	}{
-		{
-			name: "budget",
-			claims: VirtualKeyClaims{
-				BudgetUSD: 10,
-			},
-		},
-		{
-			name: "tpm",
-			claims: VirtualKeyClaims{
-				MaxTPM: 1000,
-			},
-		},
-	}
-
+func TestValidateTokenAcceptsBudgetClaim(t *testing.T) {
 	key := testSigningKey
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			claims := tt.claims
-			claims.KeyID = "vk_test"
-			claims.KeySource = "pool"
-			claims.Models = []string{"gpt-4o-mini"}
-			claims.IssuedAt = time.Now().Add(-time.Minute).Unix()
-			claims.ExpiresAt = time.Now().Add(time.Hour).Unix()
-			claims.Issuer = "aegis"
+	claims := VirtualKeyClaims{
+		KeyID:     "vk_test",
+		KeySource: "pool",
+		Models:    []string{"gpt-4o-mini"},
+		BudgetUSD: 10,
+		IssuedAt:  time.Now().Add(-time.Minute).Unix(),
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		Issuer:    "aegis",
+	}
+	token := signTestToken(t, key, claims)
+	got, err := validateToken(token, key, "aegis", testTokenMaxTTL)
+	if err != nil {
+		t.Fatalf("validateToken rejected supported budget claim: %v", err)
+	}
+	if got.BudgetUSD != claims.BudgetUSD {
+		t.Fatalf("budget = %f, want %f", got.BudgetUSD, claims.BudgetUSD)
+	}
+}
 
-			token := signTestToken(t, key, claims)
-			got, err := validateToken(token, key, "aegis", testTokenMaxTTL)
-			if err != nil {
-				t.Fatalf("validateToken rejected supported %s claim: %v", tt.name, err)
-			}
-			if got.BudgetUSD != claims.BudgetUSD || got.MaxTPM != claims.MaxTPM {
-				t.Fatalf("claims = %+v, want budget=%f tpm=%d", got, claims.BudgetUSD, claims.MaxTPM)
-			}
-		})
+func TestValidateTokenRejectsPositiveTPMClaim(t *testing.T) {
+	key := testSigningKey
+	token := signTestToken(t, key, VirtualKeyClaims{
+		KeyID:     "vk_test",
+		KeySource: "pool",
+		Models:    []string{"gpt-4o-mini"},
+		MaxTPM:    virtualkey.UnlimitedPerKeyTPM + 1,
+		IssuedAt:  time.Now().Add(-time.Minute).Unix(),
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		Issuer:    "aegis",
+	})
+	if _, err := validateToken(token, key, "aegis", testTokenMaxTTL); err == nil {
+		t.Fatal("validateToken accepted reserved per-key TPM claim")
 	}
 }
 

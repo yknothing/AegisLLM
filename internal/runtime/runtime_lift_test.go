@@ -248,8 +248,8 @@ func TestRuntimeAdminLoopbackIssueAndUsage(t *testing.T) {
 	if modelsReadErr != nil {
 		t.Fatalf("read issued-key models: %v", modelsReadErr)
 	}
-	if modelsResp.StatusCode != http.StatusOK {
-		t.Fatalf("issued-key models status = %d body=%s, want 200", modelsResp.StatusCode, modelsBody)
+	if modelsResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("issued-key models status = %d body=%s, want 404", modelsResp.StatusCode, modelsBody)
 	}
 
 	usageReq, err := http.NewRequest(http.MethodGet, env.adminURL+liftAdminUsagePathPrefix+liftUsageProbeKeyID, nil)

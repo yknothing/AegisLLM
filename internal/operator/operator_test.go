@@ -136,7 +136,7 @@ func TestIssueVirtualKeyUsesSharedProductionContract(t *testing.T) {
 	}
 }
 
-func TestIssueVirtualKeyIncludesTPMAndBudget(t *testing.T) {
+func TestIssueVirtualKeyIncludesBudgetAndRejectsTPM(t *testing.T) {
 	cfg := operatorTestConfig(t)
 	service, _ := New(cfg)
 	now := time.Unix(1_800_000_000, 0).UTC()
@@ -147,23 +147,32 @@ func TestIssueVirtualKeyIncludesTPMAndBudget(t *testing.T) {
 		Models:         []string{"gpt-4o-mini"},
 		TTL:            time.Hour,
 		MaxRPM:         10,
-		MaxTPM:         4000,
+		MaxTPM:         virtualkey.UnlimitedPerKeyTPM,
 		MaxConcurrency: 2,
 		BudgetUSD:      12.5,
 	})
 	if err != nil {
 		t.Fatalf("IssueVirtualKey returned error: %v", err)
 	}
-	if claims.MaxTPM != 4000 || claims.BudgetUSD != 12.5 {
-		t.Fatalf("claims tpm=%d budget=%f, want 4000/12.5", claims.MaxTPM, claims.BudgetUSD)
+	if claims.MaxTPM != virtualkey.UnlimitedPerKeyTPM || claims.BudgetUSD != 12.5 {
+		t.Fatalf("claims tpm=%d budget=%f, want 0/12.5", claims.MaxTPM, claims.BudgetUSD)
 	}
 	signingKey := []byte("0123456789abcdef0123456789abcdef")
 	validated, err := virtualkey.ValidateAt(token, signingKey, "aegis", 24*time.Hour, now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("ValidateAt returned error: %v", err)
 	}
-	if validated.MaxTPM != 4000 || validated.BudgetUSD != 12.5 {
+	if validated.MaxTPM != virtualkey.UnlimitedPerKeyTPM || validated.BudgetUSD != 12.5 {
 		t.Fatalf("validated tpm=%d budget=%f", validated.MaxTPM, validated.BudgetUSD)
+	}
+
+	if _, _, err := service.IssueVirtualKey(IssueOptions{
+		Subject: "client-1",
+		Models:  []string{"gpt-4o-mini"},
+		TTL:     time.Hour,
+		MaxTPM:  virtualkey.UnlimitedPerKeyTPM + 1,
+	}); err == nil || !strings.Contains(err.Error(), "tpm claim is reserved") {
+		t.Fatalf("IssueVirtualKey tpm error = %v, want reserved TPM rejection", err)
 	}
 }
 
