@@ -10,6 +10,7 @@
 // SECURITY:
 //   - Only routes to pre-configured providers (no open redirect)
 //   - Validates requested model against virtual key's allowed models
+//   - Same-priority weighted pick uses crypto/rand, never math/rand
 package middleware
 
 import (
@@ -198,6 +199,10 @@ func (rt *routerTable) Route(model string, exclude map[string]struct{}) (*Provid
 		}
 		if len(closed) > 0 {
 			chosen := pickWeighted(closed)
+			if chosen == nil {
+				i = j
+				continue
+			}
 			if breaker, ok := rt.breakers[chosen.ID]; ok {
 				if lease, acquired := breaker.AcquireClosed(); acquired {
 					return chosen, lease
@@ -251,7 +256,14 @@ func (rt *routerTable) hasUnusedCandidate(model string, exclude map[string]struc
 	return false
 }
 
+var errWeightedPickBound = errors.New("weighted pick bound must be positive")
+
+// pickWeighted selects one channel using weight as a same-priority lottery.
+// CSPRNG failure falls back to the first channel so routing never uses math/rand.
 func pickWeighted(channels []*ProviderChannel) *ProviderChannel {
+	if len(channels) == 0 {
+		return nil
+	}
 	if len(channels) == 1 {
 		return channels[0]
 	}
@@ -277,8 +289,6 @@ func pickWeighted(channels []*ProviderChannel) *ProviderChannel {
 	}
 	return channels[len(channels)-1]
 }
-
-var errWeightedPickBound = errors.New("weighted pick bound must be positive")
 
 // cryptoRandIntn returns a uniform value in [0, n) using crypto/rand.
 func cryptoRandIntn(n int) (int, error) {

@@ -1,6 +1,6 @@
 # Scope judgment
 
-Champion: Cover LiteLLM Proxy outcomes that a platform team needs on day one (chat, keys, RPM/TPM, budget, failover, four major protocols) without importing Python, Postgres, or body telemetry.
+Champion: Cover the OpenAI-compatible proxy outcomes that a platform team needs on day one (chat, keys, RPM/TPM, budget, failover, four major protocols) without importing Python, Postgres, or body telemetry.
 
 Challenger: Copying 100 providers, MCP, and the Admin UI would erase the Go/static-binary bet (ADR-005) and explode review surface. In-request fallback that rewrites ADR-004 order is also a trap; keep KMS→Adapter→Proxy order inside a retry loop.
 

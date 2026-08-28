@@ -4,7 +4,7 @@
 Accepted
 
 ## Context
-LiteLLM retries and fails over inside one client request. Aegis v0.2.1 selected one provider and only skipped it on later requests via the circuit breaker. ADR-004 order must stay: Router, then KMS, Adapter, Proxy.
+Typical Python LLM proxies retry and fail over inside one client request. Aegis v0.2.1 selected one provider and only skipped it on later requests via the circuit breaker. ADR-004 order must stay: Router, then KMS, Adapter, Proxy.
 
 ## Decision
 Router may call `next()` more than once for the same request. Each attempt still runs KMS → Adapter → Proxy in that order. Proxy suppresses writing retryable upstream failures (429, 5xx, transport errors) to the client when Router marked the attempt as fallback-capable and the response is not streaming. Canonical OpenAI-format body is restored before each attempt so a native adapter cannot poison the next provider.

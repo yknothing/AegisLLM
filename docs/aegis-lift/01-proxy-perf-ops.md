@@ -1,8 +1,8 @@
-# LiteLLM performance and operations
+# Published Python LLM proxy performance and operations
 
 Status: Hypothesis until reproduced on the same hardware. Snapshot date: 2026-08-28.
 
-Source: https://docs.litellm.ai/docs/benchmarks and production sizing docs.
+Source: public Python LLM-proxy benchmark and production sizing notes. Vendor URLs are omitted on purpose.
 
 ## Published gateway numbers (Hypothesis)
 
@@ -16,7 +16,7 @@ Source: https://docs.litellm.ai/docs/benchmarks and production sizing docs.
 
 ## Cost structure vs Aegis target
 
-| Item | LiteLLM Proxy | Aegis P0 target |
+| Item | Typical Python LLM proxy | Aegis P0 target |
 | --- | --- | --- |
 | Single-host deps | Python runtime + Postgres for keys | One static binary + local KMS file |
 | Memory | Documented growth; worker recycle | No recycle policy |

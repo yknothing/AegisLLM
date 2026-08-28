@@ -2,7 +2,7 @@
 
 Legend: P0 this change-set; P1 later; P2 deferred; Out excluded.
 
-| Capability | LiteLLM | Aegis before | Target | Priority | After this change-set |
+| Capability | Typical Python LLM proxy | Aegis before | Target | Priority | After this change-set |
 | --- | --- | --- | --- | --- | --- |
 | Chat completions stream+nonstream | Yes | Yes | Keep | P0 | Yes; SSE e2e `TestRuntimeChatSSE` |
 | `GET /v1/models` | Yes | No | Auth + intersection of key and catalog | P0 | Handler present; data-plane path stays 404 until QA lock |

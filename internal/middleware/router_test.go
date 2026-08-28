@@ -104,6 +104,12 @@ func TestRouterRetriesSameRequestOnRetryableAttempt(t *testing.T) {
 	}
 }
 
+func TestPickWeightedEmptyReturnsNil(t *testing.T) {
+	if got := pickWeighted(nil); got != nil {
+		t.Fatalf("pickWeighted(nil) = %v, want nil", got)
+	}
+}
+
 func TestPickWeightedPrefersHeavierChannel(t *testing.T) {
 	channels := []*ProviderChannel{
 		{ID: routerTestOpenAIProviderID, Weight: routerTestPrimaryWeight},

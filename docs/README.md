@@ -18,9 +18,11 @@
 
 ## AegisLift
 
-- [Capability catalog](aegis-lift/00-litellm-capability-catalog.md)
+- [Capability catalog](aegis-lift/00-capability-catalog.md)
+- [Proxy performance notes](aegis-lift/01-proxy-perf-ops.md)
 - [Gap matrix](aegis-lift/03-gap-matrix.md)
 - [Bench protocol](aegis-lift/05-bench-protocol.md)
+- [Better and cheaper](aegis-lift/06-better-and-cheaper.md)
 
 ## Guides
 

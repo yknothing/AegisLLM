@@ -4,7 +4,7 @@ All notable changes to AegisLLM are documented here.
 
 ## v0.2.1 - Unreleased
 
-### AegisLift (LiteLLM Proxy outcome parity)
+### AegisLift (OpenAI-compatible gateway outcomes)
 
 - Added OpenAI-compatible model catalog intersection in `ModelsList`; the
   data-plane `GET /v1/models` route stays unmounted (404) until Independent
@@ -20,8 +20,12 @@ All notable changes to AegisLLM are documented here.
 - Added runtime evidence: in-request failover, SSE chat, loopback Admin
   issue, Anthropic/Gemini response transforms, unknown-model
   quota fail-closed.
-- Recorded a same-box mock-upstream overhead run against LiteLLM Proxy 1.98.0
-  (`TestRuntimeSameBoxLiteLLMOverhead`); Aegis p95 was not worse.
+- Recorded a same-box mock-upstream overhead run against a reference Python
+  LLM proxy; Aegis p95 was not worse. See `docs/aegis-lift/05-bench-protocol.md`.
+- Same-priority weighted pick draws from `crypto/rand` (not `math/rand`).
+- Documented that the Gemini `x-goog-api-key` constant is a header name,
+  not a stored credential.
+- Removed third-party LLM proxy product names from public docs and changelog.
 
 ### Standalone operations and security
 
