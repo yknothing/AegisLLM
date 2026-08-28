@@ -13,9 +13,10 @@
 package middleware
 
 import (
+	cryptorand "crypto/rand"
 	"encoding/json"
 	"errors"
-	"math/rand/v2"
+	"math/big"
 	"net/http"
 	"sort"
 	"sync"
@@ -264,7 +265,10 @@ func pickWeighted(channels []*ProviderChannel) *ProviderChannel {
 		weights[i] = weight
 		total += weight
 	}
-	n := rand.IntN(total)
+	n, err := cryptoRandIntn(total)
+	if err != nil {
+		return channels[0]
+	}
 	for i, weight := range weights {
 		if n < weight {
 			return channels[i]
@@ -272,6 +276,20 @@ func pickWeighted(channels []*ProviderChannel) *ProviderChannel {
 		n -= weight
 	}
 	return channels[len(channels)-1]
+}
+
+var errWeightedPickBound = errors.New("weighted pick bound must be positive")
+
+// cryptoRandIntn returns a uniform value in [0, n) using crypto/rand.
+func cryptoRandIntn(n int) (int, error) {
+	if n <= 0 {
+		return 0, errWeightedPickBound
+	}
+	drawn, err := cryptorand.Int(cryptorand.Reader, big.NewInt(int64(n)))
+	if err != nil {
+		return 0, err
+	}
+	return int(drawn.Int64()), nil
 }
 
 func (rt *routerTable) RecordFailure(channelID string, lease circuitLease) {

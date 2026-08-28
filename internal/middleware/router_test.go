@@ -127,6 +127,23 @@ func TestPickWeightedPrefersHeavierChannel(t *testing.T) {
 	}
 }
 
+func TestCryptoRandIntnRejectsNonPositiveBound(t *testing.T) {
+	if _, err := cryptoRandIntn(0); err == nil {
+		t.Fatal("cryptoRandIntn accepted a zero bound")
+	}
+	if _, err := cryptoRandIntn(-1); err == nil {
+		t.Fatal("cryptoRandIntn accepted a negative bound")
+	}
+}
+
+func TestPickWeightedReturnsSoleChannel(t *testing.T) {
+	sole := &ProviderChannel{ID: routerTestOpenAIProviderID, Weight: routerTestPrimaryWeight}
+	chosen := pickWeighted([]*ProviderChannel{sole})
+	if chosen != sole {
+		t.Fatal("pickWeighted did not return the sole channel")
+	}
+}
+
 func TestRouterRejectsUnpermittedModelBeforeProviderSelection(t *testing.T) {
 	ctx := routerTestContext(`{"model":"gpt-4o","messages":[]}`, []string{routerTestFallbackModel})
 

@@ -27,7 +27,7 @@ const (
 	AuthSchemeBearerPrefix  = "Bearer "
 	AuthHeaderAnthropicKey  = "x-api-key"
 	AuthHeaderAzureKey      = "api-key"
-	AuthHeaderGoogleAPIKey  = "x-goog-api-key"
+	AuthHeaderGoogleAPIKey  = "x-goog-api-key" // #nosec G101 -- HTTP header name, not a credential.
 
 	AnthropicVersionHeader = "anthropic-version"
 	AnthropicAPIVersion    = "2023-06-01"
