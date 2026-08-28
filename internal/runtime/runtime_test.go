@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/yknothing/AegisLLM/internal/config"
+	"github.com/yknothing/AegisLLM/internal/gatewayconst"
 	"github.com/yknothing/AegisLLM/internal/middleware"
 	"github.com/yknothing/AegisLLM/internal/requestid"
 	"github.com/yknothing/AegisLLM/internal/revocation"
@@ -517,6 +519,58 @@ func signRuntimeTestToken(t *testing.T, key []byte, claims middleware.VirtualKey
 	_, _ = mac.Write([]byte(signingInput))
 	segments = append(segments, base64.RawURLEncoding.EncodeToString(mac.Sum(nil)))
 	return strings.Join(segments, ".")
+}
+
+// TestNewModelsPipelineListsPermittedModels keeps the unmounted catalog
+// pipeline referenced so Independent QA can keep GET /v1/models at 404.
+func TestNewModelsPipelineListsPermittedModels(t *testing.T) {
+	signingKey := []byte("0123456789abcdef0123456789abcdef")
+	cfg := minimalRuntimeConfig()
+	pipeline, err := newModelsPipeline(
+		cfg,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		signingKey,
+		middleware.NewMemoryRevocationStore(),
+		[]middleware.ProviderChannel{{
+			ID:      "openai-primary",
+			Enabled: true,
+			Models:  []string{"gpt-4o-mini", "gpt-4o"},
+		}},
+	)
+	if err != nil {
+		t.Fatalf("newModelsPipeline: %v", err)
+	}
+
+	now := time.Now()
+	token := signRuntimeTestToken(t, signingKey, middleware.VirtualKeyClaims{
+		KeyID:     "vk_models_pipeline",
+		Subject:   "models-pipeline",
+		Models:    []string{"gpt-4o-mini"},
+		KeySource: middleware.KeySourcePool,
+		IssuedAt:  now.Add(-time.Minute).Unix(),
+		ExpiresAt: now.Add(time.Hour).Unix(),
+		Issuer:    cfg.Auth.Issuer,
+	})
+	req := httptest.NewRequest(http.MethodGet, gatewayconst.PathModels, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	recorder := httptest.NewRecorder()
+	pipeline.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200", recorder.Code, recorder.Body.String())
+	}
+
+	var payload struct {
+		Object string `json:"object"`
+		Data   []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode models: %v", err)
+	}
+	if payload.Object != gatewayconst.OpenAIObjectList || len(payload.Data) != 1 || payload.Data[0].ID != "gpt-4o-mini" {
+		t.Fatalf("payload = %+v, want gpt-4o-mini intersection", payload)
+	}
 }
 
 func TestProviderRuntimeAcceptsExplicitEgressDomains(t *testing.T) {
