@@ -136,6 +136,37 @@ func TestIssueVirtualKeyUsesSharedProductionContract(t *testing.T) {
 	}
 }
 
+func TestIssueVirtualKeyIncludesTPMAndBudget(t *testing.T) {
+	cfg := operatorTestConfig(t)
+	service, _ := New(cfg)
+	now := time.Unix(1_800_000_000, 0).UTC()
+	service.now = func() time.Time { return now }
+
+	token, claims, err := service.IssueVirtualKey(IssueOptions{
+		Subject:        "client-1",
+		Models:         []string{"gpt-4o-mini"},
+		TTL:            time.Hour,
+		MaxRPM:         10,
+		MaxTPM:         4000,
+		MaxConcurrency: 2,
+		BudgetUSD:      12.5,
+	})
+	if err != nil {
+		t.Fatalf("IssueVirtualKey returned error: %v", err)
+	}
+	if claims.MaxTPM != 4000 || claims.BudgetUSD != 12.5 {
+		t.Fatalf("claims tpm=%d budget=%f, want 4000/12.5", claims.MaxTPM, claims.BudgetUSD)
+	}
+	signingKey := []byte("0123456789abcdef0123456789abcdef")
+	validated, err := virtualkey.ValidateAt(token, signingKey, "aegis", 24*time.Hour, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("ValidateAt returned error: %v", err)
+	}
+	if validated.MaxTPM != 4000 || validated.BudgetUSD != 12.5 {
+		t.Fatalf("validated tpm=%d budget=%f", validated.MaxTPM, validated.BudgetUSD)
+	}
+}
+
 func TestIssueVirtualKeyRejectsUnconfiguredModel(t *testing.T) {
 	service, _ := New(operatorTestConfig(t))
 	_, _, err := service.IssueVirtualKey(IssueOptions{

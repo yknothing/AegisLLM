@@ -8,19 +8,17 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/yknothing/AegisLLM/internal/gatewayconst"
 	"github.com/yknothing/AegisLLM/internal/proxy"
 	"github.com/yknothing/AegisLLM/internal/server"
-	"github.com/yknothing/AegisLLM/internal/utils"
 )
 
 type proxyEngine interface {
-	ProxyRequest(
+	Dispatch(
 		ctx context.Context,
 		w http.ResponseWriter,
 		originalReq *http.Request,
-		targetURL string,
-		apiKey *utils.SecureBytes,
-		isStreaming bool,
+		cfg proxy.DispatchConfig,
 	) (*proxy.ProxyResult, error)
 }
 
@@ -42,13 +40,28 @@ func Proxy(engine proxyEngine) server.Middleware {
 			return
 		}
 
-		result, err := engine.ProxyRequest(
+		writer := ctx.Writer
+		var captured *captureWriter
+		if ctx.CanFallback && !ctx.IsStreaming {
+			captured = newCaptureWriter()
+			writer = captured
+		}
+
+		result, err := engine.Dispatch(
 			ctx.Request.Context(),
-			ctx.Writer,
+			writer,
 			ctx.Request,
-			targetURL,
-			ctx.ProviderAPIKey,
-			ctx.IsStreaming,
+			proxy.DispatchConfig{
+				TargetURL:           targetURL,
+				APIKey:              ctx.ProviderAPIKey,
+				IsStreaming:         ctx.IsStreaming,
+				AuthHeader:          ctx.UpstreamAuthHeader,
+				AuthPrefix:          ctx.UpstreamAuthPrefix,
+				ExtraHeaders:        ctx.UpstreamExtraHeaders,
+				TransformResponse:   ctx.TransformResponse,
+				TransformStreamLine: ctx.TransformStreamLine,
+				MaxTransformBytes:   gatewayconst.MaxCapturedResponseBytes,
+			},
 		)
 		if result != nil {
 			ctx.ProviderResponded = true
@@ -61,16 +74,42 @@ func Proxy(engine proxyEngine) server.Middleware {
 			if errors.Is(err, proxy.ErrUpstreamTransport) || errors.Is(err, proxy.ErrUpstreamRead) {
 				ctx.ProviderFailure = true
 			}
+			if captured != nil && ctx.CanFallback && !ctx.ResponseCommitted() && isRetryableProxy(result, err) {
+				ctx.RetryableAttempt = true
+				return
+			}
 			if result != nil {
-				// The upstream response may already have been partially written.
-				// Preserve its committed status and failure accounting without
-				// appending a second JSON body.
+				if captured != nil && !ctx.ResponseCommitted() {
+					captured.FlushTo(ctx.Writer)
+				}
 				return
 			}
 			ctx.Abort(http.StatusBadGateway, []byte(`{"error":{"message":"upstream request failed","type":"server_error"}}`))
 			return
 		}
+		if captured != nil {
+			if ctx.CanFallback && isRetryableStatus(captured.Status()) && !captured.Overflowed() {
+				ctx.RetryableAttempt = true
+				ctx.ProviderFailure = true
+				return
+			}
+			captured.FlushTo(ctx.Writer)
+		}
 	}
+}
+
+func isRetryableProxy(result *proxy.ProxyResult, err error) bool {
+	if errors.Is(err, proxy.ErrUpstreamTransport) {
+		return true
+	}
+	if result == nil {
+		return false
+	}
+	return isRetryableStatus(result.StatusCode)
+}
+
+func isRetryableStatus(status int) bool {
+	return status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
 }
 
 func buildTargetURL(baseURL, targetPath string) (string, error) {

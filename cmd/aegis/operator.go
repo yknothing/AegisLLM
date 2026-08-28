@@ -125,7 +125,9 @@ func runVirtualKeyIssue(args []string, stdout, stderr io.Writer) error {
 	modelsCSV := flags.String("models", "", "comma-separated configured models")
 	ttl := flags.Duration("ttl", 0, "token lifetime, bounded by auth.token_expiry")
 	maxRPM := flags.Int("rpm", 0, "per-key requests per minute")
+	maxTPM := flags.Int("tpm", 0, "per-key tokens per minute; 0 is unlimited")
 	maxConcurrency := flags.Int("max-concurrency", 0, "per-key concurrent request limit")
+	budgetUSD := flags.Float64("budget", 0, "per-key USD budget; 0 is unlimited")
 	outPath := flags.String("out", "", "new owner-only token output file")
 	toStdout := flags.Bool("stdout", false, "write only the token to stdout")
 	if err := flags.Parse(args); err != nil {
@@ -146,7 +148,9 @@ func runVirtualKeyIssue(args []string, stdout, stderr io.Writer) error {
 		Models:         splitCSV(*modelsCSV),
 		TTL:            *ttl,
 		MaxRPM:         *maxRPM,
+		MaxTPM:         *maxTPM,
 		MaxConcurrency: *maxConcurrency,
+		BudgetUSD:      *budgetUSD,
 	})
 	if err != nil {
 		return err

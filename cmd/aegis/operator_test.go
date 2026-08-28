@@ -73,6 +73,7 @@ func TestOperatorVirtualKeyIssueRequiresExplicitSecretOutput(t *testing.T) {
 	args := []string{
 		"virtual-key", "issue", "--config", configPath,
 		"--subject", "client-1", "--models", "gpt-4o-mini", "--ttl", "1h",
+		"--tpm", "4000", "--budget", "5",
 	}
 	var stdout, stderr bytes.Buffer
 	if code := runOperator(args, strings.NewReader(""), false, &stdout, &stderr); code == 0 {
@@ -94,6 +95,9 @@ func TestOperatorVirtualKeyIssueRequiresExplicitSecretOutput(t *testing.T) {
 	}
 	if validated.Subject != "client-1" {
 		t.Fatalf("subject = %q, want client-1", validated.Subject)
+	}
+	if validated.MaxTPM != 4000 || validated.BudgetUSD != 5 {
+		t.Fatalf("tpm=%d budget=%f, want 4000/5", validated.MaxTPM, validated.BudgetUSD)
 	}
 }
 

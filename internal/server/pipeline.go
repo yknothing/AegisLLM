@@ -49,10 +49,18 @@ type RequestContext struct {
 	ProviderID       string
 	ProviderType     string
 	ProviderAPIKeyID string
+	ProviderAPIVersion string
 	Model            string
 	BaseURL          string
 	TargetPath       string
 	IsStreaming      bool
+	CanFallback      bool
+	RetryableAttempt bool
+	UpstreamAuthHeader string
+	UpstreamAuthPrefix string
+	UpstreamExtraHeaders map[string]string
+	TransformResponse    func([]byte) ([]byte, error)
+	TransformStreamLine  func(string) (string, bool, error)
 
 	// Secrets (populated by KMS middleware, zeroed after use)
 	ProviderAPIKey *utils.SecureBytes
@@ -143,6 +151,35 @@ func (rc *RequestContext) IsAborted() bool {
 	return rc.aborted
 }
 
+// ResponseCommitted reports whether a handler already wrote to the client.
+func (rc *RequestContext) ResponseCommitted() bool {
+	return rc.response != nil && rc.response.committed
+}
+
+// ResetAttempt clears per-attempt routing and upstream protocol state so
+// Router can run KMS, Adapter, and Proxy again (ADR-006).
+func (rc *RequestContext) ResetAttempt() {
+	rc.ProviderID = ""
+	rc.ProviderType = ""
+	rc.ProviderAPIKeyID = ""
+	rc.ProviderAPIVersion = ""
+	rc.BaseURL = ""
+	rc.TargetPath = ""
+	rc.CanFallback = false
+	rc.RetryableAttempt = false
+	rc.ProviderResponded = false
+	rc.ProviderFailure = false
+	rc.UpstreamAuthHeader = ""
+	rc.UpstreamAuthPrefix = ""
+	rc.UpstreamExtraHeaders = nil
+	rc.TransformResponse = nil
+	rc.TransformStreamLine = nil
+	if rc.ProviderAPIKey != nil {
+		rc.ProviderAPIKey.Close()
+		rc.ProviderAPIKey = nil
+	}
+}
+
 // Pipeline orchestrates the ordered execution of middleware.
 type Pipeline struct {
 	middlewares []Middleware
@@ -210,7 +247,7 @@ func (p *Pipeline) execute(ctx *RequestContext, index int) {
 		return
 	}
 	if index >= len(p.middlewares) {
-		if ctx.response == nil || !ctx.response.committed {
+		if (ctx.response == nil || !ctx.response.committed) && !ctx.RetryableAttempt {
 			ctx.Abort(http.StatusInternalServerError, []byte(`{"error":{"message":"gateway pipeline produced no response","type":"server_error"}}`))
 		}
 		return
@@ -219,7 +256,7 @@ func (p *Pipeline) execute(ctx *RequestContext, index int) {
 	p.middlewares[index](ctx, func() {
 		p.execute(ctx, index+1)
 	})
-	if !ctx.IsAborted() && (ctx.response == nil || !ctx.response.committed) {
+	if !ctx.IsAborted() && (ctx.response == nil || !ctx.response.committed) && !ctx.RetryableAttempt {
 		ctx.Abort(http.StatusInternalServerError, []byte(`{"error":{"message":"gateway pipeline produced no response","type":"server_error"}}`))
 	}
 }

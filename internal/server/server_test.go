@@ -149,6 +149,21 @@ func TestServerExposesOnlySupportedDataPlaneRoute(t *testing.T) {
 	}
 }
 
+func TestServerMountsExtraHandler(t *testing.T) {
+	cfg := &config.Config{Server: testValidServerConfig()}
+	srv, err := New(cfg, slog.Default(), WithHandler("GET /v1/models", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})))
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNoContent)
+	}
+}
+
 func TestBuildTLSConfigWithCARequiresVerifiedClientCert(t *testing.T) {
 	caPath := writeTestCACert(t)
 	srv := testServerWithTLS(config.TLSConfig{

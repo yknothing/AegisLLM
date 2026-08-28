@@ -22,7 +22,7 @@ Aegis remains a single-process modular gateway: a microkernel HTTP server plus a
 
 The composition root is `internal/runtime`. It owns concrete wiring from configuration to interfaces. `internal/server` owns only exact request dispatch, pipeline execution, recovery, request ID, and audit metadata. Middleware packages depend on `internal/server` for the `RequestContext` contract, but `internal/server` does not depend on middleware implementations.
 
-The data plane is deliberately narrow: `POST /v1/chat/completions` is the only provider route. The pipeline owns the transport body once. PII performs bounded token-level semantic JSON processing and may produce one capped canonical replacement buffer before routing and adaptation reuse it; superseded and final owned byte buffers are zeroed. Provider circuit breakers are updated only from proxy-observed provider responses, never from gateway-local failures.
+The data plane is deliberately narrow: `POST /v1/chat/completions` and authenticated `GET /v1/models` are the provider-facing routes. The pipeline owns the transport body once. PII performs bounded token-level semantic JSON processing and may produce one capped canonical replacement buffer before routing and adaptation reuse it; superseded and final owned byte buffers are zeroed. Provider circuit breakers are updated only from proxy-observed provider responses, never from gateway-local failures. Router may retry KMS → Adapter → Proxy on the same request (ADR-006). Optional quota sits after rate limit and before PII.
 
 ## Runtime Request Flow
 
@@ -34,7 +34,8 @@ flowchart LR
   RequestID --> Audit["Audit metadata"]
   Audit --> Auth["Auth / JWT"]
   Auth --> RateLimit["Rate limit"]
-  RateLimit --> PII["PII redaction"]
+  RateLimit --> Quota["Quota (optional)"]
+  Quota --> PII["PII redaction"]
   PII --> Router["Provider router"]
   Router --> KMS["KMS key injection"]
   KMS --> Adapter["Protocol adapter"]

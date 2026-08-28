@@ -18,7 +18,7 @@ flowchart LR
   Ingress --> Pipeline["Policy pipeline"]
   Pipeline --> KMS["KMS boundary"]
   Pipeline --> Provider["External LLM provider"]
-  Admin["Future admin caller"] --> AdminAPI["Admin API boundary"]
+  Admin["Loopback admin caller"] --> AdminAPI["Admin API boundary"]
 ```
 
 ## Abuse Paths and Controls
@@ -33,7 +33,7 @@ flowchart LR
 | Logs and errors | Secret or content disclosure | Safe audit logger, metadata-only audit fields, generic client-facing errors |
 | Config to runtime | Misspelled security field silently disables a control | Strict JSON decoding at root and nested custom-unmarshal boundaries; unknown fields fail startup |
 | Gateway failure to provider health | Local KMS/adapter/policy 5xx opens a provider circuit | Only proxy-observed provider 429/5xx outcomes count as provider failures |
-| Future admin API | BYOK key submission or deletion by unauthorized caller | Separate listener or mTLS, admin token comparison, request size limits, audit metadata |
+| Loopback Admin API | Stolen `X-Admin-Token`, non-loopback bind, or BYOK key submission | Bind loopback only; constant-time token compare; request size limits; BYOK remains 501; never log issued JWTs |
 
 ## Residual Risks
 

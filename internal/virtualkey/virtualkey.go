@@ -59,7 +59,9 @@ type IssueOptions struct {
 	Subject        string
 	Models         []string
 	MaxRPM         int
+	MaxTPM         int
 	MaxConcurrency int
+	BudgetUSD      float64
 	PoolGroup      string
 	TTL            time.Duration
 	MaxTTL         time.Duration
@@ -82,7 +84,7 @@ func Issue(signingKey []byte, opts IssueOptions) (string, *Claims, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	if opts.MaxRPM < 0 || opts.MaxConcurrency < 0 {
+	if opts.MaxRPM < 0 || opts.MaxConcurrency < 0 || opts.MaxTPM < 0 || opts.BudgetUSD < 0 {
 		return "", nil, errors.New("virtual key limits must not be negative")
 	}
 	if opts.MaxTTL <= 0 {
@@ -118,7 +120,9 @@ func Issue(signingKey []byte, opts IssueOptions) (string, *Claims, error) {
 		Subject:        strings.TrimSpace(opts.Subject),
 		Models:         models,
 		MaxRPM:         opts.MaxRPM,
+		MaxTPM:         opts.MaxTPM,
 		MaxConcurrency: opts.MaxConcurrency,
+		BudgetUSD:      opts.BudgetUSD,
 		KeySource:      KeySourcePool,
 		PoolGroup:      strings.TrimSpace(opts.PoolGroup),
 		IssuedAt:       opts.Now.UTC().Unix(),
@@ -259,12 +263,6 @@ func validateClaims(claims Claims, expectedIssuer string, maxTokenTTL time.Durat
 	}
 	if claims.MaxRPM < 0 || claims.BudgetUSD < 0 || claims.MaxTPM < 0 || claims.MaxConcurrency < 0 {
 		return errors.New("virtual key limits must not be negative")
-	}
-	if claims.BudgetUSD > 0 {
-		return errors.New("budget enforcement is not implemented")
-	}
-	if claims.MaxTPM > 0 {
-		return errors.New("TPM enforcement is not implemented")
 	}
 	return nil
 }

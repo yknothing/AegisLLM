@@ -2,14 +2,19 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/yknothing/AegisLLM/internal/quota"
+	"github.com/yknothing/AegisLLM/internal/revocation"
 	"github.com/yknothing/AegisLLM/internal/utils"
+	"github.com/yknothing/AegisLLM/internal/virtualkey"
 )
 
 const adminTestToken = "admin-token"
@@ -136,4 +141,106 @@ func (r *recordingKMS) ListKeyIDs(ctx context.Context) ([]string, error) {
 
 func (r *recordingKMS) Close() error {
 	return nil
+}
+
+func TestIssueVirtualKeyReturnsJWT(t *testing.T) {
+	signingKey := []byte("0123456789abcdef0123456789abcdef")
+	handler := NewHandlerWithServices(&recordingKMS{}, slog.New(slog.NewTextHandler(io.Discard, nil)), []byte(adminTestToken), Services{
+		SigningKey:    signingKey,
+		Issuer:        "aegis",
+		MaxTTL:        24 * time.Hour,
+		AllowedModels: []string{"gpt-4o-mini"},
+		Now:           func() time.Time { return time.Unix(1_800_000_000, 0).UTC() },
+	})
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/keys/virtual", strings.NewReader(`{"subject":"client-1","models":["gpt-4o-mini"],"ttl":"1h","tpm":4000,"budget":5}`))
+	req.Header.Set(adminTokenHeader, adminTestToken)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload issueVirtualKeyResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	claims, err := virtualkey.ValidateAt(payload.VirtualKey, signingKey, "aegis", 24*time.Hour, time.Unix(1_800_000_000, 0).UTC().Add(time.Minute))
+	if err != nil {
+		t.Fatalf("ValidateAt: %v", err)
+	}
+	if claims.MaxTPM != 4000 || claims.BudgetUSD != 5 {
+		t.Fatalf("claims tpm=%d budget=%f", claims.MaxTPM, claims.BudgetUSD)
+	}
+}
+
+func TestIssueVirtualKeyRejectsUnconfiguredModel(t *testing.T) {
+	handler := NewHandlerWithServices(&recordingKMS{}, slog.New(slog.NewTextHandler(io.Discard, nil)), []byte(adminTestToken), Services{
+		SigningKey:    []byte("0123456789abcdef0123456789abcdef"),
+		Issuer:        "aegis",
+		MaxTTL:        24 * time.Hour,
+		AllowedModels: []string{"gpt-4o-mini"},
+	})
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/admin/keys/virtual", strings.NewReader(`{"subject":"client-1","models":["not-configured"]}`))
+	req.Header.Set(adminTokenHeader, adminTestToken)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestRevokeVirtualKeyUsesRevoker(t *testing.T) {
+	revoker := &stubRevoker{}
+	handler := NewHandlerWithServices(&recordingKMS{}, slog.New(slog.NewTextHandler(io.Discard, nil)), []byte(adminTestToken), Services{
+		Issuer:  "aegis",
+		MaxTTL:  24 * time.Hour,
+		Revoker: revoker,
+	})
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodDelete, "/admin/keys/virtual/vk_test", nil)
+	req.Header.Set(adminTokenHeader, adminTestToken)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+	if revoker.keyID != "vk_test" {
+		t.Fatalf("revoked key = %q", revoker.keyID)
+	}
+}
+
+func TestGetUsageReturnsStoreTotals(t *testing.T) {
+	store := quota.NewMemoryStore()
+	if err := store.RecordUsage(context.Background(), "vk_test", quota.UsageEntry{CostUSD: 1.25, InputTokens: 10, OutputTokens: 5}); err != nil {
+		t.Fatalf("RecordUsage: %v", err)
+	}
+	handler := NewHandlerWithServices(&recordingKMS{}, slog.New(slog.NewTextHandler(io.Discard, nil)), []byte(adminTestToken), Services{
+		Quota: quota.NewManager(store, 0),
+	})
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodGet, "/admin/usage/vk_test", nil)
+	req.Header.Set(adminTokenHeader, adminTestToken)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"key_id":"vk_test"`) {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+}
+
+type stubRevoker struct {
+	keyID string
+}
+
+func (s *stubRevoker) Revoke(_ context.Context, _, keyID string, _ time.Time, _ time.Duration) (revocation.CommitResult, error) {
+	s.keyID = keyID
+	return revocation.CommitResult{Changed: true}, nil
 }

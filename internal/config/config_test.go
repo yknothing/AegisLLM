@@ -244,6 +244,9 @@ func TestLoadRejectsExplicitNullForNonNullableConfigValues(t *testing.T) {
 		{name: "quota dsn", path: []any{"quota", "dsn"}},
 		{name: "quota default budget", path: []any{"quota", "default_budget"}},
 
+		{name: "root admin", path: []any{"admin"}},
+		{name: "admin enabled", path: []any{"admin", "enabled"}},
+
 		{name: "store type", path: []any{"store", "type"}},
 		{name: "store dsn", path: []any{"store", "dsn"}},
 
@@ -665,7 +668,7 @@ func TestLoadExampleConfig(t *testing.T) {
 		t.Fatalf("Load example config returned error: %v", err)
 	}
 	if cfg.RateLimit.DefaultTPM != 0 {
-		t.Fatalf("example default_tpm = %d, want 0 until TPM enforcement exists", cfg.RateLimit.DefaultTPM)
+		t.Fatalf("example default_tpm = %d, want 0 (unlimited) by default", cfg.RateLimit.DefaultTPM)
 	}
 	if cfg.Auth.TokenExpiry > 24*time.Hour {
 		t.Fatalf("example token expiry = %v, want no more than 24h for the standalone baseline", cfg.Auth.TokenExpiry)
@@ -685,10 +688,13 @@ func TestLoadExampleConfig(t *testing.T) {
 		}
 	}
 	if cfg.Quota.Enabled {
-		t.Fatal("example config enabled quota before runtime enforcement exists")
+		t.Fatal("example config must keep quota disabled by default")
 	}
 	if cfg.Quota.Backend != "" || cfg.Quota.DSN != "" || cfg.Quota.DefaultBudget != 0 {
-		t.Fatalf("example quota reserved fields = backend=%q dsn=%q budget=%f, want empty/zero until quota enforcement exists", cfg.Quota.Backend, cfg.Quota.DSN, cfg.Quota.DefaultBudget)
+		t.Fatalf("example quota optional fields = backend=%q dsn=%q budget=%f, want empty/zero while quota is disabled", cfg.Quota.Backend, cfg.Quota.DSN, cfg.Quota.DefaultBudget)
+	}
+	if cfg.Admin.Enabled {
+		t.Fatal("example config must keep admin disabled by default")
 	}
 	if cfg.Store.Type != "" || cfg.Store.DSN != "" {
 		t.Fatalf("example store reserved fields = type=%q dsn=%q, want empty until control-plane store exists", cfg.Store.Type, cfg.Store.DSN)
@@ -912,13 +918,13 @@ func TestLoadRejectsProviderAPIKeyIDAboveKMSBound(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsQuotaUntilRuntimeEnforcementExists(t *testing.T) {
+func TestLoadAcceptsEnabledMemoryQuota(t *testing.T) {
 	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
 
 	path := writeConfig(t, `{
 		"kms": {
 			"mode": "local",
-			"local": {"master_key_env": "AEGIS_MASTER_KEY"}
+			"local": {"master_key_env": "AEGIS_MASTER_KEY", "key_store_path": "aegis.keys"}
 		},
 		"providers": [
 			{
@@ -931,13 +937,16 @@ func TestLoadRejectsQuotaUntilRuntimeEnforcementExists(t *testing.T) {
 				"enabled": true
 			}
 		],
-		"quota": {"enabled": true},
+		"quota": {"enabled": true, "backend": "memory", "default_budget": 10},
 		"egress": {"allowed_domains": ["api.openai.com"]}
 	}`)
 
-	_, err := Load(path)
-	if err == nil || !strings.Contains(err.Error(), "quota enforcement is not implemented") {
-		t.Fatalf("Load error = %v, want quota enforcement failure", err)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load enabled memory quota: %v", err)
+	}
+	if !cfg.Quota.Enabled || cfg.Quota.DefaultBudget != 10 {
+		t.Fatalf("quota = %+v, want enabled memory budget", cfg.Quota)
 	}
 }
 
@@ -969,15 +978,15 @@ func TestLoadRejectsReservedPersistenceConfig(t *testing.T) {
 				"enabled": false,
 				"default_budget": 100.0
 			}`,
-			wantErr: "quota.default_budget is reserved",
+			wantErr: "quota.default_budget requires quota.enabled=true",
 		},
 		{
-			name: "zero quota default budget field present",
+			name: "quota model prices require enabled",
 			config: `"quota": {
 				"enabled": false,
-				"default_budget": 0
+				"model_prices": [{"model": "gpt-4o-mini", "input_per_million": 1, "output_per_million": 2}]
 			}`,
-			wantErr: "quota.default_budget is reserved",
+			wantErr: "quota.model_prices requires quota.enabled=true",
 		},
 		{
 			name: "store type",
@@ -1264,34 +1273,6 @@ func TestLoadRejectsReservedRateControls(t *testing.T) {
 			wantErr: "TPM enforcement is not implemented",
 		},
 		{
-			name: "default_tpm",
-			config: `{
-				"kms": {
-					"mode": "local",
-					"local": {"master_key_env": "AEGIS_MASTER_KEY"}
-				},
-				"providers": [
-					{
-						"id": "openai-primary",
-						"name": "OpenAI Primary",
-						"type": "openai",
-						"base_url": "https://api.openai.com",
-						"api_key_id": "openai-key-1",
-						"models": ["gpt-4o-mini"],
-						"enabled": true
-					}
-				],
-				"rate_limit": {
-					"enabled": true,
-					"backend": "memory",
-					"default_tpm": 1000
-				},
-				"quota": {"enabled": false},
-				"egress": {"allowed_domains": ["api.openai.com"]}
-			}`,
-			wantErr: "TPM enforcement is not implemented",
-		},
-		{
 			name: "redis url field present",
 			config: `{
 				"kms": {
@@ -1354,6 +1335,71 @@ func TestLoadRejectsReservedRateControls(t *testing.T) {
 				t.Fatalf("Load error = %v, want %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestLoadAcceptsDefaultTPM(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+	path := writeConfig(t, `{
+		"kms": {
+			"mode": "local",
+			"local": {"master_key_env": "AEGIS_MASTER_KEY", "key_store_path": "aegis.keys"}
+		},
+		"providers": [
+			{
+				"id": "openai-primary",
+				"name": "OpenAI Primary",
+				"type": "openai",
+				"base_url": "https://api.openai.com",
+				"api_key_id": "openai-key-1",
+				"models": ["gpt-4o-mini"],
+				"enabled": true
+			}
+		],
+		"rate_limit": {
+			"enabled": true,
+			"backend": "memory",
+			"default_rpm": 60,
+			"default_tpm": 1000,
+			"default_max_concurrency": 10
+		},
+		"quota": {"enabled": false},
+		"egress": {"allowed_domains": ["api.openai.com"]}
+	}`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load default TPM: %v", err)
+	}
+	if cfg.RateLimit.DefaultTPM != 1000 {
+		t.Fatalf("default_tpm = %d, want 1000", cfg.RateLimit.DefaultTPM)
+	}
+}
+
+func TestLoadRejectsAdminNonLoopback(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+	path := writeConfig(t, `{
+		"kms": {
+			"mode": "local",
+			"local": {"master_key_env": "AEGIS_MASTER_KEY", "key_store_path": "aegis.keys"}
+		},
+		"providers": [
+			{
+				"id": "openai-primary",
+				"name": "OpenAI Primary",
+				"type": "openai",
+				"base_url": "https://api.openai.com",
+				"api_key_id": "openai-key-1",
+				"models": ["gpt-4o-mini"],
+				"enabled": true
+			}
+		],
+		"quota": {"enabled": false},
+		"admin": {"enabled": true, "address": "0.0.0.0:9090", "token_env": "AEGIS_ADMIN_TOKEN"},
+		"egress": {"allowed_domains": ["api.openai.com"]}
+	}`)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Fatalf("Load error = %v, want loopback admin rejection", err)
 	}
 }
 

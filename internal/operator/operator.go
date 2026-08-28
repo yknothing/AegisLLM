@@ -42,7 +42,9 @@ type IssueOptions struct {
 	Models         []string
 	TTL            time.Duration
 	MaxRPM         int
+	MaxTPM         int
 	MaxConcurrency int
+	BudgetUSD      float64
 }
 
 // New creates an offline operator service.
@@ -106,7 +108,9 @@ func (s *Service) IssueVirtualKey(opts IssueOptions) (string, *virtualkey.Claims
 		Subject:        opts.Subject,
 		Models:         opts.Models,
 		MaxRPM:         opts.MaxRPM,
+		MaxTPM:         opts.MaxTPM,
 		MaxConcurrency: opts.MaxConcurrency,
+		BudgetUSD:      opts.BudgetUSD,
 		TTL:            opts.TTL,
 		MaxTTL:         s.cfg.Auth.TokenExpiry,
 		Issuer:         s.cfg.Auth.Issuer,

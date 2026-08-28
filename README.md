@@ -2,7 +2,7 @@
 
 **Security-first LLM API Gateway**
 
-Aegis is a lightweight, secure gateway for managing access to multiple LLM providers. It provides unified API access, encrypted key management, intelligent routing, and request/concurrency rate limiting through a single binary. Cost control is an explicit planned capability and is not enforced in the current runtime.
+Aegis is a lightweight, secure gateway for managing access to multiple LLM providers. It provides unified API access, encrypted key management, intelligent routing, request/token rate limiting, and optional in-memory budget control through a single binary.
 
 ## Why Aegis?
 
@@ -20,7 +20,7 @@ Aegis is a lightweight, secure gateway for managing access to multiple LLM provi
 Aegis uses a **microkernel + middleware pipeline** architecture:
 
 ```
-Request → [Auth] → [RateLimit] → [PII] → [Router] → [KMS] → [Adapter] → [Proxy] → Provider
+Request → [Auth] → [RateLimit] → [Quota?] → [PII] → [Router] → [KMS] → [Adapter] → [Proxy] → Provider
 ```
 
 Every feature is a middleware plugin. The core is minimal and auditable.
@@ -31,9 +31,9 @@ Architecture truth surface: `v0.2.1`, superseding the `v0.2.0` hardening baselin
 
 This repository currently provides the runtime framework and a minimal OpenAI-compatible gateway path:
 
-- Implemented baseline: safe logger, strict config loading, fail-closed middleware composition, HS256 virtual-key issuance/validation, durable single-host revocation, in-memory rate limiting, PII redaction, provider routing, keyID-bound local encrypted file KMS, an offline Operator CLI, egress allowlist validation, and streaming response proxying.
-- Explicitly not production-ready yet: Admin API key issuance, BYOK key-source runtime, Vault KMS, Redis rate limiter, quota/TPM enforcement, durable control-plane store, and non-OpenAI protocol transformations.
-- Fail-fast behavior: unknown config fields, empty auth issuer, a missing durable local KMS path, enabled providers without a canonical non-empty model set, missing/unreadable enabled-provider credentials, disabled request limiting, missing/unsupported JWT key source, unsupported Vault/Redis/quota/store/TPM capabilities, and an exhausted pipeline without a terminal response are rejected instead of silently running without controls.
+- Implemented baseline: safe logger, strict config loading, fail-closed middleware composition, HS256 virtual-key issuance/validation (including TPM and budget claims), durable single-host revocation, in-memory RPM/TPM/concurrency limiting, optional in-memory quota, PII redaction, in-request failover, weighted same-priority routing, keyID-bound local encrypted file KMS, an offline Operator CLI, loopback Admin issue/revoke/usage, egress allowlist validation, OpenAI-compatible `GET /v1/models`, adapters for OpenAI/DeepSeek/OpenRouter/Azure/Anthropic/Gemini, and streaming response proxying.
+- Explicitly not production-ready yet: BYOK key-source runtime, Vault KMS, Redis rate limiter, durable quota/control-plane store, and a public (non-loopback) Admin UI.
+- Fail-fast behavior: unknown config fields, empty auth issuer, a missing durable local KMS path, enabled providers without a canonical non-empty model set, missing/unreadable enabled-provider credentials, disabled request limiting, missing/unsupported JWT key source, unsupported Vault/Redis/store capabilities, quota enabled without model prices, Admin bound off loopback, and an exhausted pipeline without a terminal response are rejected instead of silently running without controls.
 
 ## Dedicated Test-Server Smoke
 
@@ -112,6 +112,7 @@ response = client.chat.completions.create(
     messages=[{"role": "user", "content": "Hello!"}],
     stream=True
 )
+print([m.id for m in client.models.list().data])
 ```
 
 New stores use `kms.local.minimum_envelope_version=2`. To migrate an older
@@ -130,18 +131,19 @@ rollback.
 
 | Capability | Status |
 | :--- | :--- |
-| OpenAI-compatible `POST /v1/chat/completions` path | Baseline framework implemented; other data-plane paths and methods do not enter the policy pipeline |
+| OpenAI-compatible `POST /v1/chat/completions` path | Implemented; SSE and non-stream |
+| `GET /v1/models` | Auth + intersection of virtual-key models and enabled provider catalog |
 | Virtual key auth | Offline HS256 issuance and runtime validation implemented; RS256 is planned |
-| Provider support | `openai` and OpenAI-compatible `deepseek` enabled; Anthropic/Gemini fail closed until adapters are implemented |
+| Provider support | `openai`, `deepseek`, `openrouter` (OpenAI-compatible), `azure`, `anthropic`, `google` |
 | KMS | Local AES-GCM v2 envelope binds ciphertext to key ID as AAD; binary-loaded config requires an encrypted file store; the in-memory backend is limited to explicit programmatic tests; compatibility migration ends in a strict-v2 format floor; Vault is planned |
-| Revocation | Versioned local snapshot, serialized atomic CLI writes, 500 ms polling, in-memory request checks, and within-process monotonic preservation of unexpired tombstones implemented for single-host deployments; cross-restart trusted anchoring and a shared backend are planned |
-| Operator CLI | Offline revocation initialization, provider-key import, virtual-key issue/revoke, and KMS migration implemented; no network Admin API is mounted |
-| Rate limiting | In-memory per-virtual-key RPM and concurrency implemented and mandatory in v0.2.1; `enabled=false`, zero `default_rpm`, and zero `default_max_concurrency` fail fast; positive defaults are per-key policy ceilings, not aggregate process/IP limits; non-zero TPM, Redis backend, and `redis_url` fail fast until implemented |
+| Revocation | Versioned local snapshot, serialized atomic CLI/Admin writes, 500 ms polling, in-memory request checks, and within-process monotonic preservation of unexpired tombstones implemented for single-host deployments; cross-restart trusted anchoring and a shared backend are planned |
+| Operator CLI | Offline revocation initialization, provider-key import, virtual-key issue/revoke (`--rpm`, `--tpm`, `--budget`), and KMS migration implemented |
+| Rate limiting | In-memory per-virtual-key RPM, optional TPM (0 = unlimited), and concurrency implemented and mandatory in v0.2.1; `enabled=false`, zero `default_rpm`, and zero `default_max_concurrency` fail fast; positive defaults are per-key policy ceilings, not aggregate process/IP limits; Redis backend and `redis_url` fail fast until implemented |
 | PII protection | Bounded semantic-JSON redaction for the supported OpenAI-compatible schema; escaped strings, duplicate/ambiguous members, PII in keys or numeric positions, and PII split across text parts in one message fail closed or are redacted according to mode. This is lexical DLP, not a guarantee against model-level inference |
 | Request memory | The validated transport/semantic request ceiling is 4 MiB; PII additionally enforces a 512 KiB string/joined-text ceiling, 1 MiB content-array ceiling, and structural budgets. Superseded/final byte buffers are zeroed where owned; provider responses are streamed |
-| Cost management | Pricing/quota modules scaffolded; `quota.enabled=true` and reserved quota backend/DSN/default-budget fields are rejected until runtime enforcement exists |
-| Admin API / BYOK | Handler scaffold exists but is not mounted by the main gateway; mutating/query endpoints fail closed with `501`, and `key_source="byok"` virtual keys are rejected until owner/provider binding exists |
-| Streaming proxy | SSE forwarding baseline implemented; token counting is heuristic |
+| Cost management | In-memory quota when `quota.enabled=true`; JWT/config budget fail-closed; unknown models have no silent default price; durable `quota.dsn` remains reserved |
+| Admin API / BYOK | Loopback Admin issues/revokes pool keys and reports usage; BYOK routes stay `501`; `key_source="byok"` virtual keys are rejected until owner/provider binding exists |
+| Streaming proxy | SSE forwarding with in-request failover for non-stream 429/5xx/transport; token counting is heuristic then TPM-reconciled |
 | mTLS | Server TLS implemented; mTLS requires `ca_file`; `min_version` is currently fixed to TLS 1.3 |
 
 ## Deployment Modes

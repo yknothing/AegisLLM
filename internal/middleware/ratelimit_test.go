@@ -33,10 +33,16 @@ const (
 )
 
 func (r *recordingLimiter) Allow(_ string, dimension string, limit int, _ time.Duration) (bool, error) {
+	return r.AllowN("", dimension, 1, limit, 0)
+}
+
+func (r *recordingLimiter) AllowN(_ string, dimension string, n, limit int, _ time.Duration) (bool, error) {
 	r.allowDimensions = append(r.allowDimensions, dimension)
 	r.allowLimits = append(r.allowLimits, limit)
 	return true, nil
 }
+
+func (r *recordingLimiter) Record(string, string, int, time.Duration) {}
 
 func TestRateLimiterCapsTokenRPMAtDeploymentDefault(t *testing.T) {
 	limiter := &recordingLimiter{}
@@ -79,35 +85,36 @@ func (r *recordingLimiter) AcquireConcurrency(key string, _ int) (bool, func()) 
 	return true, func() {}
 }
 
-func TestRateLimiterFailsClosedForTPMClaims(t *testing.T) {
+func TestRateLimiterEnforcesTPMClaims(t *testing.T) {
+	limiter := &recordingLimiter{}
 	ctx := &server.RequestContext{
-		Request:      httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		Request:      httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o-mini","messages":[]}`)),
 		VirtualKeyID: "vk_test",
 		MaxTPM:       1000,
 	}
 
 	calledNext := false
-	RateLimiter(RateLimitConfig{
-		Backend:        "memory",
-		DefaultRPM:     0,
-		DefaultTPM:     0,
-		DefaultMaxConc: 0,
-	})(ctx, func() {
+	rateLimiter(RateLimitConfig{
+		DefaultRPM:         tokenRetentionTestRPM,
+		DefaultTPM:         0,
+		DefaultMaxConc:     tokenRetentionTestMaxConcurrency,
+		MaxRequestBodySize: 1024,
+	}, limiter, nil)(ctx, func() {
 		calledNext = true
 	})
 
-	if calledNext {
-		t.Fatal("RateLimiter called next for an unsupported TPM claim")
+	if !calledNext {
+		t.Fatal("RateLimiter did not call next for a TPM-limited request under quota")
 	}
-	if !ctx.IsAborted() {
-		t.Fatal("RateLimiter did not fail closed for an unsupported TPM claim")
+	if ctx.IsAborted() {
+		t.Fatalf("RateLimiter aborted TPM request with status %d", ctx.StatusCode)
 	}
-	if ctx.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want %d", ctx.StatusCode, http.StatusServiceUnavailable)
+	if len(limiter.allowDimensions) != 2 || limiter.allowDimensions[1] != "tpm" {
+		t.Fatalf("allow dimensions = %v, want rpm then tpm", limiter.allowDimensions)
 	}
 }
 
-func TestRateLimiterDoesNotRetainTokenUsageWhileTPMReserved(t *testing.T) {
+func TestRateLimiterDoesNotAccountTPMWhenUnlimited(t *testing.T) {
 	ctx := &server.RequestContext{
 		Request:      httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
 		VirtualKeyID: "vk_test",

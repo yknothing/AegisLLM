@@ -11,15 +11,21 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/yknothing/AegisLLM/internal/admin"
 	"github.com/yknothing/AegisLLM/internal/config"
 	"github.com/yknothing/AegisLLM/internal/egress"
+	"github.com/yknothing/AegisLLM/internal/gatewayconst"
 	"github.com/yknothing/AegisLLM/internal/kms"
 	"github.com/yknothing/AegisLLM/internal/kms/factory"
 	"github.com/yknothing/AegisLLM/internal/middleware"
 	"github.com/yknothing/AegisLLM/internal/proxy"
+	"github.com/yknothing/AegisLLM/internal/quota"
 	"github.com/yknothing/AegisLLM/internal/revocation"
 	"github.com/yknothing/AegisLLM/internal/server"
 	"github.com/yknothing/AegisLLM/internal/utils"
@@ -80,17 +86,48 @@ func newServer(cfg *config.Config, logger *slog.Logger, proxyRootCAs *x509.CertP
 		RootCAs:            proxyRootCAs,
 	})
 
-	opts, err := runtimeMiddlewareOptions(cfg, signingKey, revocationReader, kmsProvider, channels, poolKeyMapping, providerTypes, engine)
+	quotaManager, err := newQuotaManager(cfg)
 	if err != nil {
 		_ = closeRuntimeResources(signingKey, kmsProvider, revocationReader)
 		return nil, err
 	}
+
+	opts, err := runtimeMiddlewareOptions(cfg, signingKey, revocationReader, kmsProvider, channels, poolKeyMapping, providerTypes, engine, quotaManager)
+	if err != nil {
+		_ = closeRuntimeResources(signingKey, kmsProvider, revocationReader)
+		return nil, err
+	}
+
+	modelsPipeline, err := newModelsPipeline(cfg, logger, signingKey, revocationReader, channels)
+	if err != nil {
+		_ = closeRuntimeResources(signingKey, kmsProvider, revocationReader)
+		return nil, err
+	}
+	opts = append(opts, server.WithHandler(
+		gatewayconst.HTTPRoute(http.MethodGet, gatewayconst.PathModels),
+		http.HandlerFunc(modelsPipeline.ServeHTTP),
+	))
+
+	var adminHandler *admin.Handler
+	if cfg.Admin.Enabled {
+		adminHandler, err = newAdminHandler(cfg, logger, signingKey, kmsProvider, quotaManager, channels)
+		if err != nil {
+			_ = closeRuntimeResources(signingKey, kmsProvider, revocationReader)
+			return nil, err
+		}
+		adminMux := http.NewServeMux()
+		adminHandler.RegisterRoutes(adminMux)
+		opts = append(opts, server.WithAdminHandler(adminMux))
+		opts = append(opts, server.WithShutdownHook(adminHandler.Close))
+	}
+
 	opts = append(opts, server.WithShutdownHook(func() error {
 		return closeRuntimeResources(signingKey, kmsProvider, revocationReader)
 	}))
 
 	srv, err := server.New(cfg, logger, opts...)
 	if err != nil {
+		_ = adminHandler.Close()
 		_ = closeRuntimeResources(signingKey, kmsProvider, revocationReader)
 		return nil, err
 	}
@@ -148,6 +185,7 @@ func closeRuntimeResources(signingKey []byte, kmsProvider, revocationReader runt
 const (
 	runtimeStepAuth         = "auth"
 	runtimeStepRateLimit    = "rate_limit"
+	runtimeStepQuota        = "quota"
 	runtimeStepPIIRedaction = "pii_redaction"
 	runtimeStepRouter       = "router"
 	runtimeStepKMS          = "kms"
@@ -155,10 +193,13 @@ const (
 	runtimeStepProxy        = "proxy"
 )
 
-func runtimeMiddlewareOrder(rateLimitEnabled bool) []string {
+func runtimeMiddlewareOrder(rateLimitEnabled, quotaEnabled bool) []string {
 	order := []string{runtimeStepAuth}
 	if rateLimitEnabled {
 		order = append(order, runtimeStepRateLimit)
+	}
+	if quotaEnabled {
+		order = append(order, runtimeStepQuota)
 	}
 	return append(order,
 		runtimeStepPIIRedaction,
@@ -178,8 +219,9 @@ func runtimeMiddlewareOptions(
 	poolKeyMapping map[string]string,
 	providerTypes map[string]string,
 	engine *proxy.Engine,
+	quotaManager *quota.Manager,
 ) ([]server.Option, error) {
-	order := runtimeMiddlewareOrder(cfg.RateLimit.Enabled)
+	order := runtimeMiddlewareOrder(cfg.RateLimit.Enabled, cfg.Quota.Enabled)
 	opts := make([]server.Option, 0, len(order))
 	for _, step := range order {
 		switch step {
@@ -192,12 +234,15 @@ func runtimeMiddlewareOptions(
 			})))
 		case runtimeStepRateLimit:
 			opts = append(opts, server.WithMiddleware(middleware.RateLimiter(middleware.RateLimitConfig{
-				Backend:        cfg.RateLimit.Backend,
-				RedisURL:       cfg.RateLimit.RedisURL,
-				DefaultRPM:     cfg.RateLimit.DefaultRPM,
-				DefaultTPM:     cfg.RateLimit.DefaultTPM,
-				DefaultMaxConc: cfg.RateLimit.DefaultMaxConcurrency,
+				Backend:            cfg.RateLimit.Backend,
+				RedisURL:           cfg.RateLimit.RedisURL,
+				DefaultRPM:         cfg.RateLimit.DefaultRPM,
+				DefaultTPM:         cfg.RateLimit.DefaultTPM,
+				DefaultMaxConc:     cfg.RateLimit.DefaultMaxConcurrency,
+				MaxRequestBodySize: cfg.Server.MaxRequestBodySize,
 			})))
+		case runtimeStepQuota:
+			opts = append(opts, server.WithMiddleware(middleware.Quota(quotaManager)))
 		case runtimeStepPIIRedaction:
 			opts = append(opts, server.WithMiddleware(middleware.PIIRedaction(middleware.RedactionConfig{
 				Mode:               middleware.ModeRedact,
@@ -272,29 +317,29 @@ func validateRuntimeConfig(cfg *config.Config) error {
 	if cfg.RateLimit.DefaultMaxConcurrency == 0 {
 		return fmt.Errorf("rate_limit.default_max_concurrency must be positive")
 	}
-	if cfg.RateLimit.DefaultTPM > 0 {
-		return fmt.Errorf("rate_limit.default_tpm is reserved; TPM enforcement is not implemented")
-	}
 	if cfg.RateLimit.RedisURL != "" {
 		return fmt.Errorf("rate_limit.redis_url is reserved; redis rate limiter backend is not implemented")
 	}
 	if !cfg.RateLimit.Enabled {
 		return fmt.Errorf("rate_limit.enabled must be true for the v0.2.1 runtime")
 	}
-	if cfg.Quota.Backend != "" {
-		return fmt.Errorf("quota.backend is reserved; quota enforcement is not implemented")
+	if err := validateRuntimeQuota(cfg); err != nil {
+		return err
 	}
-	if cfg.Quota.DSN != "" {
-		return fmt.Errorf("quota.dsn is reserved; quota enforcement is not implemented")
-	}
-	if cfg.Quota.DefaultBudget < 0 {
-		return fmt.Errorf("quota.default_budget must not be negative")
-	}
-	if cfg.Quota.DefaultBudget > 0 {
-		return fmt.Errorf("quota.default_budget is reserved; quota enforcement is not implemented")
-	}
-	if cfg.Quota.Enabled {
-		return fmt.Errorf("quota enforcement is not implemented; set quota.enabled=false")
+	if cfg.Admin.Enabled {
+		host, port, err := net.SplitHostPort(cfg.Admin.Address)
+		if err != nil || strings.TrimSpace(port) == "" {
+			return fmt.Errorf("admin.address must be host:port")
+		}
+		if !gatewayconst.IsLoopbackHost(host) {
+			return fmt.Errorf("admin.address must bind to a loopback host")
+		}
+		if strings.TrimSpace(cfg.Admin.TokenEnv) == "" {
+			return fmt.Errorf("admin.token_env must not be empty")
+		}
+		if os.Getenv(cfg.Admin.TokenEnv) == "" {
+			return fmt.Errorf("environment variable %q for admin token is not set", cfg.Admin.TokenEnv)
+		}
 	}
 	if cfg.Store.Type != "" || cfg.Store.DSN != "" {
 		return fmt.Errorf("store persistence config is reserved; control-plane store is not implemented")
@@ -394,15 +439,16 @@ func providerRuntime(cfg *config.Config) ([]middleware.ProviderChannel, map[stri
 		}
 
 		channels = append(channels, middleware.ProviderChannel{
-			ID:       p.ID,
-			Name:     p.Name,
-			Type:     p.Type,
-			BaseURL:  p.BaseURL,
-			KeyID:    p.APIKeyID,
-			Models:   p.Models,
-			Weight:   p.Weight,
-			Priority: p.Priority,
-			Enabled:  p.Enabled,
+			ID:         p.ID,
+			Name:       p.Name,
+			Type:       p.Type,
+			BaseURL:    p.BaseURL,
+			KeyID:      p.APIKeyID,
+			Models:     p.Models,
+			Weight:     p.Weight,
+			Priority:   p.Priority,
+			APIVersion: p.APIVersion,
+			Enabled:    p.Enabled,
 		})
 		poolKeyMapping[p.ID] = p.APIKeyID
 		providerTypes[p.ID] = p.Type
@@ -424,10 +470,130 @@ func providerHost(rawURL string) (string, error) {
 }
 
 func isSupportedProviderType(providerType string) bool {
-	switch providerType {
-	case "openai", "deepseek":
-		return true
+	return gatewayconst.IsSupportedProviderType(providerType)
+}
+
+const adminRevocationLockTimeout = 2 * time.Second
+
+func validateRuntimeQuota(cfg *config.Config) error {
+	switch cfg.Quota.Backend {
+	case "", gatewayconst.QuotaBackendMemory:
 	default:
-		return false
+		return fmt.Errorf("quota.backend is reserved; only memory is implemented")
 	}
+	if cfg.Quota.DSN != "" {
+		return fmt.Errorf("quota.dsn is reserved; durable quota backends are not implemented")
+	}
+	if cfg.Quota.DefaultBudget < 0 {
+		return fmt.Errorf("quota.default_budget must not be negative")
+	}
+	if !cfg.Quota.Enabled {
+		if cfg.Quota.Backend != "" {
+			return fmt.Errorf("quota.backend requires quota.enabled=true")
+		}
+		if cfg.Quota.DefaultBudget > 0 {
+			return fmt.Errorf("quota.default_budget requires quota.enabled=true")
+		}
+		return nil
+	}
+	return validateQuotaPricing(cfg)
+}
+
+func validateQuotaPricing(cfg *config.Config) error {
+	table := overlayPricingTable(cfg)
+	models := enabledProviderModels(cfg)
+	if err := table.RequireModels(models); err != nil {
+		return errors.New("quota model pricing is incomplete")
+	}
+	return nil
+}
+
+func overlayPricingTable(cfg *config.Config) *quota.PricingTable {
+	table := quota.NewPricingTable()
+	applyQuotaPrices(table, cfg)
+	return table
+}
+
+func applyQuotaPrices(table *quota.PricingTable, cfg *config.Config) {
+	for _, price := range cfg.Quota.ModelPrices {
+		table.Set(quota.ModelPricing{
+			Model:            price.Model,
+			InputPerMillion:  price.InputPerMillion,
+			OutputPerMillion: price.OutputPerMillion,
+		})
+	}
+}
+
+func enabledProviderModels(cfg *config.Config) []string {
+	models := make([]string, 0)
+	for _, provider := range cfg.Providers {
+		if !provider.Enabled {
+			continue
+		}
+		models = append(models, provider.Models...)
+	}
+	return models
+}
+
+func newQuotaManager(cfg *config.Config) (*quota.Manager, error) {
+	if !cfg.Quota.Enabled {
+		return nil, nil
+	}
+	manager := quota.NewManager(quota.NewMemoryStore(), cfg.Quota.DefaultBudget)
+	applyQuotaPrices(manager.Pricing(), cfg)
+	if err := manager.Pricing().RequireModels(enabledProviderModels(cfg)); err != nil {
+		return nil, errors.New("quota model pricing is incomplete")
+	}
+	return manager, nil
+}
+
+func newModelsPipeline(
+	cfg *config.Config,
+	logger *slog.Logger,
+	signingKey []byte,
+	revocationStore middleware.RevocationStore,
+	channels []middleware.ProviderChannel,
+) (*server.Pipeline, error) {
+	pipeline, err := server.NewPipeline(cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+	pipeline.Use(middleware.Auth(middleware.AuthConfig{
+		SigningKey: signingKey,
+		Issuer:     cfg.Auth.Issuer,
+		Expiry:     cfg.Auth.TokenExpiry,
+		Revocation: revocationStore,
+	}))
+	pipeline.Use(middleware.ModelsList(channels))
+	return pipeline, nil
+}
+
+func newAdminHandler(
+	cfg *config.Config,
+	logger *slog.Logger,
+	signingKey []byte,
+	kmsProvider kms.Provider,
+	quotaManager *quota.Manager,
+	channels []middleware.ProviderChannel,
+) (*admin.Handler, error) {
+	token, err := loadSecretEnv(cfg.Admin.TokenEnv, "admin token")
+	if err != nil {
+		return nil, err
+	}
+	if len(token) < gatewayconst.MinAdminTokenBytes {
+		utils.MemZero(token)
+		return nil, fmt.Errorf("admin token env var %q must contain at least %d bytes", cfg.Admin.TokenEnv, gatewayconst.MinAdminTokenBytes)
+	}
+	signingCopy := append([]byte(nil), signingKey...)
+	services := admin.Services{
+		SigningKey:    signingCopy,
+		Issuer:        cfg.Auth.Issuer,
+		MaxTTL:        cfg.Auth.TokenExpiry,
+		AllowedModels: enabledProviderModels(cfg),
+		Revoker:       revocation.NewWriter(cfg.Auth.Revocation.FilePath, adminRevocationLockTimeout),
+	}
+	if quotaManager != nil {
+		services.Quota = quotaManager
+	}
+	return admin.NewHandlerWithServices(kmsProvider, logger, token, services), nil
 }

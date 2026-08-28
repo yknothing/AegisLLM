@@ -4,6 +4,22 @@ All notable changes to AegisLLM are documented here.
 
 ## v0.2.1 - Unreleased
 
+### AegisLift (LiteLLM Proxy outcome parity)
+
+- Added OpenAI-compatible `GET /v1/models` (virtual-key ∩ catalog).
+- Enforced per-key TPM (estimate then reconcile) and optional in-memory
+  budgets; unknown models have no silent default price when quota is enabled.
+- Added same-request retry/fallback (ADR-006) and same-priority weighted
+  load balancing without reordering KMS → Adapter → Proxy.
+- Added Azure, Anthropic, Gemini, and OpenRouter adapters.
+- Mounted loopback Admin issue/revoke/usage (ADR-007). BYOK stays 501.
+- Operator `virtual-key issue` accepts `--tpm` and `--budget`.
+- Added runtime evidence: in-request failover, SSE chat, loopback Admin
+  issue → `GET /v1/models`, Anthropic/Gemini response transforms, unknown-model
+  quota fail-closed.
+- Recorded a same-box mock-upstream overhead run against LiteLLM Proxy 1.98.0
+  (`TestRuntimeSameBoxLiteLLMOverhead`); Aegis p95 was not worse.
+
 ### Standalone operations and security
 
 - Added a same-binary offline Operator CLI for revocation initialization,

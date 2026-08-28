@@ -129,7 +129,7 @@ func TestValidateTokenRejectsMissingIssuedAtWhenMaxTTLConfigured(t *testing.T) {
 	}
 }
 
-func TestValidateTokenRejectsReservedBudgetAndTPMClaims(t *testing.T) {
+func TestValidateTokenAcceptsBudgetAndTPMClaims(t *testing.T) {
 	tests := []struct {
 		name   string
 		claims VirtualKeyClaims
@@ -160,8 +160,12 @@ func TestValidateTokenRejectsReservedBudgetAndTPMClaims(t *testing.T) {
 			claims.Issuer = "aegis"
 
 			token := signTestToken(t, key, claims)
-			if _, err := validateToken(token, key, "aegis", testTokenMaxTTL); err == nil {
-				t.Fatalf("validateToken accepted reserved %s claim", tt.name)
+			got, err := validateToken(token, key, "aegis", testTokenMaxTTL)
+			if err != nil {
+				t.Fatalf("validateToken rejected supported %s claim: %v", tt.name, err)
+			}
+			if got.BudgetUSD != claims.BudgetUSD || got.MaxTPM != claims.MaxTPM {
+				t.Fatalf("claims = %+v, want budget=%f tpm=%d", got, claims.BudgetUSD, claims.MaxTPM)
 			}
 		})
 	}

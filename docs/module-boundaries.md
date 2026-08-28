@@ -114,5 +114,5 @@ both the offline operator path and runtime Auth middleware.
 | Add Anthropic request conversion | `internal/middleware/adapter.go`, adapter tests | Isolated |
 | Move local KMS file blobs to another durable backend | `internal/kms/local`, runtime backend wiring | Isolated |
 | Change middleware order | ADR, `internal/runtime`, order tests | Requires architecture review |
-| Add quota enforcement | `internal/quota`, new middleware, runtime config mapping, durable store | Requires architecture review because it changes request rejection semantics |
-| Mount Admin API | `internal/admin`, `cmd/aegis` or runtime listener wiring, auth/audit config | Requires architecture review because it adds a new trust boundary |
+| Add quota enforcement | `internal/quota`, middleware, runtime config mapping | Isolated for memory backend; durable store still reserved |
+| Mount Admin API | `internal/admin`, runtime second listener | Loopback-only (ADR-007); public bind still forbidden |

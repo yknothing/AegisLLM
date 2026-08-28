@@ -109,6 +109,40 @@ func TestProxyRecordsProviderResponseOutcome(t *testing.T) {
 	}
 }
 
+func TestProxyMarksRetryableWhenCapturedStatusIsRetryable(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ctx := proxyTestContext()
+	ctx.Writer = recorder
+	ctx.CanFallback = true
+
+	Proxy(stubProxyEngine{result: &proxy.ProxyResult{StatusCode: http.StatusTooManyRequests}})(ctx, func() {})
+
+	if !ctx.RetryableAttempt {
+		t.Fatal("retryable captured 429 was not marked RetryableAttempt")
+	}
+	if recorder.Code == http.StatusTooManyRequests {
+		t.Fatal("retryable 429 was flushed to the client")
+	}
+	if ctx.ResponseCommitted() {
+		t.Fatal("retryable capture committed the client response")
+	}
+}
+
+func TestProxyMarksRetryableOnUpstreamTransportWhenFallbackAllowed(t *testing.T) {
+	ctx := proxyTestContext()
+	ctx.CanFallback = true
+	engine := stubProxyEngine{err: fmt.Errorf("dial failed: %w", proxy.ErrUpstreamTransport)}
+
+	Proxy(engine)(ctx, func() {})
+
+	if !ctx.RetryableAttempt {
+		t.Fatal("transport failure with CanFallback was not marked RetryableAttempt")
+	}
+	if ctx.IsAborted() {
+		t.Fatal("transport failure with CanFallback aborted instead of returning for retry")
+	}
+}
+
 func TestBuildTargetURLAcceptsRootRelativePath(t *testing.T) {
 	got, err := buildTargetURL("https://api.openai.com/base", "/v1/chat/completions?stream=true")
 	if err != nil {
@@ -137,14 +171,15 @@ type stubProxyEngine struct {
 	err    error
 }
 
-func (s stubProxyEngine) ProxyRequest(
+func (s stubProxyEngine) Dispatch(
 	ctx context.Context,
 	w http.ResponseWriter,
 	originalReq *http.Request,
-	targetURL string,
-	apiKey *utils.SecureBytes,
-	isStreaming bool,
+	cfg proxy.DispatchConfig,
 ) (*proxy.ProxyResult, error) {
+	if s.result != nil && w != nil {
+		w.WriteHeader(s.result.StatusCode)
+	}
 	return s.result, s.err
 }
 

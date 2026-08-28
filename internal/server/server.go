@@ -16,10 +16,12 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/yknothing/AegisLLM/internal/config"
+	"github.com/yknothing/AegisLLM/internal/gatewayconst"
 	"github.com/yknothing/AegisLLM/internal/utils"
 )
 
@@ -49,14 +51,36 @@ func WithShutdownHook(hook func() error) Option {
 	}
 }
 
+// WithHandler mounts an extra ServeMux pattern on the data-plane listener.
+func WithHandler(pattern string, handler http.Handler) Option {
+	return func(s *Server) {
+		s.extraHandlers = append(s.extraHandlers, routeBinding{pattern: pattern, handler: handler})
+	}
+}
+
+// WithAdminHandler mounts the loopback Admin API (ADR-007).
+func WithAdminHandler(handler http.Handler) Option {
+	return func(s *Server) {
+		s.adminHandler = handler
+	}
+}
+
+type routeBinding struct {
+	pattern string
+	handler http.Handler
+}
+
 // Server is the core Aegis gateway server.
 type Server struct {
 	httpServer      *http.Server
+	adminServer     *http.Server
 	pipeline        *Pipeline
 	handlers        *handlerLifecycle
 	cfg             *config.Config
 	logger          *slog.Logger
 	extraMiddleware []Middleware
+	extraHandlers   []routeBinding
+	adminHandler    http.Handler
 	shutdownHooks   []func() error
 }
 
@@ -96,8 +120,14 @@ func New(cfg *config.Config, logger *slog.Logger, opts ...Option) (*Server, erro
 	srv.pipeline = pipeline
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/chat/completions", pipeline.ServeHTTP)
-	mux.HandleFunc("GET /health", srv.healthHandler)
+	mux.HandleFunc(gatewayconst.HTTPRoute(http.MethodPost, gatewayconst.PathChatCompletions), pipeline.ServeHTTP)
+	mux.HandleFunc(gatewayconst.HTTPRoute(http.MethodGet, gatewayconst.PathHealth), srv.healthHandler)
+	for _, route := range srv.extraHandlers {
+		if strings.TrimSpace(route.pattern) == "" || route.handler == nil {
+			return nil, errors.New("server extra handler is incomplete")
+		}
+		mux.Handle(route.pattern, route.handler)
+	}
 	srv.handlers = newHandlerLifecycle()
 
 	srv.httpServer = &http.Server{
@@ -106,6 +136,9 @@ func New(cfg *config.Config, logger *slog.Logger, opts ...Option) (*Server, erro
 		ReadTimeout:    cfg.Server.ReadTimeout,
 		WriteTimeout:   cfg.Server.WriteTimeout,
 		MaxHeaderBytes: maxHTTPHeaderBytes,
+	}
+	if err := srv.bindAdminListener(); err != nil {
+		return nil, err
 	}
 
 	// Configure mTLS if enabled
@@ -135,21 +168,12 @@ func (s *Server) Run(ctx context.Context) (err error) {
 		}
 	}()
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 
-	go func() {
-		var err error
-		if s.cfg.Server.TLS.Enabled {
-			// The certificate and private key were securely loaded during New.
-			// Empty paths prevent net/http from reopening mutable filesystem paths.
-			err = s.httpServer.ListenAndServeTLS("", "")
-		} else {
-			err = s.httpServer.ListenAndServe()
-		}
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-		}
-	}()
+	go serveHTTP(s.httpServer, s.cfg.Server.TLS.Enabled, errCh)
+	if s.adminServer != nil {
+		go serveHTTP(s.adminServer, false, errCh)
+	}
 
 	select {
 	case <-ctx.Done():
@@ -160,12 +184,12 @@ func (s *Server) Run(ctx context.Context) (err error) {
 			s.cfg.Server.ShutdownTimeout,
 		)
 		defer cancel()
-		shutdownErr := s.httpServer.Shutdown(shutdownCtx)
+		shutdownErr := s.shutdownListeners(shutdownCtx)
 		if shutdownErr == nil && handlersDrained(drained) {
 			return nil
 		}
 
-		if closeErr := s.httpServer.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
+		if closeErr := s.closeListeners(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
 			s.logger.Error("failed to force close server connections", "error", closeErr)
 		}
 		// ShutdownTimeout bounds the graceful phase above. After force-closing
@@ -180,7 +204,7 @@ func (s *Server) Run(ctx context.Context) (err error) {
 		return shutdownErr
 	case err := <-errCh:
 		drained := s.handlers.startDraining()
-		if closeErr := s.httpServer.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
+		if closeErr := s.closeListeners(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
 			s.logger.Error("failed to close server connections after serve error", "error", closeErr)
 		}
 		if !waitForHandlers(drained, s.cfg.Server.ShutdownTimeout) {
@@ -194,6 +218,56 @@ func (s *Server) Run(ctx context.Context) (err error) {
 }
 
 var errHandlerDrainTimeout = errors.New("active handlers did not exit after forced close")
+
+func serveHTTP(srv *http.Server, useTLS bool, errCh chan<- error) {
+	var err error
+	if useTLS {
+		// The certificate and private key were securely loaded during New.
+		// Empty paths prevent net/http from reopening mutable filesystem paths.
+		err = srv.ListenAndServeTLS("", "")
+	} else {
+		err = srv.ListenAndServe()
+	}
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		errCh <- err
+	}
+}
+
+func (s *Server) bindAdminListener() error {
+	if s.cfg.Admin.Enabled {
+		if s.adminHandler == nil {
+			return errors.New("admin.enabled requires an admin handler")
+		}
+		s.adminServer = &http.Server{
+			Addr:           s.cfg.Admin.Address,
+			Handler:        s.handlers.wrap(s.adminHandler),
+			ReadTimeout:    s.cfg.Server.ReadTimeout,
+			WriteTimeout:   s.cfg.Server.WriteTimeout,
+			MaxHeaderBytes: maxHTTPHeaderBytes,
+		}
+		return nil
+	}
+	if s.adminHandler != nil {
+		return errors.New("admin handler requires admin.enabled=true")
+	}
+	return nil
+}
+
+func (s *Server) shutdownListeners(ctx context.Context) error {
+	err := s.httpServer.Shutdown(ctx)
+	if s.adminServer != nil {
+		err = errors.Join(err, s.adminServer.Shutdown(ctx))
+	}
+	return err
+}
+
+func (s *Server) closeListeners() error {
+	err := s.httpServer.Close()
+	if s.adminServer != nil {
+		err = errors.Join(err, s.adminServer.Close())
+	}
+	return err
+}
 
 func handlerDrainTimeoutError(timeout time.Duration) error {
 	return fmt.Errorf(

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/yknothing/AegisLLM/internal/egress"
+	"github.com/yknothing/AegisLLM/internal/gatewayconst"
 	"github.com/yknothing/AegisLLM/internal/kms"
 	"github.com/yknothing/AegisLLM/internal/virtualkey"
 )
@@ -30,6 +31,7 @@ type Config struct {
 	Auth      AuthConfig      `json:"auth"`
 	RateLimit RateLimitConfig `json:"rate_limit"`
 	Quota     QuotaConfig     `json:"quota"`
+	Admin     AdminConfig     `json:"admin"`
 	Store     StoreConfig     `json:"store"`
 	Egress    EgressConfig    `json:"egress"`
 }
@@ -92,17 +94,18 @@ type VaultConfig struct {
 // Provider defines an LLM provider channel configuration.
 // SECURITY: The api_key_id references a key stored in KMS, NOT a plaintext key.
 type Provider struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`
-	Type     string   `json:"type"` // "openai" | "anthropic" | "google" | "deepseek" | ...
-	BaseURL  string   `json:"base_url"`
-	APIKeyID string   `json:"api_key_id"` // Reference to KMS-stored key
-	Models   []string `json:"models"`
-	Weight   int      `json:"weight"`
-	MaxRPM   int      `json:"max_rpm"` // Reserved until provider-level RPM enforcement exists
-	MaxTPM   int      `json:"max_tpm"` // Reserved until TPM enforcement exists
-	Enabled  bool     `json:"enabled"`
-	Priority int      `json:"priority"` // Lower = higher priority for fallback
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	Type       string   `json:"type"` // "openai" | "anthropic" | "google" | "deepseek" | ...
+	BaseURL    string   `json:"base_url"`
+	APIKeyID   string   `json:"api_key_id"` // Reference to KMS-stored key
+	Models     []string `json:"models"`
+	Weight     int      `json:"weight"`
+	MaxRPM     int      `json:"max_rpm"` // Reserved until provider-level RPM enforcement exists
+	MaxTPM     int      `json:"max_tpm"` // Reserved until provider-level TPM enforcement exists
+	APIVersion string   `json:"api_version"`
+	Enabled    bool     `json:"enabled"`
+	Priority   int      `json:"priority"` // Lower = higher priority for fallback
 }
 
 // AuthConfig defines authentication settings.
@@ -129,18 +132,32 @@ type RateLimitConfig struct {
 	Backend               string `json:"backend"` // runtime: "memory"; reserved: "redis"
 	RedisURL              string `json:"redis_url"`
 	DefaultRPM            int    `json:"default_rpm"`
-	DefaultTPM            int    `json:"default_tpm"` // Reserved until TPM enforcement exists
+	DefaultTPM            int    `json:"default_tpm"` // 0 = unlimited; positive values are per-key ceilings
 	DefaultMaxConcurrency int    `json:"default_max_concurrency"`
 }
 
-// QuotaConfig reserves budget and cost management settings.
-// quota.enabled=true and configured quota storage/budget fields fail fast until
-// runtime enforcement exists. JSON config files reject those fields by presence.
+// QuotaConfig configures in-memory budget enforcement.
+// Durable backends remain reserved: non-memory backend and DSN fail fast.
 type QuotaConfig struct {
-	Enabled       bool    `json:"enabled"`
-	Backend       string  `json:"backend"` // Reserved durable store backend
-	DSN           string  `json:"dsn"`
-	DefaultBudget float64 `json:"default_budget"` // Reserved default monthly budget in USD
+	Enabled       bool               `json:"enabled"`
+	Backend       string             `json:"backend"`
+	DSN           string             `json:"dsn"`
+	DefaultBudget float64            `json:"default_budget"`
+	ModelPrices   []ModelPriceConfig `json:"model_prices"`
+}
+
+// ModelPriceConfig is an operator-supplied USD-per-million-token price.
+type ModelPriceConfig struct {
+	Model            string  `json:"model"`
+	InputPerMillion  float64 `json:"input_per_million"`
+	OutputPerMillion float64 `json:"output_per_million"`
+}
+
+// AdminConfig enables the loopback administrative listener (ADR-007).
+type AdminConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Address  string `json:"address"`
+	TokenEnv string `json:"token_env"`
 }
 
 // StoreConfig reserves the persistence layer for future control-plane state.
@@ -494,9 +511,9 @@ func rejectReservedConfigFields(data []byte) error {
 		if err := json.Unmarshal(quotaRaw, &quotaFields); err != nil {
 			return fmt.Errorf("quota must be an object: %w", err)
 		}
-		for _, field := range []string{"backend", "dsn", "default_budget"} {
+		for _, field := range []string{"dsn"} {
 			if _, exists := quotaFields[field]; exists {
-				return fmt.Errorf("quota.%s is reserved; quota enforcement is not implemented", field)
+				return fmt.Errorf("quota.%s is reserved; durable quota backends are not implemented", field)
 			}
 		}
 	}
@@ -776,7 +793,10 @@ func (c *Config) validate(requireSecretEnv bool) error {
 			return fmt.Errorf("provider %q: max_tpm must not be negative", providerName)
 		}
 		if p.MaxTPM > 0 {
-			return fmt.Errorf("provider %q: max_tpm is reserved; TPM enforcement is not implemented", providerName)
+			return fmt.Errorf("provider %q: max_tpm is reserved; provider TPM enforcement is not implemented", providerName)
+		}
+		if strings.TrimSpace(p.APIVersion) != "" && p.Type != gatewayconst.ProviderTypeAzure {
+			return fmt.Errorf("provider %q: api_version is only valid for azure", providerName)
 		}
 	}
 	if enabledProviders == 0 {
@@ -811,9 +831,6 @@ func (c *Config) validate(requireSecretEnv bool) error {
 	if c.RateLimit.DefaultMaxConcurrency == 0 {
 		return errors.New("rate_limit.default_max_concurrency must be positive")
 	}
-	if c.RateLimit.DefaultTPM > 0 {
-		return errors.New("rate_limit.default_tpm is reserved; TPM enforcement is not implemented")
-	}
 	if c.RateLimit.RedisURL != "" {
 		return errors.New("rate_limit.redis_url is reserved; redis rate limiter backend is not implemented")
 	}
@@ -821,20 +838,11 @@ func (c *Config) validate(requireSecretEnv bool) error {
 		return errors.New("rate_limit.enabled must be true for the v0.2.1 runtime")
 	}
 
-	if c.Quota.Backend != "" {
-		return errors.New("quota.backend is reserved; quota enforcement is not implemented")
+	if err := validateQuotaConfig(c.Quota); err != nil {
+		return err
 	}
-	if c.Quota.DSN != "" {
-		return errors.New("quota.dsn is reserved; quota enforcement is not implemented")
-	}
-	if c.Quota.DefaultBudget < 0 {
-		return errors.New("quota.default_budget must not be negative")
-	}
-	if c.Quota.DefaultBudget > 0 {
-		return errors.New("quota.default_budget is reserved; quota enforcement is not implemented")
-	}
-	if c.Quota.Enabled {
-		return errors.New("quota enforcement is not implemented; set quota.enabled=false")
+	if err := validateAdminConfig(c.Admin, requireSecretEnv); err != nil {
+		return err
 	}
 	if c.Store.Type != "" || c.Store.DSN != "" {
 		return errors.New("store persistence config is reserved; control-plane store is not implemented")
@@ -930,6 +938,69 @@ func ValidateRevocationConfig(cfg RevocationConfig) error {
 	}
 	if cfg.RefreshInterval > maxRevocationRefreshInterval {
 		return fmt.Errorf("auth.revocation.refresh_interval must not exceed %s", maxRevocationRefreshInterval)
+	}
+	return nil
+}
+
+// validateQuotaConfig enables in-memory budgets and rejects durable backends.
+func validateQuotaConfig(cfg QuotaConfig) error {
+	switch cfg.Backend {
+	case "", gatewayconst.QuotaBackendMemory:
+	default:
+		return errors.New("quota.backend is reserved; only memory is implemented")
+	}
+	if cfg.DSN != "" {
+		return errors.New("quota.dsn is reserved; durable quota backends are not implemented")
+	}
+	if cfg.DefaultBudget < 0 {
+		return errors.New("quota.default_budget must not be negative")
+	}
+	if !cfg.Enabled {
+		if cfg.Backend != "" {
+			return errors.New("quota.backend requires quota.enabled=true")
+		}
+		if cfg.DefaultBudget > 0 {
+			return errors.New("quota.default_budget requires quota.enabled=true")
+		}
+		if len(cfg.ModelPrices) > 0 {
+			return errors.New("quota.model_prices requires quota.enabled=true")
+		}
+		return nil
+	}
+	for _, price := range cfg.ModelPrices {
+		if strings.TrimSpace(price.Model) == "" {
+			return errors.New("quota.model_prices model must not be empty")
+		}
+		if price.InputPerMillion < 0 || price.OutputPerMillion < 0 {
+			return errors.New("quota.model_prices must not be negative")
+		}
+	}
+	return nil
+}
+
+// validateAdminConfig requires a loopback listener and admin token env when enabled.
+func validateAdminConfig(cfg AdminConfig, requireSecretEnv bool) error {
+	if !cfg.Enabled {
+		if strings.TrimSpace(cfg.Address) != "" || strings.TrimSpace(cfg.TokenEnv) != "" {
+			return errors.New("admin.address and admin.token_env require admin.enabled=true")
+		}
+		return nil
+	}
+	if strings.TrimSpace(cfg.Address) == "" {
+		return errors.New("admin.address must not be empty")
+	}
+	host, port, err := net.SplitHostPort(cfg.Address)
+	if err != nil || strings.TrimSpace(port) == "" {
+		return errors.New("admin.address must be host:port")
+	}
+	if !gatewayconst.IsLoopbackHost(host) {
+		return errors.New("admin.address must bind to a loopback host")
+	}
+	if strings.TrimSpace(cfg.TokenEnv) == "" {
+		return errors.New("admin.token_env must not be empty")
+	}
+	if requireSecretEnv && os.Getenv(cfg.TokenEnv) == "" {
+		return fmt.Errorf("environment variable %q for admin token is not set", cfg.TokenEnv)
 	}
 	return nil
 }

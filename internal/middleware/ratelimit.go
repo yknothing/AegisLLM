@@ -2,7 +2,7 @@
 //
 // DESIGN: Three-dimensional rate limiting:
 //  1. RPM (Requests Per Minute) - prevents request flooding
-//  2. TPM (Tokens Per Minute) - reserved, fails closed until implemented
+//  2. TPM (Tokens Per Minute) - sliding window with body estimate, then reconcile
 //  3. Concurrency - prevents connection pool exhaustion
 //
 // Backends:
@@ -21,16 +21,18 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yknothing/AegisLLM/internal/gatewayconst"
 	"github.com/yknothing/AegisLLM/internal/server"
 )
 
 // RateLimitConfig configures the rate limiter middleware.
 type RateLimitConfig struct {
-	Backend        string // "memory" | "redis"
-	RedisURL       string
-	DefaultRPM     int
-	DefaultTPM     int
-	DefaultMaxConc int
+	Backend            string // "memory" | "redis"
+	RedisURL           string
+	DefaultRPM         int
+	DefaultTPM         int
+	DefaultMaxConc     int
+	MaxRequestBodySize int64
 }
 
 // RateLimiter creates the rate limiting middleware.
@@ -63,11 +65,7 @@ func rateLimiter(cfg RateLimitConfig, limiter Limiter, initErr error) server.Mid
 
 		tpmLimit := cfg.DefaultTPM
 		if ctx.MaxTPM > 0 {
-			tpmLimit = ctx.MaxTPM
-		}
-		if tpmLimit > 0 {
-			ctx.Abort(http.StatusServiceUnavailable, rateLimitUnavailableJSON())
-			return
+			tpmLimit = effectivePolicyLimit(cfg.DefaultTPM, ctx.MaxTPM)
 		}
 
 		rpmLimit := cfg.DefaultRPM
@@ -79,14 +77,31 @@ func rateLimiter(cfg RateLimitConfig, limiter Limiter, initErr error) server.Mid
 			maxConcurrency = effectivePolicyLimit(cfg.DefaultMaxConc, ctx.MaxConcurrency)
 		}
 
-		// Check RPM limit
-		allowed, err := limiter.Allow(key, "rpm", rpmLimit, time.Minute)
+		allowed, err := limiter.Allow(key, gatewayconst.RateDimensionRPM, rpmLimit, time.Minute)
 		if err != nil || !allowed {
 			ctx.Abort(http.StatusTooManyRequests, rateLimitErrorJSON("rate limit exceeded (RPM)"))
 			return
 		}
 
-		// Check concurrency limit
+		estimatedTokens := 0
+		if tpmLimit > 0 {
+			body, bodyErr := readRequestBody(ctx, cfg.MaxRequestBodySize)
+			if errors.Is(bodyErr, errRequestBodyTooLarge) {
+				ctx.Abort(http.StatusRequestEntityTooLarge, []byte(`{"error":{"message":"request body too large","type":"invalid_request_error"}}`))
+				return
+			}
+			if bodyErr != nil {
+				ctx.Abort(http.StatusBadRequest, []byte(`{"error":{"message":"invalid request body","type":"invalid_request_error"}}`))
+				return
+			}
+			estimatedTokens = estimateTokensFromBody(body)
+			allowed, err = limiter.AllowN(key, gatewayconst.RateDimensionTPM, estimatedTokens, tpmLimit, time.Minute)
+			if err != nil || !allowed {
+				ctx.Abort(http.StatusTooManyRequests, rateLimitErrorJSON("rate limit exceeded (TPM)"))
+				return
+			}
+		}
+
 		acquired, release := limiter.AcquireConcurrency(key, maxConcurrency)
 		if !acquired {
 			ctx.Abort(http.StatusTooManyRequests, rateLimitErrorJSON("concurrency limit exceeded"))
@@ -95,16 +110,21 @@ func rateLimiter(cfg RateLimitConfig, limiter Limiter, initErr error) server.Mid
 		defer release()
 
 		next()
+
+		if tpmLimit > 0 {
+			actual := ctx.InputTokens + ctx.OutputTokens
+			if actual > estimatedTokens {
+				limiter.Record(key, gatewayconst.RateDimensionTPM, actual-estimatedTokens, time.Minute)
+			}
+		}
 	}
 }
 
 // Limiter is the interface for rate limiting backends.
 type Limiter interface {
-	// Allow checks if a request is within the rate limit.
 	Allow(key, dimension string, limit int, window time.Duration) (bool, error)
-
-	// AcquireConcurrency attempts to acquire a concurrency slot.
-	// Returns true and a release function if successful.
+	AllowN(key, dimension string, n, limit int, window time.Duration) (bool, error)
+	Record(key, dimension string, n int, window time.Duration)
 	AcquireConcurrency(key string, maxConc int) (acquired bool, release func())
 }
 
@@ -143,6 +163,13 @@ func newMemoryLimiter() *memoryLimiter {
 }
 
 func (m *memoryLimiter) Allow(key, dimension string, limit int, window time.Duration) (bool, error) {
+	return m.AllowN(key, dimension, 1, limit, window)
+}
+
+func (m *memoryLimiter) AllowN(key, dimension string, n, limit int, window time.Duration) (bool, error) {
+	if n <= 0 {
+		return true, nil
+	}
 	if limit <= 0 {
 		return true, nil
 	}
@@ -156,6 +183,28 @@ func (m *memoryLimiter) Allow(key, dimension string, limit int, window time.Dura
 		m.cleanupExpiredWindows(now)
 	}
 
+	sw := m.windowLocked(key, dimension, window, now)
+	if sw.total+n > limit {
+		return false, nil
+	}
+	sw.counts = append(sw.counts, timestampedCount{time: now, count: n})
+	sw.total += n
+	return true, nil
+}
+
+func (m *memoryLimiter) Record(key, dimension string, n int, window time.Duration) {
+	if n <= 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	sw := m.windowLocked(key, dimension, window, now)
+	sw.counts = append(sw.counts, timestampedCount{time: now, count: n})
+	sw.total += n
+}
+
+func (m *memoryLimiter) windowLocked(key, dimension string, window time.Duration, now time.Time) *slidingWindow {
 	compositeKey := key + ":" + dimension
 	sw, ok := m.windows[compositeKey]
 	if !ok {
@@ -163,16 +212,19 @@ func (m *memoryLimiter) Allow(key, dimension string, limit int, window time.Dura
 		m.windows[compositeKey] = sw
 	}
 	sw.window = window
-
 	sw.prune(now)
+	return sw
+}
 
-	if sw.total >= limit {
-		return false, nil
+func estimateTokensFromBody(body []byte) int {
+	if len(body) == 0 {
+		return gatewayconst.MinEstimatedTokens
 	}
-
-	sw.counts = append(sw.counts, timestampedCount{time: now, count: 1})
-	sw.total++
-	return true, nil
+	tokens := (len(body) + gatewayconst.CharsPerTokenEstimate - 1) / gatewayconst.CharsPerTokenEstimate
+	if tokens < gatewayconst.MinEstimatedTokens {
+		return gatewayconst.MinEstimatedTokens
+	}
+	return tokens
 }
 
 func (sw *slidingWindow) prune(now time.Time) {

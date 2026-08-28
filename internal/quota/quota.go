@@ -1,17 +1,10 @@
-// Package quota scaffolds budget management and cost tracking for Aegis.
-//
-// DESIGN:
-//   - Hierarchical budget model: Organization → Team → Virtual Key
-//   - Real-time cost calculation based on provider pricing tables
-//   - Planned pre-request budget check and post-request deduction
-//   - Planned hard limits and soft limits
+// Package quota enforces in-memory virtual-key budgets and records USD cost.
 //
 // SECURITY:
-//   - Budget exhaustion controls will prevent runaway costs from compromised keys
-//   - Cost data is non-sensitive metadata (safe to log and store)
-//
-// Current runtime does not wire this package into request processing;
-// quota.enabled=true fails fast until enforcement exists.
+//   - Exhausted budgets fail closed before provider egress.
+//   - Cost figures are non-sensitive metadata and may be logged.
+//   - Unknown models fail closed when quota is enabled; there is no silent
+//     default price.
 package quota
 
 import (
@@ -19,18 +12,22 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/yknothing/AegisLLM/internal/gatewayconst"
 )
 
 // Common errors for quota operations.
 var (
-	ErrBudgetExhausted = errors.New("quota: monthly budget exhausted")
-	ErrKeyNotFound     = errors.New("quota: virtual key not found")
+	ErrBudgetExhausted      = errors.New("quota: monthly budget exhausted")
+	ErrKeyNotFound          = errors.New("quota: virtual key not found")
+	ErrUnknownModelPricing  = errors.New("quota: model pricing is not configured")
 )
 
 // Manager handles budget tracking and cost calculation.
 type Manager struct {
-	store   Store
-	pricing *PricingTable
+	store          Store
+	pricing        *PricingTable
+	defaultBudget  float64
 }
 
 // Store is the persistence interface for quota data.
@@ -88,15 +85,15 @@ func NewPricingTable() *PricingTable {
 
 	// Default pricing (as of 2026, should be configurable)
 	defaults := []ModelPricing{
-		{Model: "gpt-4o", InputPerMillion: 2.50, OutputPerMillion: 10.00},
-		{Model: "gpt-4o-mini", InputPerMillion: 0.15, OutputPerMillion: 0.60},
-		{Model: "gpt-4.1", InputPerMillion: 2.00, OutputPerMillion: 8.00},
-		{Model: "claude-sonnet-4-20250514", InputPerMillion: 3.00, OutputPerMillion: 15.00},
-		{Model: "claude-haiku-3-5", InputPerMillion: 0.80, OutputPerMillion: 4.00},
-		{Model: "gemini-2.5-pro", InputPerMillion: 1.25, OutputPerMillion: 10.00},
-		{Model: "gemini-2.5-flash", InputPerMillion: 0.15, OutputPerMillion: 0.60},
-		{Model: "deepseek-v3", InputPerMillion: 0.27, OutputPerMillion: 1.10},
-		{Model: "deepseek-r1", InputPerMillion: 0.55, OutputPerMillion: 2.19},
+		{Model: "gpt-4o", InputPerMillion: priceGPT4oInput, OutputPerMillion: priceGPT4oOutput},
+		{Model: "gpt-4o-mini", InputPerMillion: priceGPT4oMiniInput, OutputPerMillion: priceGPT4oMiniOutput},
+		{Model: "gpt-4.1", InputPerMillion: priceGPT41Input, OutputPerMillion: priceGPT41Output},
+		{Model: "claude-sonnet-4-20250514", InputPerMillion: priceClaudeSonnetInput, OutputPerMillion: priceClaudeSonnetOutput},
+		{Model: "claude-haiku-3-5", InputPerMillion: priceClaudeHaikuInput, OutputPerMillion: priceClaudeHaikuOutput},
+		{Model: "gemini-2.5-pro", InputPerMillion: priceGeminiProInput, OutputPerMillion: priceGeminiProOutput},
+		{Model: "gemini-2.5-flash", InputPerMillion: priceGeminiFlashInput, OutputPerMillion: priceGeminiFlashOutput},
+		{Model: "deepseek-v3", InputPerMillion: priceDeepSeekV3Input, OutputPerMillion: priceDeepSeekV3Output},
+		{Model: "deepseek-r1", InputPerMillion: priceDeepSeekR1Input, OutputPerMillion: priceDeepSeekR1Output},
 	}
 
 	for _, p := range defaults {
@@ -106,56 +103,114 @@ func NewPricingTable() *PricingTable {
 	return pt
 }
 
+const (
+	priceGPT4oInput         = 2.50
+	priceGPT4oOutput        = 10.00
+	priceGPT4oMiniInput     = 0.15
+	priceGPT4oMiniOutput    = 0.60
+	priceGPT41Input         = 2.00
+	priceGPT41Output        = 8.00
+	priceClaudeSonnetInput  = 3.00
+	priceClaudeSonnetOutput = 15.00
+	priceClaudeHaikuInput   = 0.80
+	priceClaudeHaikuOutput  = 4.00
+	priceGeminiProInput     = 1.25
+	priceGeminiProOutput    = 10.00
+	priceGeminiFlashInput   = 0.15
+	priceGeminiFlashOutput  = 0.60
+	priceDeepSeekV3Input    = 0.27
+	priceDeepSeekV3Output   = 1.10
+	priceDeepSeekR1Input    = 0.55
+	priceDeepSeekR1Output   = 2.19
+)
+
 // CalculateCost computes the cost for a given request.
-func (pt *PricingTable) CalculateCost(model string, inputTokens, outputTokens int) float64 {
+func (pt *PricingTable) CalculateCost(model string, inputTokens, outputTokens int) (float64, error) {
 	pt.mu.RLock()
 	defer pt.mu.RUnlock()
 
 	pricing, ok := pt.models[model]
 	if !ok {
-		// Unknown model: use a conservative default
-		pricing = ModelPricing{InputPerMillion: 5.0, OutputPerMillion: 15.0}
+		return 0, ErrUnknownModelPricing
 	}
 
-	inputCost := float64(inputTokens) / 1_000_000 * pricing.InputPerMillion
-	outputCost := float64(outputTokens) / 1_000_000 * pricing.OutputPerMillion
+	inputCost := float64(inputTokens) / gatewayconst.TokensPerMillion * pricing.InputPerMillion
+	outputCost := float64(outputTokens) / gatewayconst.TokensPerMillion * pricing.OutputPerMillion
+	return inputCost + outputCost, nil
+}
 
-	return inputCost + outputCost
+// Set replaces or adds a model price.
+func (pt *PricingTable) Set(pricing ModelPricing) {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+	pt.models[pricing.Model] = pricing
+}
+
+// RequireModels fails closed when any model lacks a price row.
+func (pt *PricingTable) RequireModels(models []string) error {
+	pt.mu.RLock()
+	defer pt.mu.RUnlock()
+	for _, model := range models {
+		if _, ok := pt.models[model]; !ok {
+			return ErrUnknownModelPricing
+		}
+	}
+	return nil
 }
 
 // NewManager creates a new quota manager.
-func NewManager(store Store) *Manager {
+func NewManager(store Store, defaultBudget float64) *Manager {
 	return &Manager{
-		store:   store,
-		pricing: NewPricingTable(),
+		store:         store,
+		pricing:       NewPricingTable(),
+		defaultBudget: defaultBudget,
 	}
 }
 
+// Pricing returns the mutable pricing table for startup overlays.
+func (m *Manager) Pricing() *PricingTable {
+	return m.pricing
+}
+
 // CheckBudget verifies that a virtual key has remaining budget.
-// Called BEFORE proxying the request.
-func (m *Manager) CheckBudget(ctx context.Context, keyID string) error {
-	budget, err := m.store.GetBudget(ctx, keyID)
+func (m *Manager) CheckBudget(ctx context.Context, keyID string, keyBudget float64) error {
+	budget, err := m.effectiveBudget(ctx, keyID, keyBudget)
 	if err != nil {
 		return err
 	}
-
+	if budget <= 0 {
+		return nil
+	}
 	usage, err := m.store.GetUsage(ctx, keyID)
 	if err != nil {
 		return err
 	}
-
 	if usage.TotalCostUSD >= budget {
 		return ErrBudgetExhausted
 	}
-
 	return nil
 }
 
-// RecordRequest records the cost of a completed request.
-// Called AFTER the proxy returns successfully.
-func (m *Manager) RecordRequest(ctx context.Context, keyID, model, provider string, inputTokens, outputTokens int) error {
-	cost := m.pricing.CalculateCost(model, inputTokens, outputTokens)
+func (m *Manager) effectiveBudget(ctx context.Context, keyID string, keyBudget float64) (float64, error) {
+	if keyBudget > 0 {
+		return keyBudget, nil
+	}
+	stored, err := m.store.GetBudget(ctx, keyID)
+	if err != nil && !errors.Is(err, ErrKeyNotFound) {
+		return 0, err
+	}
+	if stored > 0 {
+		return stored, nil
+	}
+	return m.defaultBudget, nil
+}
 
+// RecordRequest records the cost of a completed request.
+func (m *Manager) RecordRequest(ctx context.Context, keyID, model, provider string, inputTokens, outputTokens int) error {
+	cost, err := m.pricing.CalculateCost(model, inputTokens, outputTokens)
+	if err != nil {
+		return err
+	}
 	entry := UsageEntry{
 		Timestamp:    time.Now(),
 		Model:        model,
@@ -164,8 +219,12 @@ func (m *Manager) RecordRequest(ctx context.Context, keyID, model, provider stri
 		OutputTokens: outputTokens,
 		CostUSD:      cost,
 	}
-
 	return m.store.RecordUsage(ctx, keyID, entry)
+}
+
+// UsageOf returns current usage for admin queries.
+func (m *Manager) UsageOf(ctx context.Context, keyID string) (*Usage, error) {
+	return m.store.GetUsage(ctx, keyID)
 }
 
 // --- In-Memory Store (Standalone Mode) ---
@@ -214,7 +273,7 @@ func (s *MemoryStore) GetBudget(ctx context.Context, keyID string) (float64, err
 	defer s.mu.RUnlock()
 	b, ok := s.budgets[keyID]
 	if !ok {
-		return 100.0, nil // Default budget
+		return 0, nil
 	}
 	return b, nil
 }

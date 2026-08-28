@@ -188,6 +188,50 @@ func TestRuntimeHermeticTLSProviderSuccessPath(t *testing.T) {
 		t.Fatalf("upstream calls = %d, want one successful request", got)
 	}
 
+	modelsReq, err := http.NewRequest(http.MethodGet, gatewayURL+"/v1/models", nil)
+	if err != nil {
+		t.Fatalf("build models request: %v", err)
+	}
+	modelsReq.Header.Set("Authorization", "Bearer "+token)
+	modelsResp, err := client.Do(modelsReq)
+	if err != nil {
+		t.Fatalf("models request: %v", err)
+	}
+	modelsBody, modelsReadErr := io.ReadAll(modelsResp.Body)
+	_ = modelsResp.Body.Close()
+	if modelsReadErr != nil {
+		t.Fatalf("read models response: %v", modelsReadErr)
+	}
+	if modelsResp.StatusCode != http.StatusOK {
+		t.Fatalf("models status = %d body=%s, want 200", modelsResp.StatusCode, modelsBody)
+	}
+	var modelsPayload struct {
+		Object string `json:"object"`
+		Data   []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(modelsBody, &modelsPayload); err != nil {
+		t.Fatalf("decode models: %v", err)
+	}
+	if modelsPayload.Object != "list" || len(modelsPayload.Data) != 1 || modelsPayload.Data[0].ID != "gpt-4o-mini" {
+		t.Fatalf("models payload = %+v, want gpt-4o-mini", modelsPayload)
+	}
+
+	unauthModels, err := http.NewRequest(http.MethodGet, gatewayURL+"/v1/models", nil)
+	if err != nil {
+		t.Fatalf("build unauthenticated models request: %v", err)
+	}
+	unauthResp, err := client.Do(unauthModels)
+	if err != nil {
+		t.Fatalf("unauthenticated models request: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, unauthResp.Body)
+	_ = unauthResp.Body.Close()
+	if unauthResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated models status = %d, want 401", unauthResp.StatusCode)
+	}
+
 	// A duplicate model member must be rejected before routing or proxying.
 	// The gateway authorizes the decoded model, while an upstream parser could
 	// otherwise choose a different occurrence from the forwarded bytes.
@@ -698,7 +742,7 @@ func TestProviderRuntimeRejectsUnsupportedProviderType(t *testing.T) {
 		Providers: []config.Provider{
 			{
 				ID:       "anthropic-primary",
-				Type:     "anthropic",
+				Type:     "bedrock",
 				BaseURL:  "https://api.anthropic.com",
 				APIKeyID: "anthropic-key-1",
 				Models:   []string{"claude-sonnet-4-20250514"},
@@ -900,13 +944,6 @@ func TestNewServerRejectsUnsupportedRuntimeControls(t *testing.T) {
 			wantErr: "server.max_request_body_size must not exceed",
 		},
 		{
-			name: "quota",
-			mutate: func(cfg *config.Config) {
-				cfg.Quota.Enabled = true
-			},
-			wantErr: "quota enforcement is not implemented",
-		},
-		{
 			name: "quota backend",
 			mutate: func(cfg *config.Config) {
 				cfg.Quota.Backend = "sqlite"
@@ -925,7 +962,7 @@ func TestNewServerRejectsUnsupportedRuntimeControls(t *testing.T) {
 			mutate: func(cfg *config.Config) {
 				cfg.Quota.DefaultBudget = 100.0
 			},
-			wantErr: "quota.default_budget is reserved",
+			wantErr: "quota.default_budget requires quota.enabled=true",
 		},
 		{
 			name: "negative quota default budget",
@@ -998,15 +1035,6 @@ func TestNewServerRejectsUnsupportedRuntimeControls(t *testing.T) {
 			wantErr: "redis rate limiter backend is not implemented",
 		},
 		{
-			name: "disabled default TPM",
-			mutate: func(cfg *config.Config) {
-				cfg.RateLimit.Enabled = false
-				cfg.RateLimit.Backend = "memory"
-				cfg.RateLimit.DefaultTPM = 1000
-			},
-			wantErr: "TPM enforcement is not implemented",
-		},
-		{
 			name: "redis url",
 			mutate: func(cfg *config.Config) {
 				cfg.RateLimit.Backend = "memory"
@@ -1059,6 +1087,7 @@ func TestRuntimeMiddlewareOrder(t *testing.T) {
 	tests := []struct {
 		name             string
 		rateLimitEnabled bool
+		quotaEnabled     bool
 		want             []string
 	}{
 		{
@@ -1086,14 +1115,48 @@ func TestRuntimeMiddlewareOrder(t *testing.T) {
 				runtimeStepProxy,
 			},
 		},
+		{
+			name:             "with quota",
+			rateLimitEnabled: true,
+			quotaEnabled:     true,
+			want: []string{
+				runtimeStepAuth,
+				runtimeStepRateLimit,
+				runtimeStepQuota,
+				runtimeStepPIIRedaction,
+				runtimeStepRouter,
+				runtimeStepKMS,
+				runtimeStepAdapter,
+				runtimeStepProxy,
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := runtimeMiddlewareOrder(tt.rateLimitEnabled); !reflect.DeepEqual(got, tt.want) {
-				t.Fatalf("runtimeMiddlewareOrder(%t) = %v, want %v", tt.rateLimitEnabled, got, tt.want)
+			if got := runtimeMiddlewareOrder(tt.rateLimitEnabled, tt.quotaEnabled); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("runtimeMiddlewareOrder(%t, %t) = %v, want %v", tt.rateLimitEnabled, tt.quotaEnabled, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRuntimeAcceptsQuotaAndTPM(t *testing.T) {
+	cfg := minimalRuntimeConfig()
+	cfg.KMS.Local.KeyStorePath = t.TempDir()
+	cfg.Quota.Enabled = true
+	cfg.RateLimit.DefaultTPM = 4000
+	if err := validateRuntimeConfig(cfg); err != nil {
+		t.Fatalf("validateRuntimeConfig rejected implemented quota/TPM: %v", err)
+	}
+}
+
+func TestRuntimeRejectsQuotaWithoutPricing(t *testing.T) {
+	cfg := minimalRuntimeConfig()
+	cfg.Quota.Enabled = true
+	cfg.Providers[0].Models = []string{"unpriced-custom-model"}
+	if err := validateRuntimeConfig(cfg); err == nil || !strings.Contains(err.Error(), "quota model pricing is incomplete") {
+		t.Fatalf("validateRuntimeConfig error = %v, want incomplete pricing", err)
 	}
 }
 

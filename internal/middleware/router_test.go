@@ -24,6 +24,7 @@ const (
 	routerTestFallbackWeight           = 5
 	routerTestPrimaryPriority          = 1
 	routerTestFallbackPriority         = 2
+	routerWeightedPickTrials           = 4000
 )
 
 func TestRouterSelectsPermittedProviderAndPreservesBody(t *testing.T) {
@@ -62,6 +63,67 @@ func TestRouterSelectsPermittedProviderAndPreservesBody(t *testing.T) {
 	}
 	if ctx.IsAborted() {
 		t.Fatalf("Router aborted permitted model with status %d", ctx.StatusCode)
+	}
+}
+
+func TestRouterRetriesSameRequestOnRetryableAttempt(t *testing.T) {
+	body := `{"model":"gpt-4o","messages":[]}`
+	ctx := routerTestContext(body, []string{routerTestModel})
+	var seen []string
+	Router(routerSameModelFailoverConfig())(ctx, func() {
+		seen = append(seen, ctx.ProviderID)
+		got, err := io.ReadAll(ctx.Request.Body)
+		if err != nil {
+			t.Fatalf("read attempt body: %v", err)
+		}
+		if string(got) != body {
+			t.Fatalf("attempt %d body = %q, want canonical %q", len(seen), got, body)
+		}
+		if len(seen) == 1 {
+			ctx.RetryableAttempt = true
+			ctx.ProviderResponded = true
+			ctx.ProviderFailure = true
+			ctx.StatusCode = http.StatusServiceUnavailable
+			return
+		}
+		ctx.ProviderResponded = true
+		ctx.StatusCode = http.StatusOK
+	})
+
+	if len(seen) != 2 {
+		t.Fatalf("attempts = %d, want 2", len(seen))
+	}
+	if seen[0] != routerTestOpenAIProviderID || seen[1] != routerTestFallbackProviderID {
+		t.Fatalf("providers = %v, want primary then fallback", seen)
+	}
+	if ctx.ProviderID != routerTestFallbackProviderID {
+		t.Fatalf("final provider = %q, want fallback", ctx.ProviderID)
+	}
+	if ctx.IsAborted() {
+		t.Fatalf("successful fallback aborted with status %d", ctx.StatusCode)
+	}
+}
+
+func TestPickWeightedPrefersHeavierChannel(t *testing.T) {
+	channels := []*ProviderChannel{
+		{ID: routerTestOpenAIProviderID, Weight: routerTestPrimaryWeight},
+		{ID: routerTestFallbackProviderID, Weight: routerTestFallbackWeight},
+	}
+	counts := map[string]int{}
+	for i := 0; i < routerWeightedPickTrials; i++ {
+		chosen := pickWeighted(channels)
+		if chosen == nil {
+			t.Fatal("pickWeighted returned nil")
+		}
+		counts[chosen.ID]++
+	}
+	primary := counts[routerTestOpenAIProviderID]
+	fallback := counts[routerTestFallbackProviderID]
+	if primary == 0 || fallback == 0 {
+		t.Fatalf("weighted pick missed a channel: primary=%d fallback=%d", primary, fallback)
+	}
+	if primary <= fallback {
+		t.Fatalf("heavier channel was not preferred: primary=%d fallback=%d", primary, fallback)
 	}
 }
 
@@ -533,6 +595,12 @@ func routerTestContext(body string, permissions []string) *server.RequestContext
 		Request:     httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)),
 		Permissions: permissions,
 	}
+}
+
+func routerSameModelFailoverConfig() RouterConfig {
+	cfg := routerTestConfig()
+	cfg.Channels[1].Models = []string{routerTestModel}
+	return cfg
 }
 
 func routerTestConfig() RouterConfig {

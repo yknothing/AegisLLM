@@ -11,6 +11,8 @@ This directory contains the Architecture Decision Records for the Aegis LLM Gate
 | [003](003-hybrid-key-source.md) | Hybrid Key Source Resolution | Accepted |
 | [004](004-middleware-pipeline-order.md) | Middleware Pipeline Order | Accepted |
 | [005](005-language-choice.md) | Go as Implementation Language | Accepted |
+| [006](006-in-request-failover.md) | In-request failover without reordering KMS/Adapter/Proxy | Accepted |
+| [007](007-loopback-admin-api.md) | Loopback Admin API listener | Accepted |
 
 ## Format
 

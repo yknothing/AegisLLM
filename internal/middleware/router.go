@@ -2,9 +2,10 @@
 //
 // DESIGN:
 //   - Routes requests to a healthy provider that supports the requested model
-//   - Uses priority ordering, with weight as a deterministic tie-breaker
+//   - Uses priority ordering, with weight as a same-priority weighted pick
 //   - Implements Circuit Breaker pattern for fault tolerance
-//   - Does not perform cross-model fallback or probabilistic weighted balancing
+//   - May retry KMS → Adapter → Proxy on the same request (ADR-006)
+//   - Does not perform cross-model fallback
 //
 // SECURITY:
 //   - Only routes to pre-configured providers (no open redirect)
@@ -14,26 +15,30 @@ package middleware
 import (
 	"encoding/json"
 	"errors"
+	"math/rand/v2"
 	"net/http"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/yknothing/AegisLLM/internal/gatewayconst"
 	"github.com/yknothing/AegisLLM/internal/server"
+	"github.com/yknothing/AegisLLM/internal/utils"
 )
 
 // ProviderChannel represents a configured LLM provider endpoint.
 type ProviderChannel struct {
-	ID       string
-	Name     string
-	Type     string // "openai" | "anthropic" | "google" | "deepseek"
-	BaseURL  string
-	KeyID    string // Reference to KMS-stored key
-	Models   []string
-	Weight   int
-	Priority int // Lower = higher priority for same-model routing
-	Enabled  bool
+	ID         string
+	Name       string
+	Type       string // "openai" | "anthropic" | "google" | "deepseek"
+	BaseURL    string
+	KeyID      string // Reference to KMS-stored key
+	Models     []string
+	Weight     int
+	Priority   int
+	APIVersion string
+	Enabled    bool
 }
 
 // RouterConfig configures the routing middleware.
@@ -50,7 +55,6 @@ func Router(cfg RouterConfig) server.Middleware {
 
 func routerWithTable(cfg RouterConfig, rt *routerTable) server.Middleware {
 	return func(ctx *server.RequestContext, next func()) {
-		// Extract requested model from the request
 		model, streaming, err := extractModelFromRequest(ctx, cfg.MaxRequestBodySize)
 		if errors.Is(err, errRequestBodyTooLarge) {
 			ctx.Abort(http.StatusRequestEntityTooLarge, []byte(`{"error":{"message":"request body too large","type":"invalid_request_error"}}`))
@@ -64,41 +68,68 @@ func routerWithTable(cfg RouterConfig, rt *routerTable) server.Middleware {
 			ctx.Abort(http.StatusBadRequest, []byte(`{"error":{"message":"model field is required","type":"invalid_request_error"}}`))
 			return
 		}
-
-		// SECURITY: Verify the virtual key is allowed to access this model
 		if !isModelAllowed(model, ctx.Permissions) {
 			ctx.Abort(http.StatusForbidden, []byte(`{"error":{"message":"model not permitted for this virtual key","type":"permission_error"}}`))
 			return
 		}
 
-		// Find the best available channel for this model
-		channel, lease := rt.Route(model)
-		if channel == nil {
-			ctx.Abort(http.StatusServiceUnavailable, []byte(`{"error":{"message":"no available provider for requested model","type":"service_error"}}`))
-			return
-		}
+		canonical := append([]byte(nil), ctx.RequestBody...)
+		defer utils.MemZero(canonical)
 
-		// Populate routing decision in context
-		ctx.ProviderID = channel.ID
-		ctx.ProviderType = channel.Type
-		ctx.ProviderAPIKeyID = channel.KeyID
-		ctx.Model = model
-		ctx.BaseURL = channel.BaseURL
-		ctx.IsStreaming = streaming
-
-		// After request: only the proxy boundary may update provider health.
-		// Gateway-local KMS, adapter, or policy failures must not poison it.
-		defer func() {
-			if ctx.ProviderFailure {
-				rt.RecordFailure(channel.ID, lease)
-			} else if ctx.ProviderResponded {
-				rt.RecordSuccess(channel.ID, lease)
-			} else if lease.probe {
-				rt.ReleaseProbe(channel.ID, lease)
+		tried := make(map[string]struct{})
+		for {
+			channel, lease := rt.Route(model, tried)
+			if channel == nil {
+				if ctx.ResponseCommitted() {
+					return
+				}
+				if len(tried) == 0 {
+					ctx.Abort(http.StatusServiceUnavailable, []byte(`{"error":{"message":"no available provider for requested model","type":"service_error"}}`))
+					return
+				}
+				ctx.Abort(http.StatusBadGateway, []byte(`{"error":{"message":"upstream request failed","type":"server_error"}}`))
+				return
 			}
-		}()
+			tried[channel.ID] = struct{}{}
+			replaceRequestBody(ctx, append([]byte(nil), canonical...))
+			ctx.ResetAttempt()
+			ctx.ProviderID = channel.ID
+			ctx.ProviderType = channel.Type
+			ctx.ProviderAPIKeyID = channel.KeyID
+			ctx.ProviderAPIVersion = channel.APIVersion
+			ctx.Model = model
+			ctx.BaseURL = channel.BaseURL
+			ctx.IsStreaming = streaming
+			ctx.CanFallback = !streaming && rt.hasUnusedCandidate(model, tried)
 
-		next()
+			func() {
+				defer func() {
+					if recovered := recover(); recovered != nil {
+						settleProviderLease(rt, ctx, channel.ID, lease)
+						panic(recovered)
+					}
+				}()
+				next()
+			}()
+			settleProviderLease(rt, ctx, channel.ID, lease)
+
+			if ctx.IsAborted() || ctx.ResponseCommitted() && !ctx.RetryableAttempt {
+				return
+			}
+			if !ctx.RetryableAttempt {
+				return
+			}
+		}
+	}
+}
+
+func settleProviderLease(rt *routerTable, ctx *server.RequestContext, channelID string, lease circuitLease) {
+	if ctx.ProviderFailure {
+		rt.RecordFailure(channelID, lease)
+	} else if ctx.ProviderResponded {
+		rt.RecordSuccess(channelID, lease)
+	} else if lease.probe {
+		rt.ReleaseProbe(channelID, lease)
 	}
 }
 
@@ -127,40 +158,54 @@ func newRouterTable(channels []ProviderChannel) *routerTable {
 }
 
 // Route finds the best available channel for the given model.
-// Strategy: same-model priority routing with weight as a deterministic tie-breaker
-// and circuit breaker health checks.
-func (rt *routerTable) Route(model string) (*ProviderChannel, circuitLease) {
+func (rt *routerTable) Route(model string, exclude map[string]struct{}) (*ProviderChannel, circuitLease) {
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
 
-	// Find all channels that support this model, sorted by priority
 	var candidates []*ProviderChannel
 	for i := range rt.channels {
 		ch := &rt.channels[i]
 		if !ch.Enabled {
 			continue
 		}
+		if exclude != nil {
+			if _, skip := exclude[ch.ID]; skip {
+				continue
+			}
+		}
 		if supportsModel(ch, model) {
 			candidates = append(candidates, ch)
 		}
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
-		if candidates[i].Priority == candidates[j].Priority {
-			return candidates[i].Weight > candidates[j].Weight
-		}
 		return candidates[i].Priority < candidates[j].Priority
 	})
 
-	// Select the first healthy channel (lowest priority number = highest priority)
-	for _, ch := range candidates {
-		if breaker, ok := rt.breakers[ch.ID]; ok {
-			if lease, acquired := breaker.AcquireClosed(); acquired {
-				return ch, lease
+	i := 0
+	for i < len(candidates) {
+		priority := candidates[i].Priority
+		j := i
+		for j < len(candidates) && candidates[j].Priority == priority {
+			j++
+		}
+		group := candidates[i:j]
+		var closed []*ProviderChannel
+		for _, ch := range group {
+			if breaker, ok := rt.breakers[ch.ID]; ok && breaker.state.Load() == stateClosed {
+				closed = append(closed, ch)
 			}
 		}
+		if len(closed) > 0 {
+			chosen := pickWeighted(closed)
+			if breaker, ok := rt.breakers[chosen.ID]; ok {
+				if lease, acquired := breaker.AcquireClosed(); acquired {
+					return chosen, lease
+				}
+			}
+		}
+		i = j
 	}
 
-	// All channels are unhealthy - try half-open ones
 	for _, ch := range candidates {
 		if breaker, ok := rt.breakers[ch.ID]; ok {
 			if lease, acquired := breaker.AllowProbe(); acquired {
@@ -170,6 +215,63 @@ func (rt *routerTable) Route(model string) (*ProviderChannel, circuitLease) {
 	}
 
 	return nil, circuitLease{}
+}
+
+func (rt *routerTable) hasUnusedCandidate(model string, exclude map[string]struct{}) bool {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	for i := range rt.channels {
+		ch := &rt.channels[i]
+		if !ch.Enabled {
+			continue
+		}
+		if exclude != nil {
+			if _, skip := exclude[ch.ID]; skip {
+				continue
+			}
+		}
+		if !supportsModel(ch, model) {
+			continue
+		}
+		breaker, ok := rt.breakers[ch.ID]
+		if !ok {
+			continue
+		}
+		if breaker.state.Load() == stateClosed {
+			return true
+		}
+		if breaker.state.Load() == stateOpen {
+			lastFail := time.Unix(breaker.lastFailure.Load(), 0)
+			if time.Since(lastFail) > breaker.recoveryTime {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func pickWeighted(channels []*ProviderChannel) *ProviderChannel {
+	if len(channels) == 1 {
+		return channels[0]
+	}
+	total := 0
+	weights := make([]int, len(channels))
+	for i, ch := range channels {
+		weight := ch.Weight
+		if weight <= 0 {
+			weight = gatewayconst.DefaultProviderWeight
+		}
+		weights[i] = weight
+		total += weight
+	}
+	n := rand.IntN(total)
+	for i, weight := range weights {
+		if n < weight {
+			return channels[i]
+		}
+		n -= weight
+	}
+	return channels[len(channels)-1]
 }
 
 func (rt *routerTable) RecordFailure(channelID string, lease circuitLease) {
@@ -217,8 +319,8 @@ type circuitBreaker struct {
 
 func newCircuitBreaker() *circuitBreaker {
 	cb := &circuitBreaker{
-		threshold:    5,
-		recoveryTime: 30 * time.Second,
+		threshold:    gatewayconst.CircuitBreakerFailureThreshold,
+		recoveryTime: gatewayconst.CircuitBreakerRecovery,
 	}
 	cb.state.Store(stateClosed)
 	return cb

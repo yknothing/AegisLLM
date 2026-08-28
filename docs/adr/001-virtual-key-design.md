@@ -4,7 +4,7 @@
 Accepted
 
 ## Implementation Status
-Current runtime implements shared HS256 issuance/validation, model permissions, RPM claims, `max_concurrency` claims, pool key-source validation, and durable single-host revocation. The offline Operator CLI initializes and updates revocation state; the gateway polls a versioned snapshot into immutable request memory. Non-zero TPM, budget, and BYOK key-source claims fail closed. RS256 and shared multi-host revocation remain target capabilities.
+Current runtime implements shared HS256 issuance/validation, model permissions, RPM, TPM, budget, and `max_concurrency` claims, pool key-source validation, and durable single-host revocation. The offline Operator CLI and optional loopback Admin API initialize and update revocation state; the gateway polls a versioned snapshot into immutable request memory. BYOK key-source claims still fail closed. RS256 and shared multi-host revocation remain target capabilities.
 
 ## Context
 Aegis needs a mechanism to authenticate clients, enforce rate limits, track budgets, and authorize model access. Passing real provider API keys (like OpenAI keys) directly from clients is insecure and makes quota management impossible. We need an abstraction layer.
@@ -13,7 +13,7 @@ Aegis needs a mechanism to authenticate clients, enforce rate limits, track budg
 We will use **Virtual Keys** implemented as signed JSON Web Tokens (JWT).
 
 1. All client requests must include an `Authorization: Bearer <virtual_key>` header.
-2. The Virtual Key encapsulates the client's identity (`sub`), permissions (`models`), key source, and limits. Current runtime accepts `key_source="pool"` and enforces `rpm` plus `max_concurrency`; non-zero deployment `default_max_concurrency` remains the upper ceiling. `key_source="byok"`, `tpm`, and `budget` are reserved claims that fail closed until enforcement exists.
+2. The Virtual Key encapsulates the client's identity (`sub`), permissions (`models`), key source, and limits. Current runtime accepts `key_source="pool"` and enforces `rpm`, `tpm`, `budget`, plus `max_concurrency`; non-zero deployment defaults remain the upper ceiling. `key_source="byok"` remains reserved.
 3. Aegis validates the signature cryptographically without needing a database lookup for every request.
 4. Revocation checks `(issuer, kid)` on every valid token. The current local backend persists a versioned atomic snapshot and performs request checks from a polling in-memory view; a shared backend is reserved for cluster mode.
 

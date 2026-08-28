@@ -16,6 +16,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -30,6 +31,7 @@ import (
 	"time"
 
 	"github.com/yknothing/AegisLLM/internal/egress"
+	"github.com/yknothing/AegisLLM/internal/gatewayconst"
 	"github.com/yknothing/AegisLLM/internal/requestid"
 	"github.com/yknothing/AegisLLM/internal/utils"
 )
@@ -200,14 +202,20 @@ func (e *Engine) dialContext(ctx context.Context, network, authority string) (ne
 	return nil, fmt.Errorf("dialing validated egress addresses: %w", errors.Join(dialErrors...))
 }
 
-// ProxyRequest forwards a request to the upstream LLM provider.
-// It handles both streaming (SSE) and non-streaming responses.
-//
-// SECURITY:
-//   - apiKey is validated before transport and zeroed immediately after the
-//     outbound header is constructed
-//   - Only allowed domains are contacted
-//   - Response body is never fully buffered
+// DispatchConfig configures a single upstream attempt.
+type DispatchConfig struct {
+	TargetURL           string
+	APIKey              *utils.SecureBytes
+	IsStreaming         bool
+	AuthHeader          string
+	AuthPrefix          string
+	ExtraHeaders        map[string]string
+	TransformResponse   func([]byte) ([]byte, error)
+	TransformStreamLine func(string) (string, bool, error)
+	MaxTransformBytes   int64
+}
+
+// ProxyRequest forwards a request using default Bearer authentication.
 func (e *Engine) ProxyRequest(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -216,6 +224,21 @@ func (e *Engine) ProxyRequest(
 	apiKey *utils.SecureBytes,
 	isStreaming bool,
 ) (*ProxyResult, error) {
+	return e.Dispatch(ctx, w, originalReq, DispatchConfig{
+		TargetURL:   targetURL,
+		APIKey:      apiKey,
+		IsStreaming: isStreaming,
+	})
+}
+
+// Dispatch forwards a request to the upstream LLM provider.
+func (e *Engine) Dispatch(
+	ctx context.Context,
+	w http.ResponseWriter,
+	originalReq *http.Request,
+	cfg DispatchConfig,
+) (*ProxyResult, error) {
+	apiKey := cfg.APIKey
 	if apiKey == nil {
 		return nil, fmt.Errorf("provider API key is missing")
 	}
@@ -224,39 +247,42 @@ func (e *Engine) ProxyRequest(
 		return nil, errors.New("provider API key is invalid")
 	}
 
-	// SECURITY: Validate target domain against allowlist
-	if err := e.validateEgress(targetURL); err != nil {
+	if err := e.validateEgress(cfg.TargetURL); err != nil {
 		return nil, fmt.Errorf("egress blocked: %w", err)
 	}
 
-	// Build upstream request
 	upstreamReq, err := http.NewRequestWithContext(ctx,
 		originalReq.Method,
-		targetURL,
+		cfg.TargetURL,
 		originalReq.Body,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating upstream request: %w", err)
 	}
 
-	// Copy safe headers (exclude hop-by-hop and sensitive headers)
 	copyHeaders(upstreamReq.Header, originalReq.Header)
 
-	// Inject API key for the outbound request. The header string cannot be
-	// zeroed by Go, so close SecureBytes immediately after constructing the
-	// header and remove the immutable header string as soon as the transport
-	// returns response headers.
-	upstreamReq.Header.Set("Authorization", "Bearer "+string(apiKey.Bytes()))
+	authHeader := cfg.AuthHeader
+	authPrefix := cfg.AuthPrefix
+	if strings.TrimSpace(authHeader) == "" {
+		authHeader = gatewayconst.AuthHeaderAuthorization
+		authPrefix = gatewayconst.AuthSchemeBearerPrefix
+	}
+	upstreamReq.Header.Set(authHeader, authPrefix+string(apiKey.Bytes()))
+	for name, value := range cfg.ExtraHeaders {
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		upstreamReq.Header.Set(name, value)
+	}
 	apiKey.Close()
 
-	// Set request timeout
 	reqCtx, cancel := context.WithTimeout(ctx, e.config.StreamTimeout)
 	defer cancel()
 	upstreamReq = upstreamReq.WithContext(reqCtx)
 
-	// Execute request
 	resp, err := e.client.Do(upstreamReq) // #nosec G704 -- targetURL is parsed, HTTPS-only, and host-allowlisted by validateEgress above.
-	upstreamReq.Header.Del("Authorization")
+	upstreamReq.Header.Del(authHeader)
 	if err != nil {
 		if ctx.Err() == nil {
 			return nil, fmt.Errorf("%w: %v", ErrUpstreamTransport, err)
@@ -271,23 +297,19 @@ func (e *Engine) ProxyRequest(
 		StatusCode: resp.StatusCode,
 	}
 
-	if isStreaming && resp.StatusCode == http.StatusOK {
-		// Stream SSE response with real-time token counting
-		result.OutputTokens, err = e.streamSSE(w, resp)
+	if cfg.IsStreaming && resp.StatusCode == http.StatusOK {
+		result.OutputTokens, err = e.streamSSE(w, resp, cfg.TransformStreamLine)
 		if err != nil {
 			if ctx.Err() != nil {
 				return result, fmt.Errorf("request context ended: %w", ctx.Err())
 			}
 			return result, fmt.Errorf("streaming failed: %w", err)
 		}
-	} else {
-		// Non-streaming: forward response directly
-		if err := e.forwardResponse(w, resp); err != nil {
-			if ctx.Err() != nil {
-				return result, fmt.Errorf("request context ended: %w", ctx.Err())
-			}
-			return result, fmt.Errorf("forwarding response failed: %w", err)
+	} else if err := e.forwardResponse(w, resp, cfg); err != nil {
+		if ctx.Err() != nil {
+			return result, fmt.Errorf("request context ended: %w", ctx.Err())
 		}
+		return result, fmt.Errorf("forwarding response failed: %w", err)
 	}
 
 	return result, nil
@@ -295,7 +317,7 @@ func (e *Engine) ProxyRequest(
 
 // streamSSE forwards Server-Sent Events while counting tokens in real-time.
 // DESIGN: Each SSE chunk is parsed for token usage without buffering the full response.
-func (e *Engine) streamSSE(w http.ResponseWriter, resp *http.Response) (int64, error) {
+func (e *Engine) streamSSE(w http.ResponseWriter, resp *http.Response, transform func(string) (string, bool, error)) (int64, error) {
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -315,7 +337,16 @@ func (e *Engine) streamSSE(w http.ResponseWriter, resp *http.Response) (int64, e
 	for scanner.Scan() {
 		line := scanner.Text()
 
-		// Forward the line immediately (zero-copy semantics)
+		if transform != nil {
+			transformed, skip, transformErr := transform(line)
+			if transformErr != nil {
+				return tokenCount.Load(), fmt.Errorf("%w: %v", ErrUpstreamRead, transformErr)
+			}
+			if skip {
+				continue
+			}
+			line = transformed
+		}
 		_, err := fmt.Fprintf(w, "%s\n", line)
 		if err != nil {
 			return tokenCount.Load(), fmt.Errorf("write to client failed: %w", err)
@@ -342,12 +373,33 @@ func (e *Engine) streamSSE(w http.ResponseWriter, resp *http.Response) (int64, e
 }
 
 // forwardResponse copies a non-streaming response to the client.
-func (e *Engine) forwardResponse(w http.ResponseWriter, resp *http.Response) error {
+func (e *Engine) forwardResponse(w http.ResponseWriter, resp *http.Response, cfg DispatchConfig) error {
+	body := io.Reader(resp.Body)
+	if cfg.TransformResponse != nil && resp.StatusCode == http.StatusOK {
+		limit := cfg.MaxTransformBytes
+		if limit <= 0 {
+			limit = gatewayconst.MaxCapturedResponseBytes
+		}
+		buffered, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrUpstreamRead, err)
+		}
+		if int64(len(buffered)) > limit {
+			return fmt.Errorf("%w: response exceeds transform budget", ErrUpstreamRead)
+		}
+		transformed, err := cfg.TransformResponse(buffered)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrUpstreamRead, err)
+		}
+		body = bytes.NewReader(transformed)
+		resp.Header.Set("Content-Type", "application/json")
+		resp.ContentLength = int64(len(transformed))
+	}
+
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 
-	// Stream body without full buffering
-	upstream := &upstreamResponseReader{reader: resp.Body}
+	upstream := &upstreamResponseReader{reader: body}
 	downstream := &downstreamResponseWriter{writer: w}
 	if _, err := io.Copy(downstream, upstream); err != nil {
 		if downstream.writeErr != nil {

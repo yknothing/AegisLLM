@@ -590,7 +590,7 @@ func TestForwardResponsePrefersClientWriteFailureWhenReadAlsoFails(t *testing.T)
 	}
 	w := &failingResponseWriter{header: make(http.Header), err: clientErr}
 
-	err := engine.forwardResponse(w, resp)
+	err := engine.forwardResponse(w, resp, DispatchConfig{})
 	if err == nil || !errors.Is(err, clientErr) {
 		t.Fatalf("forwardResponse error = %v, want client write failure", err)
 	}
@@ -607,7 +607,7 @@ func TestForwardResponseClassifiesUpstreamReadFailure(t *testing.T) {
 		Body:       &readOnceErrorCloser{err: errors.New("upstream read failed")},
 	}
 
-	err := engine.forwardResponse(httptest.NewRecorder(), resp)
+	err := engine.forwardResponse(httptest.NewRecorder(), resp, DispatchConfig{})
 	if !errors.Is(err, ErrUpstreamRead) {
 		t.Fatalf("forwardResponse error = %v, want ErrUpstreamRead", err)
 	}
@@ -651,7 +651,7 @@ func TestStreamSSEForwardsLargeDataLine(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	tokens, err := engine.streamSSE(recorder, resp)
+	tokens, err := engine.streamSSE(recorder, resp, nil)
 	if err != nil {
 		t.Fatalf("streamSSE returned error for large data line: %v", err)
 	}
@@ -679,7 +679,7 @@ func TestStreamSSERejectsOversizedDataLine(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	if _, err := engine.streamSSE(recorder, resp); !errors.Is(err, ErrUpstreamRead) {
+	if _, err := engine.streamSSE(recorder, resp, nil); !errors.Is(err, ErrUpstreamRead) {
 		t.Fatalf("streamSSE error = %v, want ErrUpstreamRead", err)
 	}
 }
@@ -784,7 +784,7 @@ func TestForwardResponseAllowsOnlySafeUpstreamHeaders(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	if err := engine.forwardResponse(recorder, resp); err != nil {
+	if err := engine.forwardResponse(recorder, resp, DispatchConfig{}); err != nil {
 		t.Fatalf("forwardResponse returned error: %v", err)
 	}
 
