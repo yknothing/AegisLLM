@@ -150,7 +150,7 @@ func TestValidateTokenAcceptsBudgetClaim(t *testing.T) {
 	}
 }
 
-func TestValidateTokenRejectsPositiveTPMClaim(t *testing.T) {
+func TestValidateTokenAcceptsPositiveTPMClaim(t *testing.T) {
 	key := testSigningKey
 	token := signTestToken(t, key, VirtualKeyClaims{
 		KeyID:     "vk_test",
@@ -161,8 +161,12 @@ func TestValidateTokenRejectsPositiveTPMClaim(t *testing.T) {
 		ExpiresAt: time.Now().Add(time.Hour).Unix(),
 		Issuer:    "aegis",
 	})
-	if _, err := validateToken(token, key, "aegis", testTokenMaxTTL); err == nil {
-		t.Fatal("validateToken accepted reserved per-key TPM claim")
+	got, err := validateToken(token, key, "aegis", testTokenMaxTTL)
+	if err != nil {
+		t.Fatalf("validateToken rejected per-key TPM: %v", err)
+	}
+	if got.MaxTPM != virtualkey.UnlimitedPerKeyTPM+1 {
+		t.Fatalf("MaxTPM = %d, want %d", got.MaxTPM, virtualkey.UnlimitedPerKeyTPM+1)
 	}
 }
 

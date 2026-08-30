@@ -81,7 +81,7 @@ func TestIssueRejectsInvalidClaimsBeforeSigning(t *testing.T) {
 		{name: "empty models", mutate: func(o *IssueOptions) { o.Models = nil }},
 		{name: "negative rpm", mutate: func(o *IssueOptions) { o.MaxRPM = -1 }},
 		{name: "negative concurrency", mutate: func(o *IssueOptions) { o.MaxConcurrency = -1 }},
-		{name: "positive tpm", mutate: func(o *IssueOptions) { o.MaxTPM = UnlimitedPerKeyTPM + 1 }},
+		{name: "negative tpm", mutate: func(o *IssueOptions) { o.MaxTPM = -1 }},
 		{name: "empty issuer", mutate: func(o *IssueOptions) { o.Issuer = "" }},
 		{name: "unrevocable key id", mutate: func(o *IssueOptions) { o.KeyID = strings.Repeat("k", MaxRevocableIdentifierBytes+1) }},
 	}
@@ -103,7 +103,7 @@ func TestIssueRejectsInvalidClaimsBeforeSigning(t *testing.T) {
 	}
 }
 
-func TestValidateAtRejectsPositiveTPMClaim(t *testing.T) {
+func TestValidateAtAcceptsPositiveTPMClaim(t *testing.T) {
 	key := []byte("0123456789abcdef0123456789abcdef")
 	now := time.Now().UTC()
 	token, err := sign(key, &Claims{
@@ -120,9 +120,12 @@ func TestValidateAtRejectsPositiveTPMClaim(t *testing.T) {
 		t.Fatalf("sign returned error: %v", err)
 	}
 
-	_, err = ValidateAt(token, key, "aegis", 24*time.Hour, now)
-	if err == nil || !strings.Contains(err.Error(), "tpm claim is reserved") {
-		t.Fatalf("ValidateAt tpm error = %v, want reserved TPM rejection", err)
+	got, err := ValidateAt(token, key, "aegis", 24*time.Hour, now)
+	if err != nil {
+		t.Fatalf("ValidateAt rejected per-key TPM: %v", err)
+	}
+	if got.MaxTPM != UnlimitedPerKeyTPM+1 {
+		t.Fatalf("MaxTPM = %d, want %d", got.MaxTPM, UnlimitedPerKeyTPM+1)
 	}
 }
 

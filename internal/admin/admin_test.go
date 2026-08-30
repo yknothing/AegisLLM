@@ -176,9 +176,10 @@ func TestIssueVirtualKeyReturnsJWT(t *testing.T) {
 	}
 }
 
-func TestIssueVirtualKeyRejectsPositiveTPM(t *testing.T) {
+func TestIssueVirtualKeyAcceptsPositiveTPM(t *testing.T) {
+	signingKey := []byte("0123456789abcdef0123456789abcdef")
 	handler := NewHandlerWithServices(&recordingKMS{}, slog.New(slog.NewTextHandler(io.Discard, nil)), []byte(adminTestToken), Services{
-		SigningKey:    []byte("0123456789abcdef0123456789abcdef"),
+		SigningKey:    signingKey,
 		Issuer:        "aegis",
 		MaxTTL:        24 * time.Hour,
 		AllowedModels: []string{"gpt-4o-mini"},
@@ -193,8 +194,19 @@ func TestIssueVirtualKeyRejectsPositiveTPM(t *testing.T) {
 	req.Header.Set(adminTokenHeader, adminTestToken)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d body=%s, want 400", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	var payload issueVirtualKeyResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	claims, err := virtualkey.Validate(payload.VirtualKey, signingKey, "aegis", 24*time.Hour)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if claims.MaxTPM != virtualkey.UnlimitedPerKeyTPM+1 {
+		t.Fatalf("claims tpm=%d, want %d", claims.MaxTPM, virtualkey.UnlimitedPerKeyTPM+1)
 	}
 }
 

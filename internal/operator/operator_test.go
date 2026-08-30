@@ -171,8 +171,8 @@ func TestIssueVirtualKeyIncludesBudgetAndRejectsTPM(t *testing.T) {
 		Models:  []string{"gpt-4o-mini"},
 		TTL:     time.Hour,
 		MaxTPM:  virtualkey.UnlimitedPerKeyTPM + 1,
-	}); err == nil || !strings.Contains(err.Error(), "tpm claim is reserved") {
-		t.Fatalf("IssueVirtualKey tpm error = %v, want reserved TPM rejection", err)
+	}); err != nil {
+		t.Fatalf("IssueVirtualKey rejected per-key TPM: %v", err)
 	}
 }
 

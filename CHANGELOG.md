@@ -6,11 +6,9 @@ All notable changes to AegisLLM are documented here.
 
 ### AegisLift (OpenAI-compatible gateway outcomes)
 
-- Added OpenAI-compatible model catalog intersection in `ModelsList`; the
-  data-plane `GET /v1/models` route stays unmounted (404) until Independent
-  QA advances that allowlist.
-- Enforced optional in-memory budgets and gateway-wide TPM via
-  `rate_limit.default_tpm`; JWT `tpm` and provider `max_tpm` stay fail-closed.
+- Added OpenAI-compatible `GET /v1/models` (virtual-key ∩ catalog).
+- Enforced per-key JWT TPM (estimate then reconcile) and optional in-memory
+  budgets; gateway-wide `rate_limit.default_tpm` remains a ceiling.
   Unknown models have no silent default price when quota is enabled.
 - Added same-request retry/fallback (ADR-006) and same-priority weighted
   load balancing without reordering KMS → Adapter → Proxy.

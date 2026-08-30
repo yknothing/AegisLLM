@@ -248,8 +248,20 @@ func TestRuntimeAdminLoopbackIssueAndUsage(t *testing.T) {
 	if modelsReadErr != nil {
 		t.Fatalf("read issued-key models: %v", modelsReadErr)
 	}
-	if modelsResp.StatusCode != http.StatusNotFound {
-		t.Fatalf("issued-key models status = %d body=%s, want 404", modelsResp.StatusCode, modelsBody)
+	if modelsResp.StatusCode != http.StatusOK {
+		t.Fatalf("issued-key models status = %d body=%s, want 200", modelsResp.StatusCode, modelsBody)
+	}
+	var modelsPayload struct {
+		Object string `json:"object"`
+		Data   []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(modelsBody, &modelsPayload); err != nil {
+		t.Fatalf("decode issued-key models: %v", err)
+	}
+	if modelsPayload.Object != gatewayconst.OpenAIObjectList || len(modelsPayload.Data) != 1 || modelsPayload.Data[0].ID != liftChatModel {
+		t.Fatalf("issued-key models payload = %+v, want %s", modelsPayload, liftChatModel)
 	}
 
 	usageReq, err := http.NewRequest(http.MethodGet, env.adminURL+liftAdminUsagePathPrefix+liftUsageProbeKeyID, nil)

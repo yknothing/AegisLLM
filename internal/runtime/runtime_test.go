@@ -200,10 +200,25 @@ func TestRuntimeHermeticTLSProviderSuccessPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("models request: %v", err)
 	}
-	_, _ = io.Copy(io.Discard, modelsResp.Body)
+	modelsBody, modelsReadErr := io.ReadAll(modelsResp.Body)
 	_ = modelsResp.Body.Close()
-	if modelsResp.StatusCode != http.StatusNotFound {
-		t.Fatalf("models status = %d, want 404", modelsResp.StatusCode)
+	if modelsReadErr != nil {
+		t.Fatalf("read models response: %v", modelsReadErr)
+	}
+	if modelsResp.StatusCode != http.StatusOK {
+		t.Fatalf("models status = %d body=%s, want 200", modelsResp.StatusCode, modelsBody)
+	}
+	var modelsPayload struct {
+		Object string `json:"object"`
+		Data   []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(modelsBody, &modelsPayload); err != nil {
+		t.Fatalf("decode models: %v", err)
+	}
+	if modelsPayload.Object != gatewayconst.OpenAIObjectList || len(modelsPayload.Data) != 1 || modelsPayload.Data[0].ID != "gpt-4o-mini" {
+		t.Fatalf("models payload = %+v, want gpt-4o-mini", modelsPayload)
 	}
 
 	unauthModels, err := http.NewRequest(http.MethodGet, gatewayURL+"/v1/models", nil)
@@ -216,8 +231,8 @@ func TestRuntimeHermeticTLSProviderSuccessPath(t *testing.T) {
 	}
 	_, _ = io.Copy(io.Discard, unauthResp.Body)
 	_ = unauthResp.Body.Close()
-	if unauthResp.StatusCode != http.StatusNotFound {
-		t.Fatalf("unauthenticated models status = %d, want 404", unauthResp.StatusCode)
+	if unauthResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated models status = %d, want 401", unauthResp.StatusCode)
 	}
 
 	tpmToken := signRuntimeTestToken(t, jwtKey, middleware.VirtualKeyClaims{
@@ -245,8 +260,8 @@ func TestRuntimeHermeticTLSProviderSuccessPath(t *testing.T) {
 	}
 	_, _ = io.Copy(io.Discard, tpmResp.Body)
 	_ = tpmResp.Body.Close()
-	if tpmResp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("tpm claim status = %d, want 401", tpmResp.StatusCode)
+	if tpmResp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("tpm claim status = %d, want 429", tpmResp.StatusCode)
 	}
 	if got := upstreamCalls.Load(); got != tpmHitsBefore {
 		t.Fatalf("tpm claim caused provider egress: hits %d -> %d", tpmHitsBefore, got)
@@ -521,8 +536,8 @@ func signRuntimeTestToken(t *testing.T, key []byte, claims middleware.VirtualKey
 	return strings.Join(segments, ".")
 }
 
-// TestNewModelsPipelineListsPermittedModels keeps the unmounted catalog
-// pipeline referenced so Independent QA can keep GET /v1/models at 404.
+// TestNewModelsPipelineListsPermittedModels covers catalog intersection
+// used by the data-plane GET /v1/models handler.
 func TestNewModelsPipelineListsPermittedModels(t *testing.T) {
 	signingKey := []byte("0123456789abcdef0123456789abcdef")
 	cfg := minimalRuntimeConfig()

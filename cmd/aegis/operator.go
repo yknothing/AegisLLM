@@ -126,7 +126,7 @@ func runVirtualKeyIssue(args []string, stdout, stderr io.Writer) error {
 	modelsCSV := flags.String("models", "", "comma-separated configured models")
 	ttl := flags.Duration("ttl", 0, "token lifetime, bounded by auth.token_expiry")
 	maxRPM := flags.Int("rpm", 0, "per-key requests per minute")
-	maxTPM := flags.Int("tpm", virtualkey.UnlimitedPerKeyTPM, "reserved; per-key TPM must remain 0")
+	maxTPM := flags.Int("tpm", virtualkey.UnlimitedPerKeyTPM, "per-key tokens per minute; 0 is unlimited")
 	maxConcurrency := flags.Int("max-concurrency", 0, "per-key concurrent request limit")
 	budgetUSD := flags.Float64("budget", 0, "per-key USD budget; 0 is unlimited")
 	outPath := flags.String("out", "", "new owner-only token output file")

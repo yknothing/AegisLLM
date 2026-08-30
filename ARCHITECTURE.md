@@ -27,7 +27,7 @@ Client
   -> Provider
 ```
 
-The main gateway mounts `POST /v1/chat/completions` and `GET /health`. `GET /v1/models` remains unmounted so the Independent QA route matrix stays 404. When `admin.enabled=true`, a second HTTP listener binds loopback only (ADR-007).
+The main gateway mounts `POST /v1/chat/completions`, authenticated `GET /v1/models`, and `GET /health`. When `admin.enabled=true`, a second HTTP listener binds loopback only (ADR-007).
 
 ## Implemented Baseline
 
@@ -40,7 +40,7 @@ The main gateway mounts `POST /v1/chat/completions` and `GET /health`. `GET /v1/
 | Routing | Enabled provider selection by model, priority, weighted same-priority pick, and circuit-breaker state; in-request failover (ADR-006) |
 | Provider health | Circuit breakers consume only proxy-observed provider 429/5xx outcomes; gateway-local failures do not poison provider health |
 | KMS | Local AES-256-GCM v2 envelope with keyID AAD, explicit compatibility migration, and strict-v2 post-migration floor |
-| Operator | Offline provider-key import, virtual-key issue/revoke (RPM/budget; JWT TPM reserved), revocation initialization, and KMS migration |
+| Operator | Offline provider-key import, virtual-key issue/revoke (RPM/TPM/budget), revocation initialization, and KMS migration |
 | Admin | Loopback issue/revoke/usage; BYOK remains 501 |
 | Providers | `openai`, `deepseek`, `openrouter`, `azure`, `anthropic`, `google` |
 | Request body | One bounded request-scoped buffer shared by PII, router, adapter, and proxy, then zeroed at pipeline completion |
@@ -60,8 +60,7 @@ These are architecture targets, not current runtime capabilities:
 | Control-plane store config | Configured `store` persistence fields fail fast |
 | Vault KMS | `kms.mode="vault"` or configured `kms.vault` fails fast |
 | BYOK key source | `key_source="byok"` virtual keys fail closed until owner/provider binding exists |
-| Per-key JWT TPM | Non-zero virtual-key `tpm` claims fail closed; gateway-wide `rate_limit.default_tpm` remains available |
-| Data-plane `GET /v1/models` | Unmounted (404) until Independent QA advances the route allowlist |
+| Data-plane `GET /v1/models` | Authenticated catalog intersection of virtual-key models and enabled providers |
 | RS256 virtual keys | Reserved pending reviewed key loading and rotation |
 
 ## Runtime Dependencies

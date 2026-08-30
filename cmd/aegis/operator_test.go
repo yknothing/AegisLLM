@@ -100,11 +100,11 @@ func TestOperatorVirtualKeyIssueRequiresExplicitSecretOutput(t *testing.T) {
 		t.Fatalf("budget=%f, want 5", validated.BudgetUSD)
 	}
 	if validated.MaxTPM != virtualkey.UnlimitedPerKeyTPM {
-		t.Fatalf("tpm=%d, want reserved unlimited value", validated.MaxTPM)
+		t.Fatalf("tpm=%d, want unlimited default", validated.MaxTPM)
 	}
 }
 
-func TestOperatorVirtualKeyIssueRejectsTPM(t *testing.T) {
+func TestOperatorVirtualKeyIssueAcceptsTPM(t *testing.T) {
 	configPath := writeOperatorTestConfig(t)
 	args := []string{
 		"virtual-key", "issue", "--config", configPath,
@@ -113,11 +113,16 @@ func TestOperatorVirtualKeyIssueRejectsTPM(t *testing.T) {
 		"--stdout",
 	}
 	var stdout, stderr bytes.Buffer
-	if code := runOperator(args, strings.NewReader(""), false, &stdout, &stderr); code == 0 {
-		t.Fatal("virtual-key issue accepted reserved --tpm")
+	if code := runOperator(args, strings.NewReader(""), false, &stdout, &stderr); code != 0 {
+		t.Fatalf("virtual-key issue rejected --tpm: stderr=%q", stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "tpm claim is reserved") {
-		t.Fatalf("stderr=%q, want reserved TPM rejection", stderr.String())
+	token := strings.TrimSpace(stdout.String())
+	validated, err := virtualkey.Validate(token, []byte("0123456789abcdef0123456789abcdef"), "aegis", 24*time.Hour)
+	if err != nil {
+		t.Fatalf("Validate issued token: %v", err)
+	}
+	if validated.MaxTPM != virtualkey.UnlimitedPerKeyTPM+1 {
+		t.Fatalf("tpm=%d, want %d", validated.MaxTPM, virtualkey.UnlimitedPerKeyTPM+1)
 	}
 }
 
