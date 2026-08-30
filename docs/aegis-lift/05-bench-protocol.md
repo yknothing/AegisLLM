@@ -33,7 +33,7 @@ Aegis p95 overhead is not worse than the reference Python proxy number collected
 
 ## Same-box run (2026-08-28)
 
-The reference Python proxy was installed into an isolated venv (pinned OSS proxy extras) and driven by a local optional test that is skipped in CI when the proxy binary env is unset.
+The reference Python proxy was installed into an isolated venv (pinned OSS proxy extras) and driven locally for this dated run. That driver is not kept in this tree.
 
 `-race` was not set. Both gateways used one `httptest` TLS 1.3 mock that returned a fixed OpenAI chat JSON with one choice. The reference proxy `api_base` was that mock plus `/v1`, TLS verify off, retries `0`. Process SOCKS/HTTP proxy env vars were stripped so the child could not leave loopback. Warmup 20, samples 200, sequential.
 
@@ -54,4 +54,3 @@ The reference Python proxy was installed into an isolated venv (pinned OSS proxy
 - Aegis still ran JWT auth, PII, and in-memory rate limit. The reference proxy ran without a master-key gate.
 - Client RTT includes mock TLS. The mock handler is local and negligible next to either gateway.
 - CPU sampling over 60s was not collected in this run.
-- The optional same-box test skips when the reference-proxy binary env is unset so CI does not require Python.
