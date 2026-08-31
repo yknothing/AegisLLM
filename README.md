@@ -38,7 +38,7 @@ This repository currently provides the runtime framework and a minimal OpenAI-co
 ## Development Smoke
 
 ```bash
-GOTOOLCHAIN=go1.26.5 make local-smoke VERSION=v0.2.1-rc-local
+GOTOOLCHAIN=go1.26.6 make local-smoke VERSION=v0.2.1-rc-local
 ```
 
 For manual smoke testing:
@@ -50,7 +50,7 @@ export AEGIS_JWT_KEY=$(openssl rand -hex 64)
 
 # Build, initialize durable revocation state, import one provider key from
 # bounded non-terminal stdin, and issue a virtual key into a new 0600 file.
-GOTOOLCHAIN=go1.26.5 make build
+GOTOOLCHAIN=go1.26.6 make build
 ./bin/aegis operator revocation init --config aegis.example.json
 printf '%s' "$OPENAI_API_KEY" | ./bin/aegis operator provider-key import \
   --config aegis.example.json --provider openai-primary
