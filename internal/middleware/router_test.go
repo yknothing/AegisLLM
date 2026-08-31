@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/yknothing/AegisLLM/internal/server"
 )
@@ -22,6 +24,7 @@ const (
 	routerTestFallbackWeight           = 5
 	routerTestPrimaryPriority          = 1
 	routerTestFallbackPriority         = 2
+	routerWeightedPickTrials           = 4000
 )
 
 func TestRouterSelectsPermittedProviderAndPreservesBody(t *testing.T) {
@@ -60,6 +63,90 @@ func TestRouterSelectsPermittedProviderAndPreservesBody(t *testing.T) {
 	}
 	if ctx.IsAborted() {
 		t.Fatalf("Router aborted permitted model with status %d", ctx.StatusCode)
+	}
+}
+
+func TestRouterRetriesSameRequestOnRetryableAttempt(t *testing.T) {
+	body := `{"model":"gpt-4o","messages":[]}`
+	ctx := routerTestContext(body, []string{routerTestModel})
+	var seen []string
+	Router(routerSameModelFailoverConfig())(ctx, func() {
+		seen = append(seen, ctx.ProviderID)
+		got, err := io.ReadAll(ctx.Request.Body)
+		if err != nil {
+			t.Fatalf("read attempt body: %v", err)
+		}
+		if string(got) != body {
+			t.Fatalf("attempt %d body = %q, want canonical %q", len(seen), got, body)
+		}
+		if len(seen) == 1 {
+			ctx.RetryableAttempt = true
+			ctx.ProviderResponded = true
+			ctx.ProviderFailure = true
+			ctx.StatusCode = http.StatusServiceUnavailable
+			return
+		}
+		ctx.ProviderResponded = true
+		ctx.StatusCode = http.StatusOK
+	})
+
+	if len(seen) != 2 {
+		t.Fatalf("attempts = %d, want 2", len(seen))
+	}
+	if seen[0] != routerTestOpenAIProviderID || seen[1] != routerTestFallbackProviderID {
+		t.Fatalf("providers = %v, want primary then fallback", seen)
+	}
+	if ctx.ProviderID != routerTestFallbackProviderID {
+		t.Fatalf("final provider = %q, want fallback", ctx.ProviderID)
+	}
+	if ctx.IsAborted() {
+		t.Fatalf("successful fallback aborted with status %d", ctx.StatusCode)
+	}
+}
+
+func TestPickWeightedEmptyReturnsNil(t *testing.T) {
+	if got := pickWeighted(nil); got != nil {
+		t.Fatalf("pickWeighted(nil) = %v, want nil", got)
+	}
+}
+
+func TestPickWeightedPrefersHeavierChannel(t *testing.T) {
+	channels := []*ProviderChannel{
+		{ID: routerTestOpenAIProviderID, Weight: routerTestPrimaryWeight},
+		{ID: routerTestFallbackProviderID, Weight: routerTestFallbackWeight},
+	}
+	counts := map[string]int{}
+	for i := 0; i < routerWeightedPickTrials; i++ {
+		chosen := pickWeighted(channels)
+		if chosen == nil {
+			t.Fatal("pickWeighted returned nil")
+		}
+		counts[chosen.ID]++
+	}
+	primary := counts[routerTestOpenAIProviderID]
+	fallback := counts[routerTestFallbackProviderID]
+	if primary == 0 || fallback == 0 {
+		t.Fatalf("weighted pick missed a channel: primary=%d fallback=%d", primary, fallback)
+	}
+	if primary <= fallback {
+		t.Fatalf("heavier channel was not preferred: primary=%d fallback=%d", primary, fallback)
+	}
+}
+
+func TestCryptoRandIntnRejectsNonPositiveBound(t *testing.T) {
+	if _, err := cryptoRandIntn(0); err == nil {
+		t.Fatal("cryptoRandIntn accepted a zero bound")
+	}
+	if _, err := cryptoRandIntn(-1); err == nil {
+		t.Fatal("cryptoRandIntn accepted a negative bound")
+	}
+}
+
+func TestPickWeightedReturnsSoleChannel(t *testing.T) {
+	sole := &ProviderChannel{ID: routerTestOpenAIProviderID, Weight: routerTestPrimaryWeight}
+	chosen := pickWeighted([]*ProviderChannel{sole})
+	if chosen != sole {
+		t.Fatal("pickWeighted did not return the sole channel")
 	}
 }
 
@@ -212,11 +299,331 @@ func TestRouterOpensProviderCircuitForProviderFailures(t *testing.T) {
 	}
 }
 
+func TestRouterTreatsAnyNonFailureProviderResponseAsReachable(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+	}{
+		{name: "provider 4xx", statusCode: http.StatusBadRequest},
+		{name: "client canceled after provider headers", statusCode: http.StatusBadGateway},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			router := Router(routerTestConfig())
+
+			for attempt := 1; attempt <= 4; attempt++ {
+				routerTestProviderFailure(t, router, attempt)
+			}
+
+			ctx := routerTestContext(`{"model":"gpt-4o","messages":[]}`, []string{routerTestModel})
+			router(ctx, func() {
+				ctx.StatusCode = tt.statusCode
+				ctx.ProviderResponded = true
+			})
+
+			routerTestProviderFailure(t, router, 5)
+
+			ctx = routerTestContext(`{"model":"gpt-4o","messages":[]}`, []string{routerTestModel})
+			calledNext := false
+			router(ctx, func() { calledNext = true })
+			if !calledNext {
+				t.Fatal("provider response did not reset prior failures; circuit opened after one later failure")
+			}
+		})
+	}
+}
+
+func TestCircuitBreakerAllowsOnlyOneConcurrentHalfOpenProbe(t *testing.T) {
+	const (
+		trials     = 200
+		contenders = 128
+	)
+	for trial := 1; trial <= trials; trial++ {
+		cb := newCircuitBreaker()
+		cb.state.Store(stateOpen)
+		cb.lastFailure.Store(time.Now().Add(-time.Minute).Unix())
+
+		start := make(chan struct{})
+		results := make(chan bool, contenders)
+		var ready sync.WaitGroup
+		ready.Add(contenders)
+		for range contenders {
+			go func() {
+				ready.Done()
+				<-start
+				_, allowed := cb.AllowProbe()
+				results <- allowed
+			}()
+		}
+		ready.Wait()
+		close(start)
+
+		allowed := 0
+		for range contenders {
+			if <-results {
+				allowed++
+			}
+		}
+		if allowed != 1 {
+			t.Fatalf("trial %d: allowed probes = %d, want exactly 1", trial, allowed)
+		}
+	}
+}
+
+func TestRouterReleasesHalfOpenProbeWhenProviderWasNotReached(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+	}{
+		{name: "local gateway failure", statusCode: http.StatusServiceUnavailable},
+		{name: "client canceled before provider response", statusCode: http.StatusBadGateway},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			router, cb, lastFailure := routerTestHalfOpenMiddleware(t)
+			ctx := routerTestContext(`{"model":"gpt-4o","messages":[]}`, []string{routerTestModel})
+			calledNext := false
+			router(ctx, func() {
+				calledNext = true
+				ctx.StatusCode = tt.statusCode
+			})
+
+			if !calledNext {
+				t.Fatal("half-open probe did not reach downstream")
+			}
+			routerTestAssertReleasedProbe(t, cb, lastFailure)
+			routerTestAssertImmediateProbe(t, router, cb)
+		})
+	}
+}
+
+func TestRouterReleasesHalfOpenProbeDuringPanicUnwind(t *testing.T) {
+	router, cb, lastFailure := routerTestHalfOpenMiddleware(t)
+	ctx := routerTestContext(`{"model":"gpt-4o","messages":[]}`, []string{routerTestModel})
+	panicMarker := &struct{}{}
+	var recovered any
+
+	func() {
+		defer func() { recovered = recover() }()
+		router(ctx, func() { panic(panicMarker) })
+	}()
+
+	if recovered != panicMarker {
+		t.Fatalf("recovered panic = %v, want original marker", recovered)
+	}
+	routerTestAssertReleasedProbe(t, cb, lastFailure)
+	routerTestAssertImmediateProbe(t, router, cb)
+}
+
+func TestRouterRecordsProviderSuccessDuringPanicUnwind(t *testing.T) {
+	router, cb, _ := routerTestHalfOpenMiddleware(t)
+	ctx := routerTestContext(`{"model":"gpt-4o","messages":[]}`, []string{routerTestModel})
+	panicMarker := &struct{}{}
+	var recovered any
+
+	func() {
+		defer func() { recovered = recover() }()
+		router(ctx, func() {
+			ctx.StatusCode = http.StatusBadRequest
+			ctx.ProviderResponded = true
+			panic(panicMarker)
+		})
+	}()
+
+	if recovered != panicMarker {
+		t.Fatalf("recovered panic = %v, want original marker", recovered)
+	}
+	if state := cb.state.Load(); state != stateClosed {
+		t.Fatalf("breaker state = %d, want closed", state)
+	}
+	if failures := cb.failures.Load(); failures != 0 {
+		t.Fatalf("failures = %d, want 0", failures)
+	}
+}
+
+func TestRouterIgnoresLateSuccessFromEarlierCircuitGeneration(t *testing.T) {
+	cfg := routerTestConfig()
+	rt := newRouterTable(cfg.Channels)
+	router := routerWithTable(cfg, rt)
+	cb := rt.breakers[routerTestOpenAIProviderID]
+
+	aCtx := routerTestContext(`{"model":"gpt-4o","messages":[]}`, []string{routerTestModel})
+	aEntered, releaseA, aDone := routerTestStartBlockedRequest(router, aCtx, func() {
+		aCtx.StatusCode = http.StatusOK
+		aCtx.ProviderResponded = true
+	})
+	routerTestWait(t, aEntered, "request A to acquire a closed-state route")
+
+	for attempt := 1; attempt <= 5; attempt++ {
+		routerTestProviderFailure(t, router, attempt)
+	}
+	cb.lastFailure.Store(time.Now().Add(-2 * cb.recoveryTime).Unix())
+
+	pCtx := routerTestContext(`{"model":"gpt-4o","messages":[]}`, []string{routerTestModel})
+	pEntered, releaseP, pDone := routerTestStartBlockedRequest(router, pCtx, func() {
+		pCtx.StatusCode = http.StatusServiceUnavailable
+		pCtx.ProviderResponded = true
+		pCtx.ProviderFailure = true
+	})
+	routerTestWait(t, pEntered, "request P to claim the half-open probe")
+
+	close(releaseA)
+	routerTestWait(t, aDone, "late request A to finish")
+	if state := cb.state.Load(); state != stateHalfOpen {
+		t.Fatalf("breaker state after stale success = %d, want half-open", state)
+	}
+
+	close(releaseP)
+	routerTestWait(t, pDone, "half-open probe P to finish")
+	if state := cb.state.Load(); state != stateOpen {
+		t.Fatalf("breaker state after half-open failure = %d, want open", state)
+	}
+}
+
+func TestRouterIgnoresLateFailureFromEarlierCircuitGeneration(t *testing.T) {
+	cfg := routerTestConfig()
+	rt := newRouterTable(cfg.Channels)
+	router := routerWithTable(cfg, rt)
+	cb := rt.breakers[routerTestOpenAIProviderID]
+
+	aCtx := routerTestContext(`{"model":"gpt-4o","messages":[]}`, []string{routerTestModel})
+	aEntered, releaseA, aDone := routerTestStartBlockedRequest(router, aCtx, func() {
+		aCtx.StatusCode = http.StatusServiceUnavailable
+		aCtx.ProviderResponded = true
+		aCtx.ProviderFailure = true
+	})
+	routerTestWait(t, aEntered, "request A to acquire a closed-state route")
+
+	for attempt := 1; attempt <= 5; attempt++ {
+		routerTestProviderFailure(t, router, attempt)
+	}
+	cb.lastFailure.Store(time.Now().Add(-2 * cb.recoveryTime).Unix())
+
+	pCtx := routerTestContext(`{"model":"gpt-4o","messages":[]}`, []string{routerTestModel})
+	pEntered, releaseP, pDone := routerTestStartBlockedRequest(router, pCtx, func() {
+		pCtx.StatusCode = http.StatusBadRequest
+		pCtx.ProviderResponded = true
+	})
+	routerTestWait(t, pEntered, "request P to claim the half-open probe")
+
+	close(releaseP)
+	routerTestWait(t, pDone, "successful half-open probe P to finish")
+	if state := cb.state.Load(); state != stateClosed {
+		t.Fatalf("breaker state after half-open success = %d, want closed", state)
+	}
+	lastFailure := cb.lastFailure.Load()
+
+	close(releaseA)
+	routerTestWait(t, aDone, "late request A to finish")
+	if state := cb.state.Load(); state != stateClosed {
+		t.Fatalf("breaker state after stale failure = %d, want closed", state)
+	}
+	if failures := cb.failures.Load(); failures != 0 {
+		t.Fatalf("failures after stale failure = %d, want 0", failures)
+	}
+	if got := cb.lastFailure.Load(); got != lastFailure {
+		t.Fatalf("last failure after stale failure = %d, want unchanged %d", got, lastFailure)
+	}
+}
+
+func routerTestStartBlockedRequest(
+	router server.Middleware,
+	ctx *server.RequestContext,
+	outcome func(),
+) (entered, release, done chan struct{}) {
+	entered = make(chan struct{})
+	release = make(chan struct{})
+	done = make(chan struct{})
+	go func() {
+		defer close(done)
+		router(ctx, func() {
+			close(entered)
+			<-release
+			outcome()
+		})
+	}()
+	return entered, release, done
+}
+
+func routerTestWait(t *testing.T, signal <-chan struct{}, description string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+	}
+}
+
+func routerTestHalfOpenMiddleware(t *testing.T) (server.Middleware, *circuitBreaker, int64) {
+	t.Helper()
+	cfg := routerTestConfig()
+	rt := newRouterTable(cfg.Channels)
+	cb := rt.breakers[routerTestOpenAIProviderID]
+	cb.failures.Store(cb.threshold)
+	lastFailure := time.Now().Add(-2 * cb.recoveryTime).Unix()
+	cb.lastFailure.Store(lastFailure)
+	cb.state.Store(stateOpen)
+	return routerWithTable(cfg, rt), cb, lastFailure
+}
+
+func routerTestAssertReleasedProbe(t *testing.T, cb *circuitBreaker, lastFailure int64) {
+	t.Helper()
+	if state := cb.state.Load(); state != stateOpen {
+		t.Fatalf("breaker state = %d, want open", state)
+	}
+	if failures := cb.failures.Load(); failures != cb.threshold {
+		t.Fatalf("failures = %d, want unchanged %d", failures, cb.threshold)
+	}
+	if got := cb.lastFailure.Load(); got != lastFailure {
+		t.Fatalf("last failure = %d, want unchanged %d", got, lastFailure)
+	}
+}
+
+func routerTestAssertImmediateProbe(t *testing.T, router server.Middleware, cb *circuitBreaker) {
+	t.Helper()
+	ctx := routerTestContext(`{"model":"gpt-4o","messages":[]}`, []string{routerTestModel})
+	calledNext := false
+	router(ctx, func() {
+		calledNext = true
+		ctx.StatusCode = http.StatusBadRequest
+		ctx.ProviderResponded = true
+	})
+	if !calledNext {
+		t.Fatal("released half-open probe could not be reclaimed immediately")
+	}
+	if state := cb.state.Load(); state != stateClosed {
+		t.Fatalf("breaker state after successful retry = %d, want closed", state)
+	}
+}
+
+func routerTestProviderFailure(t *testing.T, router server.Middleware, attempt int) {
+	t.Helper()
+	ctx := routerTestContext(`{"model":"gpt-4o","messages":[]}`, []string{routerTestModel})
+	calledNext := false
+	router(ctx, func() {
+		calledNext = true
+		ctx.StatusCode = http.StatusServiceUnavailable
+		ctx.ProviderResponded = true
+		ctx.ProviderFailure = true
+	})
+	if !calledNext {
+		t.Fatalf("attempt %d did not reach provider", attempt)
+	}
+}
+
 func routerTestContext(body string, permissions []string) *server.RequestContext {
 	return &server.RequestContext{
 		Request:     httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)),
 		Permissions: permissions,
 	}
+}
+
+func routerSameModelFailoverConfig() RouterConfig {
+	cfg := routerTestConfig()
+	cfg.Channels[1].Models = []string{routerTestModel}
+	return cfg
 }
 
 func routerTestConfig() RouterConfig {

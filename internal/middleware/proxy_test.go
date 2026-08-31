@@ -40,7 +40,7 @@ func TestProxyDoesNotRecordLocalEngineErrorAsProviderFailure(t *testing.T) {
 	}
 }
 
-func TestProxyMarksPartialUpstreamFailureAsBadGateway(t *testing.T) {
+func TestProxyPreservesCommittedStatusAfterPartialUpstreamError(t *testing.T) {
 	engine := stubProxyEngine{
 		result: &proxy.ProxyResult{StatusCode: http.StatusOK, OutputTokens: 7},
 		err:    errors.New("stream failed"),
@@ -52,8 +52,8 @@ func TestProxyMarksPartialUpstreamFailureAsBadGateway(t *testing.T) {
 	if ctx.IsAborted() {
 		t.Fatal("proxy middleware aborted after upstream response may have been written")
 	}
-	if ctx.StatusCode != http.StatusBadGateway {
-		t.Fatalf("status = %d, want %d", ctx.StatusCode, http.StatusBadGateway)
+	if ctx.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want committed upstream status %d", ctx.StatusCode, http.StatusOK)
 	}
 	if ctx.OutputTokens != 7 {
 		t.Fatalf("output tokens = %d, want 7", ctx.OutputTokens)
@@ -63,7 +63,7 @@ func TestProxyMarksPartialUpstreamFailureAsBadGateway(t *testing.T) {
 	}
 }
 
-func TestProxyRecordsUpstreamResponseReadFailure(t *testing.T) {
+func TestProxyRecordsReadFailureWithoutRewritingCommittedStatus(t *testing.T) {
 	engine := stubProxyEngine{
 		result: &proxy.ProxyResult{StatusCode: http.StatusOK},
 		err:    fmt.Errorf("stream interrupted: %w", proxy.ErrUpstreamRead),
@@ -78,8 +78,8 @@ func TestProxyRecordsUpstreamResponseReadFailure(t *testing.T) {
 	if !ctx.ProviderFailure {
 		t.Fatal("upstream response read failure was not recorded as a provider failure")
 	}
-	if ctx.StatusCode != http.StatusBadGateway {
-		t.Fatalf("status = %d, want %d", ctx.StatusCode, http.StatusBadGateway)
+	if ctx.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want committed upstream status %d", ctx.StatusCode, http.StatusOK)
 	}
 }
 
@@ -106,6 +106,40 @@ func TestProxyRecordsProviderResponseOutcome(t *testing.T) {
 				t.Fatalf("provider failure = %v, want %v", ctx.ProviderFailure, tt.wantFailure)
 			}
 		})
+	}
+}
+
+func TestProxyMarksRetryableWhenCapturedStatusIsRetryable(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ctx := proxyTestContext()
+	ctx.Writer = recorder
+	ctx.CanFallback = true
+
+	Proxy(stubProxyEngine{result: &proxy.ProxyResult{StatusCode: http.StatusTooManyRequests}})(ctx, func() {})
+
+	if !ctx.RetryableAttempt {
+		t.Fatal("retryable captured 429 was not marked RetryableAttempt")
+	}
+	if recorder.Code == http.StatusTooManyRequests {
+		t.Fatal("retryable 429 was flushed to the client")
+	}
+	if ctx.ResponseCommitted() {
+		t.Fatal("retryable capture committed the client response")
+	}
+}
+
+func TestProxyMarksRetryableOnUpstreamTransportWhenFallbackAllowed(t *testing.T) {
+	ctx := proxyTestContext()
+	ctx.CanFallback = true
+	engine := stubProxyEngine{err: fmt.Errorf("dial failed: %w", proxy.ErrUpstreamTransport)}
+
+	Proxy(engine)(ctx, func() {})
+
+	if !ctx.RetryableAttempt {
+		t.Fatal("transport failure with CanFallback was not marked RetryableAttempt")
+	}
+	if ctx.IsAborted() {
+		t.Fatal("transport failure with CanFallback aborted instead of returning for retry")
 	}
 }
 
@@ -137,14 +171,15 @@ type stubProxyEngine struct {
 	err    error
 }
 
-func (s stubProxyEngine) ProxyRequest(
+func (s stubProxyEngine) Dispatch(
 	ctx context.Context,
 	w http.ResponseWriter,
 	originalReq *http.Request,
-	targetURL string,
-	apiKey *utils.SecureBytes,
-	isStreaming bool,
+	cfg proxy.DispatchConfig,
 ) (*proxy.ProxyResult, error) {
+	if s.result != nil && w != nil {
+		w.WriteHeader(s.result.StatusCode)
+	}
 	return s.result, s.err
 }
 

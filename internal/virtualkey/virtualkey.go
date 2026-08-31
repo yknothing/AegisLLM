@@ -24,9 +24,19 @@ import (
 
 const (
 	MinSigningKeyBytes = 32
-	ClockSkew          = 60 * time.Second
-	KeySourcePool      = "pool"
-	keySourceBYOK      = "byok"
+	// MaxEncodedTokenBytes bounds all work performed before authentication and
+	// keeps operator-issued tokens within the same contract accepted at runtime.
+	MaxEncodedTokenBytes        = 16 * 1024
+	MaxRevocableIdentifierBytes = 1024
+	ClockSkew                   = 60 * time.Second
+	// MaxTokenTTL is the largest lifetime whose revocation retention can add
+	// ClockSkew without overflowing time.Duration.
+	MaxTokenTTL   = time.Duration(1<<63-1) - ClockSkew
+	KeySourcePool = "pool"
+	keySourceBYOK = "byok"
+	// UnlimitedPerKeyTPM means the JWT does not impose a per-key TPM ceiling.
+	// Positive values are enforced by the rate-limit middleware.
+	UnlimitedPerKeyTPM = 0
 )
 
 // Claims represents the JWT payload for an Aegis virtual key.
@@ -52,7 +62,9 @@ type IssueOptions struct {
 	Subject        string
 	Models         []string
 	MaxRPM         int
+	MaxTPM         int
 	MaxConcurrency int
+	BudgetUSD      float64
 	PoolGroup      string
 	TTL            time.Duration
 	MaxTTL         time.Duration
@@ -75,11 +87,14 @@ func Issue(signingKey []byte, opts IssueOptions) (string, *Claims, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	if opts.MaxRPM < 0 || opts.MaxConcurrency < 0 {
+	if opts.MaxRPM < 0 || opts.MaxConcurrency < 0 || opts.MaxTPM < 0 || opts.BudgetUSD < 0 {
 		return "", nil, errors.New("virtual key limits must not be negative")
 	}
 	if opts.MaxTTL <= 0 {
 		return "", nil, errors.New("configured maximum token lifetime must be positive")
+	}
+	if opts.MaxTTL > MaxTokenTTL {
+		return "", nil, errors.New("configured maximum token lifetime exceeds the maximum supported lifetime")
 	}
 	if opts.TTL == 0 {
 		opts.TTL = opts.MaxTTL
@@ -100,12 +115,17 @@ func Issue(signingKey []byte, opts IssueOptions) (string, *Claims, error) {
 			return "", nil, err
 		}
 	}
+	if len(keyID) > MaxRevocableIdentifierBytes {
+		return "", nil, fmt.Errorf("virtual key id must not exceed %d bytes", MaxRevocableIdentifierBytes)
+	}
 	claims := &Claims{
 		KeyID:          keyID,
 		Subject:        strings.TrimSpace(opts.Subject),
 		Models:         models,
 		MaxRPM:         opts.MaxRPM,
+		MaxTPM:         opts.MaxTPM,
 		MaxConcurrency: opts.MaxConcurrency,
+		BudgetUSD:      opts.BudgetUSD,
 		KeySource:      KeySourcePool,
 		PoolGroup:      strings.TrimSpace(opts.PoolGroup),
 		IssuedAt:       opts.Now.UTC().Unix(),
@@ -115,6 +135,9 @@ func Issue(signingKey []byte, opts IssueOptions) (string, *Claims, error) {
 	token, err := sign(signingKey, claims)
 	if err != nil {
 		return "", nil, err
+	}
+	if len(token) > MaxEncodedTokenBytes {
+		return "", nil, fmt.Errorf("encoded virtual key exceeds maximum size of %d bytes", MaxEncodedTokenBytes)
 	}
 	return token, claims, nil
 }
@@ -127,6 +150,12 @@ func Validate(token string, signingKey []byte, expectedIssuer string, maxTokenTT
 // ValidateAt verifies a virtual key at an explicit time for deterministic
 // tests and offline issuance verification.
 func ValidateAt(token string, signingKey []byte, expectedIssuer string, maxTokenTTL time.Duration, now time.Time) (*Claims, error) {
+	if maxTokenTTL > MaxTokenTTL {
+		return nil, errors.New("configured maximum token lifetime exceeds the maximum supported lifetime")
+	}
+	if len(token) > MaxEncodedTokenBytes {
+		return nil, fmt.Errorf("encoded virtual key exceeds maximum size of %d bytes", MaxEncodedTokenBytes)
+	}
 	if len(signingKey) < MinSigningKeyBytes {
 		return nil, fmt.Errorf("signing key must be at least %d bytes", MinSigningKeyBytes)
 	}
@@ -196,6 +225,9 @@ func validateClaims(claims Claims, expectedIssuer string, maxTokenTTL time.Durat
 	if claims.KeyID == "" {
 		return errors.New("missing key id")
 	}
+	if len(claims.KeyID) > MaxRevocableIdentifierBytes {
+		return fmt.Errorf("virtual key id must not exceed %d bytes", MaxRevocableIdentifierBytes)
+	}
 	if len(claims.Models) == 0 {
 		return errors.New("missing model permissions")
 	}
@@ -234,12 +266,6 @@ func validateClaims(claims Claims, expectedIssuer string, maxTokenTTL time.Durat
 	}
 	if claims.MaxRPM < 0 || claims.BudgetUSD < 0 || claims.MaxTPM < 0 || claims.MaxConcurrency < 0 {
 		return errors.New("virtual key limits must not be negative")
-	}
-	if claims.BudgetUSD > 0 {
-		return errors.New("budget enforcement is not implemented")
-	}
-	if claims.MaxTPM > 0 {
-		return errors.New("TPM enforcement is not implemented")
 	}
 	return nil
 }

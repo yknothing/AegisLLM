@@ -18,6 +18,7 @@ import (
 
 type recordingLimiter struct {
 	allowDimensions []string
+	allowLimits     []int
 	concurrencyKeys []string
 }
 
@@ -31,9 +32,52 @@ const (
 	memoryLimiterTestHigherDefault   = 2
 )
 
-func (r *recordingLimiter) Allow(_ string, dimension string, _ int, _ time.Duration) (bool, error) {
+func (r *recordingLimiter) Allow(_ string, dimension string, limit int, _ time.Duration) (bool, error) {
+	return r.AllowN("", dimension, 1, limit, 0)
+}
+
+func (r *recordingLimiter) AllowN(_ string, dimension string, n, limit int, _ time.Duration) (bool, error) {
 	r.allowDimensions = append(r.allowDimensions, dimension)
+	r.allowLimits = append(r.allowLimits, limit)
 	return true, nil
+}
+
+func (r *recordingLimiter) Record(string, string, int, time.Duration) {}
+
+func TestRateLimiterCapsTokenRPMAtDeploymentDefault(t *testing.T) {
+	limiter := &recordingLimiter{}
+	ctx := &server.RequestContext{
+		Request:      httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		VirtualKeyID: "vk_test",
+		MaxRPM:       1_000_000,
+	}
+
+	rateLimiter(RateLimitConfig{
+		DefaultRPM:     tokenRetentionTestRPM,
+		DefaultMaxConc: tokenRetentionTestMaxConcurrency,
+	}, limiter, nil)(ctx, func() {})
+
+	if len(limiter.allowLimits) != 1 || limiter.allowLimits[0] != tokenRetentionTestRPM {
+		t.Fatalf("RPM limits = %v, want deployment ceiling %d", limiter.allowLimits, tokenRetentionTestRPM)
+	}
+}
+
+func TestRateLimiterUsesStricterTokenRPM(t *testing.T) {
+	limiter := &recordingLimiter{}
+	ctx := &server.RequestContext{
+		Request:      httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		VirtualKeyID: "vk_test",
+		MaxRPM:       7,
+	}
+
+	rateLimiter(RateLimitConfig{
+		DefaultRPM:     tokenRetentionTestRPM,
+		DefaultMaxConc: tokenRetentionTestMaxConcurrency,
+	}, limiter, nil)(ctx, func() {})
+
+	if len(limiter.allowLimits) != 1 || limiter.allowLimits[0] != 7 {
+		t.Fatalf("RPM limits = %v, want stricter token limit 7", limiter.allowLimits)
+	}
 }
 
 func (r *recordingLimiter) AcquireConcurrency(key string, _ int) (bool, func()) {
@@ -41,35 +85,36 @@ func (r *recordingLimiter) AcquireConcurrency(key string, _ int) (bool, func()) 
 	return true, func() {}
 }
 
-func TestRateLimiterFailsClosedForTPMClaims(t *testing.T) {
+func TestRateLimiterEnforcesTPMClaims(t *testing.T) {
+	limiter := &recordingLimiter{}
 	ctx := &server.RequestContext{
-		Request:      httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		Request:      httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o-mini","messages":[]}`)),
 		VirtualKeyID: "vk_test",
 		MaxTPM:       1000,
 	}
 
 	calledNext := false
-	RateLimiter(RateLimitConfig{
-		Backend:        "memory",
-		DefaultRPM:     0,
-		DefaultTPM:     0,
-		DefaultMaxConc: 0,
-	})(ctx, func() {
+	rateLimiter(RateLimitConfig{
+		DefaultRPM:         tokenRetentionTestRPM,
+		DefaultTPM:         0,
+		DefaultMaxConc:     tokenRetentionTestMaxConcurrency,
+		MaxRequestBodySize: 1024,
+	}, limiter, nil)(ctx, func() {
 		calledNext = true
 	})
 
-	if calledNext {
-		t.Fatal("RateLimiter called next for an unsupported TPM claim")
+	if !calledNext {
+		t.Fatal("RateLimiter did not call next for a TPM-limited request under quota")
 	}
-	if !ctx.IsAborted() {
-		t.Fatal("RateLimiter did not fail closed for an unsupported TPM claim")
+	if ctx.IsAborted() {
+		t.Fatalf("RateLimiter aborted TPM request with status %d", ctx.StatusCode)
 	}
-	if ctx.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want %d", ctx.StatusCode, http.StatusServiceUnavailable)
+	if len(limiter.allowDimensions) != 2 || limiter.allowDimensions[1] != "tpm" {
+		t.Fatalf("allow dimensions = %v, want rpm then tpm", limiter.allowDimensions)
 	}
 }
 
-func TestRateLimiterDoesNotRetainTokenUsageWhileTPMReserved(t *testing.T) {
+func TestRateLimiterDoesNotAccountTPMWhenUnlimited(t *testing.T) {
 	ctx := &server.RequestContext{
 		Request:      httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
 		VirtualKeyID: "vk_test",
@@ -158,6 +203,29 @@ func TestMemoryLimiterEvictsExpiredWindowsDuringKeyChurn(t *testing.T) {
 
 	if _, exists := limiter.windows["expired-key:rpm"]; exists {
 		t.Fatal("expired RPM window remained after periodic cleanup")
+	}
+}
+
+func TestMemoryLimiterPrunesExpiredPrefixWithoutRescanningActiveEntries(t *testing.T) {
+	limiter := newMemoryLimiter()
+	now := time.Now()
+	limiter.windows["vk_test:rpm"] = &slidingWindow{
+		window: time.Minute,
+		counts: []timestampedCount{
+			{time: now.Add(-2 * time.Minute), count: 1},
+			{time: now.Add(-30 * time.Second), count: 1},
+			{time: now.Add(-20 * time.Second), count: 1},
+		},
+		total: 3,
+	}
+
+	allowed, err := limiter.Allow("vk_test", "rpm", 2, time.Minute)
+	if err != nil || allowed {
+		t.Fatalf("Allow = allowed:%t err:%v, want active total at limit", allowed, err)
+	}
+	window := limiter.windows["vk_test:rpm"]
+	if window.total != 2 || window.head != 1 {
+		t.Fatalf("window total/head = %d/%d, want 2/1 after prefix prune", window.total, window.head)
 	}
 }
 

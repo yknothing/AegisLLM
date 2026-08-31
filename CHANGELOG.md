@@ -4,6 +4,27 @@ All notable changes to AegisLLM are documented here.
 
 ## v0.2.1 - Unreleased
 
+### AegisLift (OpenAI-compatible gateway outcomes)
+
+- Added OpenAI-compatible `GET /v1/models` (virtual-key ∩ catalog).
+- Enforced per-key JWT TPM (estimate then reconcile) and optional in-memory
+  budgets; gateway-wide `rate_limit.default_tpm` remains a ceiling.
+  Unknown models have no silent default price when quota is enabled.
+- Added same-request retry/fallback (ADR-006) and same-priority weighted
+  load balancing without reordering KMS → Adapter → Proxy.
+- Added Azure, Anthropic, Gemini, and OpenRouter adapters.
+- Mounted loopback Admin issue/revoke/usage (ADR-007). BYOK stays 501.
+- Operator `virtual-key issue` accepts `--tpm` and `--budget`.
+- Added runtime evidence: in-request failover, SSE chat, loopback Admin
+  issue, Anthropic/Gemini response transforms, unknown-model
+  quota fail-closed.
+- Recorded a same-box mock-upstream overhead run against a reference Python
+  LLM proxy; Aegis p95 was not worse. See `docs/aegis-lift/05-bench-protocol.md`.
+- Same-priority weighted pick draws from `crypto/rand` (not `math/rand`).
+- Documented that the Gemini `x-goog-api-key` constant is a header name,
+  not a stored credential.
+- Removed third-party LLM proxy product names from public docs and changelog.
+
 ### Standalone operations and security
 - Pinned Quality gates, Independent QA, and the Docker builder to Go 1.26.6 so `govulncheck` tracks the current standard-library fixes.
 
@@ -21,8 +42,33 @@ All notable changes to AegisLLM are documented here.
   detection; cross-restart rollback remains an explicit single-file limitation.
 - Unified HS256 virtual-key issuance and validation in one internal contract and
   aligned the default maximum token lifetime to 24 hours.
+- Bounded bearer/header sizes, `issuer`/`kid` revocability, token lifetime
+  arithmetic, mandatory positive RPM/concurrency defaults, and exact model-key
+  JSON semantics so accepted credentials and policy decisions remain
+  revocable and fail closed.
+- Reworked PII handling as bounded semantic JSON tokenization: escaped values,
+  duplicate or case-ambiguous members, numeric/key PII, overlapping matches,
+  and PII split across text parts are handled without materializing an
+  unbounded object tree. The config and semantic request ceiling is now 4 MiB.
+- Hardened HTTPS egress with exact host/port policy, userinfo/fragment refusal,
+  fail-closed DNS resolution against current public-address allocations,
+  validated-IP dialing with preserved TLS SNI, and redirect refusal.
+- Added startup decryption probes for every distinct enabled-provider
+  credential, with immediate secure-byte closure and generic failures.
+- Hardened config, TLS, KMS, revocation, migration, and release-evidence file
+  reads against symlink/FIFO/device races, unsafe permissions, and unbounded
+  input; shutdown now drains or terminates handlers before resource teardown
+  and bounds shutdown hooks.
+- Made circuit-breaker half-open decisions generation-bound, preserved the
+  actual committed client status in audit records, and guaranteed completion
+  audit metadata even when recovered middleware panics.
 - Extended local and Mac Mini Docker smoke contracts to initialize durable
   revocation state and exercise the release binary's offline provisioning path.
+- Added exact-SHA/dirty-evidence labeling, strict external release-manifest and
+  post-publication closure schemas, and a Linux-only sealed-binary migration/
+  rollback drill runner. These tools validate structure and byte bindings but
+  deliberately do not replace independent human governance or external trust.
+- Updated the pinned Go quality/Docker toolchain from 1.26.5 to 1.26.6.
 
 ## v0.2.0 - 2026-06-21
 
@@ -30,7 +76,7 @@ All notable changes to AegisLLM are documented here.
 
 - Added fail-fast validation for reserved runtime controls: Vault KMS, Redis rate limiter, quota enforcement, provider TPM, provider RPM, default TPM, and unsupported provider adapters.
 - Added fail-fast validation for out-of-range server runtime bounds: read timeout, write timeout, shutdown timeout, and max request body size with an explicit 64 MiB configuration ceiling.
-- Added `max_concurrency` virtual-key claim support so subscription-tier concurrency limits can be enforced by the in-memory rate limiter; negative concurrency claims fail closed, and non-zero default concurrency remains the deployment ceiling.
+- Added `max_concurrency` virtual-key claim support so subscription-tier concurrency limits can be enforced by the in-memory rate limiter; negative concurrency claims fail closed, and the non-zero default is the policy ceiling applied independently to each key.
 - Validated reserved and invalid rate-limit fields even when rate limiting is disabled, so disabled Redis/TPM settings cannot remain in accepted configs.
 - Removed reserved TPM token-accounting state from the `v0.2.0` runtime so token counts are not retained until TPM enforcement is implemented.
 - Removed the old `v0.1.0` scaffold-style Redis, Vault, quota, and store defaults from the example config and rejected reserved Redis URL, Vault config, quota backend, quota DSN, quota default-budget, and store config fields in the `v0.2.0` runtime truth surface.

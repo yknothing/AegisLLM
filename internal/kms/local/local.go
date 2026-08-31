@@ -19,6 +19,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -59,9 +60,10 @@ var (
 )
 
 const (
-	envelopeVersion    = byte(2)
-	envelopeHeaderSize = 10 // 8-byte magic, version, nonce length
-	gcmNonceSize       = 12
+	envelopeVersion          = byte(2)
+	envelopeHeaderSize       = 10 // 8-byte magic, version, nonce length
+	gcmNonceSize             = 12
+	maxEncryptedKeyBlobBytes = 1 << 20
 )
 
 var envelopeAADDomain = []byte("aegis/kms/local/envelope")
@@ -101,8 +103,21 @@ func NewWithMinimumEnvelopeVersion(masterKeyEnv string, backend Backend, minimum
 		return nil, fmt.Errorf("%w: env var %q is empty", kms.ErrInvalidMasterKey, masterKeyEnv)
 	}
 
-	masterKey, err := hex.DecodeString(masterKeyHex)
-	if err != nil {
+	masterKey, decodeErr := hex.DecodeString(masterKeyHex)
+	return newStoreFromMasterKey(masterKey, decodeErr, backend, minimumEnvelopeVersion)
+}
+
+// newStoreFromMasterKey takes ownership of masterKey. It transfers that
+// ownership to Store on success and zeroes the bytes on every failure path.
+func newStoreFromMasterKey(masterKey []byte, decodeErr error, backend Backend, minimumEnvelopeVersion int) (*Store, error) {
+	transferred := false
+	defer func() {
+		if !transferred {
+			utils.MemZero(masterKey)
+		}
+	}()
+
+	if decodeErr != nil {
 		return nil, fmt.Errorf("%w: master key must be hex-encoded", kms.ErrInvalidMasterKey)
 	}
 
@@ -123,12 +138,14 @@ func NewWithMinimumEnvelopeVersion(masterKeyEnv string, backend Backend, minimum
 		return nil, errors.New("local KMS requires a 12-byte GCM nonce")
 	}
 
-	return &Store{
+	store := &Store{
 		masterKey:              masterKey,
 		gcm:                    gcm,
 		backend:                backend,
 		minimumEnvelopeVersion: minimumEnvelopeVersion,
-	}, nil
+	}
+	transferred = true
+	return store, nil
 }
 
 // GetKey decrypts and returns an API key.
@@ -149,6 +166,9 @@ func (s *Store) GetKey(ctx context.Context, keyID string) (*utils.SecureBytes, e
 			return nil, fmt.Errorf("%w: %s", kms.ErrKeyNotFound, keyID)
 		}
 		return nil, fmt.Errorf("reading encrypted key blob: %w", err)
+	}
+	if err := validateEncryptedBlobSize(ciphertext); err != nil {
+		return nil, err
 	}
 
 	plaintext, err := s.openBlob(keyID, ciphertext)
@@ -174,6 +194,9 @@ func (s *Store) StoreKey(ctx context.Context, keyID string, plaintext []byte) er
 
 	ciphertext, err := s.sealV2Blob(keyID, plaintext)
 	if err != nil {
+		return err
+	}
+	if err := validateEncryptedBlobSize(ciphertext); err != nil {
 		return err
 	}
 
@@ -221,12 +244,14 @@ func (s *Store) MigrateLegacy(ctx context.Context, backup Backend) (MigrationRep
 	}
 	sort.Strings(ids)
 	report := MigrationReport{Total: len(ids)}
-	type sourceBlob struct {
+	// Retain only fixed-size metadata across passes so migration memory does not
+	// scale with the aggregate ciphertext size.
+	type sourceMetadata struct {
 		keyID  string
-		blob   []byte
+		digest [sha256.Size]byte
 		legacy bool
 	}
-	blobs := make([]sourceBlob, 0, len(ids))
+	metadata := make([]sourceMetadata, 0, len(ids))
 	for _, keyID := range ids {
 		select {
 		case <-ctx.Done():
@@ -236,6 +261,9 @@ func (s *Store) MigrateLegacy(ctx context.Context, backup Backend) (MigrationRep
 		blob, err := s.backend.Get(keyID)
 		if err != nil {
 			return report, fmt.Errorf("reading source key %q: %w", keyID, err)
+		}
+		if err := validateEncryptedBlobSize(blob); err != nil {
+			return report, fmt.Errorf("validating source key %q: %w", keyID, err)
 		}
 		plaintext, err := s.openBlob(keyID, blob)
 		if err != nil {
@@ -248,19 +276,39 @@ func (s *Store) MigrateLegacy(ctx context.Context, backup Backend) (MigrationRep
 		} else {
 			report.V2++
 		}
-		blobs = append(blobs, sourceBlob{keyID: keyID, blob: blob, legacy: legacy})
+		metadata = append(metadata, sourceMetadata{keyID: keyID, digest: sha256.Sum256(blob), legacy: legacy})
 	}
 
-	for _, item := range blobs {
-		if err := backup.Put(item.keyID, item.blob); err != nil {
+	for _, item := range metadata {
+		blob, err := s.backend.Get(item.keyID)
+		if err != nil {
+			return report, fmt.Errorf("re-reading source key %q: %w", item.keyID, err)
+		}
+		if err := validateEncryptedBlobSize(blob); err != nil {
+			return report, fmt.Errorf("re-validating source key %q: %w", item.keyID, err)
+		}
+		if sha256.Sum256(blob) != item.digest {
+			return report, fmt.Errorf("source key %q changed during migration", item.keyID)
+		}
+		if err := backup.Put(item.keyID, blob); err != nil {
 			return report, fmt.Errorf("backing up key %q: %w", item.keyID, err)
 		}
 	}
-	for _, item := range blobs {
+	for _, item := range metadata {
 		if !item.legacy {
 			continue
 		}
-		plaintext, err := s.openLegacyBlob(item.blob)
+		blob, err := backup.Get(item.keyID)
+		if err != nil {
+			return report, fmt.Errorf("reading backup key %q: %w", item.keyID, err)
+		}
+		if err := validateEncryptedBlobSize(blob); err != nil {
+			return report, fmt.Errorf("validating backup key %q: %w", item.keyID, err)
+		}
+		if sha256.Sum256(blob) != item.digest {
+			return report, fmt.Errorf("backup key %q does not match validated source", item.keyID)
+		}
+		plaintext, err := s.openLegacyBlob(blob)
 		if err != nil {
 			return report, fmt.Errorf("decrypting legacy key %q: %w", item.keyID, err)
 		}
@@ -291,6 +339,9 @@ func (s *Store) inspectFormatsLocked(ctx context.Context) (MigrationReport, erro
 		}
 		blob, err := s.backend.Get(keyID)
 		if err != nil {
+			return report, err
+		}
+		if err := validateEncryptedBlobSize(blob); err != nil {
 			return report, err
 		}
 		plaintext, err := s.openBlob(keyID, blob)
@@ -391,6 +442,17 @@ func validateKeyID(keyID string) error {
 		return fmt.Errorf("key id exceeds %d-byte limit", kms.MaxKeyIDBytes)
 	}
 	return nil
+}
+
+func validateEncryptedBlobSize(blob []byte) error {
+	if len(blob) > maxEncryptedKeyBlobBytes {
+		return encryptedBlobSizeError(int64(len(blob)))
+	}
+	return nil
+}
+
+func encryptedBlobSizeError(size int64) error {
+	return fmt.Errorf("encrypted key blob size %d exceeds %d-byte limit", size, maxEncryptedKeyBlobBytes)
 }
 
 // DeleteKey removes a key from the store.

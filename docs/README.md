@@ -16,6 +16,14 @@
 - [Security Policy](../SECURITY.md) — Vulnerability reporting and security design principles
 - [Threat Model](threat-model.md) — Assets, trust boundaries, abuse paths, and required controls
 
+## AegisLift
+
+- [Capability catalog](aegis-lift/00-capability-catalog.md)
+- [Proxy performance notes](aegis-lift/01-proxy-perf-ops.md)
+- [Gap matrix](aegis-lift/03-gap-matrix.md)
+- [Bench protocol](aegis-lift/05-bench-protocol.md)
+- [Better and cheaper](aegis-lift/06-better-and-cheaper.md)
+
 ## Guides
 
 - [v0.2.1 Release Plan](release-plan-v0.2.1.md) - Current go/no-go gates, ownership, communication, and storage rollback plan

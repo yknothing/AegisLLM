@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -14,9 +13,10 @@ import (
 	"github.com/yknothing/AegisLLM/internal/config"
 	operatorservice "github.com/yknothing/AegisLLM/internal/operator"
 	"github.com/yknothing/AegisLLM/internal/utils"
+	"github.com/yknothing/AegisLLM/internal/virtualkey"
 )
 
-const maxProviderKeyBytes = 16 << 10
+const maxProviderKeyBytes = utils.MaxProviderCredentialBytes
 
 func runOperator(args []string, stdin io.Reader, stdinIsTTY bool, stdout, stderr io.Writer) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
@@ -105,8 +105,8 @@ func runProviderKeyImport(args []string, stdin io.Reader, stdinIsTTY bool, _ io.
 	if len(plaintext) == 0 {
 		return errors.New("provider key stdin is empty")
 	}
-	if bytes.IndexByte(plaintext, 0) >= 0 {
-		return errors.New("provider key stdin contains a NUL byte")
+	if err := utils.ValidateProviderCredentialHeaderValue(plaintext); err != nil {
+		return err
 	}
 	service, _, err := loadOperatorService(*configPath)
 	if err != nil {
@@ -126,7 +126,9 @@ func runVirtualKeyIssue(args []string, stdout, stderr io.Writer) error {
 	modelsCSV := flags.String("models", "", "comma-separated configured models")
 	ttl := flags.Duration("ttl", 0, "token lifetime, bounded by auth.token_expiry")
 	maxRPM := flags.Int("rpm", 0, "per-key requests per minute")
+	maxTPM := flags.Int("tpm", virtualkey.UnlimitedPerKeyTPM, "per-key tokens per minute; 0 is unlimited")
 	maxConcurrency := flags.Int("max-concurrency", 0, "per-key concurrent request limit")
+	budgetUSD := flags.Float64("budget", 0, "per-key USD budget; 0 is unlimited")
 	outPath := flags.String("out", "", "new owner-only token output file")
 	toStdout := flags.Bool("stdout", false, "write only the token to stdout")
 	if err := flags.Parse(args); err != nil {
@@ -147,7 +149,9 @@ func runVirtualKeyIssue(args []string, stdout, stderr io.Writer) error {
 		Models:         splitCSV(*modelsCSV),
 		TTL:            *ttl,
 		MaxRPM:         *maxRPM,
+		MaxTPM:         *maxTPM,
 		MaxConcurrency: *maxConcurrency,
+		BudgetUSD:      *budgetUSD,
 	})
 	if err != nil {
 		return err

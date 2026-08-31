@@ -4,7 +4,7 @@
 Accepted
 
 ## Implementation Status
-Current runtime enforces request-per-minute and default/per-key concurrency limits in the Rate Limit step. Token-per-minute limits are reserved; non-zero TPM configuration or claims fail closed until TPM preflight and reconciliation logic exists.
+Current runtime enforces request-per-minute, optional token-per-minute, and default/per-key concurrency limits in the Rate Limit step. When `quota.enabled=true`, a Quota step runs after Rate Limit and before PII. Router may retry `next()` for failover (ADR-006) without changing this order.
 
 ## Context
 Aegis processes every request through a chain of middleware. The order of these middleware is security-critical: placing rate limiting before authentication would allow unauthenticated clients to consume rate limit capacity, while placing KMS key injection before routing would mean we don't know which key to fetch.
@@ -17,15 +17,16 @@ The middleware pipeline will execute in this strict order:
 2. Request ID   → Assign tracing identifier
 3. Audit Log    → Record metadata (post-request, never content)
 4. Auth         → Validate Virtual Key, reject unauthorized
-5. Rate Limit   → Enforce RPM/default or per-key concurrency limits; reject unsupported TPM limits
-6. PII Redact   → Scan and sanitize request body
-7. Router       → Select provider and model
-8. KMS Inject   → Fetch and inject real API key
-9. Adapter      → Transform protocol if needed
-10. Proxy       → Forward to upstream provider
+5. Rate Limit   → Enforce RPM/TPM and default/per-key concurrency limits
+6. Quota        → Optional in-memory budget check and post-request cost record
+7. PII Redact   → Scan and sanitize request body
+8. Router       → Select provider and model; may retry inner steps on failover
+9. KMS Inject   → Fetch and inject real API key
+10. Adapter     → Transform protocol if needed
+11. Proxy       → Forward to upstream provider
 ```
 
-The body-processing stages share one bounded request-scoped buffer. If an adapter or redaction stage replaces that buffer, the superseded bytes are zeroed; the final buffer is zeroed when the pipeline returns. A terminal middleware commits or aborts without calling `next()`; reaching the end of the chain without a response is an internal error and fails closed.
+The pipeline acquires one bounded transport body. PII validates it token by token under tighter semantic byte, string, content-array, depth, value, member, and match ceilings and may emit one bounded canonical replacement buffer; router and adapter reuse the resulting owned body. If an adapter or redaction stage replaces that buffer, the superseded bytes are zeroed; the final buffer is zeroed when the pipeline returns. A terminal middleware commits or aborts without calling `next()`; reaching the end of the chain without a response is an internal error and fails closed.
 
 ## Rationale
 
@@ -35,11 +36,12 @@ The ordering follows the principle of **"fail fast, fail cheap"**:
 | :--- | :--- | :--- |
 | 1-3 | Infrastructure | Must always run (even for rejected requests) |
 | 4 | Auth | Reject unauthorized requests before any expensive work |
-| 5 | Rate Limit | Prevent request-rate and default/per-key concurrency abuse before processing content; fail closed for unsupported TPM controls |
-| 6 | PII | Sanitize before content leaves the gateway |
-| 7 | Router | Must know the target before fetching keys |
-| 8 | KMS | Fetch key only after routing decision is final |
-| 9-10 | Adapter + Proxy | Actual forwarding (most expensive operation) |
+| 5 | Rate Limit | Prevent request-rate, token-rate, and default/per-key concurrency abuse before processing content |
+| 6 | Quota | Optional fail-closed budget check before PII and egress; record cost after the inner chain returns |
+| 7 | PII | Sanitize before content leaves the gateway |
+| 8 | Router | Must know the target before fetching keys; may retry inner steps on failover |
+| 9 | KMS | Fetch key only after routing decision is final |
+| 10-11 | Adapter + Proxy | Actual forwarding (most expensive operation) |
 
 ## Consequences
 

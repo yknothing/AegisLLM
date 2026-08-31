@@ -50,8 +50,42 @@ jobs:
           go-version: ${{ env.QUALITY_GO_VERSION }}
           cache: true
 
-      - name: Release preflight
-        run: make release-preflight GO=go VERSION=ci
+      - name: Technical iteration preflight (not release approval)
+        run: |
+          set -euo pipefail
+          go_bin="$(type -P go)"
+          go_mod_cache="$(GOENV=off "$go_bin" env GOMODCACHE)"
+          sterile_root="$(/usr/bin/mktemp -d "$RUNNER_TEMP/aegis-quality.XXXXXX")"
+          /bin/mkdir -p \
+            "$sterile_root/home" \
+            "$sterile_root/tmp" \
+            "$sterile_root/go-build-cache"
+          output="$sterile_root/preflight.out"
+          cleanup() { /bin/rm -rf -- "$sterile_root"; }
+          trap cleanup EXIT
+          cd /
+          if ! /usr/bin/env -i \
+              PATH=/usr/bin:/bin \
+              HOME="$sterile_root/home" \
+              TMPDIR="$sterile_root/tmp" \
+              GOCACHE="$sterile_root/go-build-cache" \
+              GOMODCACHE="$go_mod_cache" \
+              GOWORK=off \
+              GOFLAGS=-mod=readonly \
+              GOENV=off \
+              AEGIS_DISPOSABLE_CEO=1 \
+              ALLOW_UNVERIFIED_ITERATION=1 \
+              GO="$go_bin" \
+              VERSION=ci \
+              /bin/sh "$GITHUB_WORKSPACE/scripts/release_preflight.sh" \
+              >"$output" 2>&1; then
+            /bin/cat "$output"
+            exit 1
+          fi
+          /bin/cat "$output"
+          expected='release_preflight=TECHNICAL_ITERATION_PASS evidence_mode=ITERATION_ONLY claimed_source_state=unverified_bootstrap claimed_candidate_sha=unavailable claimed_candidate_tree=unavailable claimed_materialized_root_sha256=unavailable final_evidence=false release_approved=false'
+          actual="$(/usr/bin/tail -n 1 "$output")"
+          test "$actual" = "$expected"
 
   docker:
     name: Docker smoke
@@ -116,6 +150,11 @@ jobs:
             -v aegis-ci-data:/var/lib/aegis \
             aegis:ci operator provider-key import \
               --config /etc/aegis/aegis.json --provider openai-primary
+          printf '%s' 'sk-ci-deepseek-provider-key' | docker run -i --rm \
+            -e AEGIS_MASTER_KEY="$master_key" \
+            -v aegis-ci-data:/var/lib/aegis \
+            aegis:ci operator provider-key import \
+              --config /etc/aegis/aegis.json --provider deepseek-primary
           virtual_key="$(docker run --rm \
             -e AEGIS_JWT_KEY="$jwt_key" \
             -v aegis-ci-data:/var/lib/aegis \

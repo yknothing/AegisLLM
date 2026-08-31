@@ -62,7 +62,7 @@ func Auth(cfg AuthConfig) server.Middleware {
 	return func(ctx *server.RequestContext, next func()) {
 		// Extract bearer token from Authorization header
 		authHeader := ctx.Request.Header.Get("Authorization")
-		if authHeader == "" {
+		if authHeader == "" || len(authHeader) > len("Bearer ")+virtualkey.MaxEncodedTokenBytes {
 			ctx.Abort(http.StatusUnauthorized, authFailureJSON())
 			return
 		}

@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -60,6 +61,355 @@ func TestLoadRejectsUnknownFieldsAtEveryConfigBoundary(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsAmbiguousOrNonCanonicalJSONMembers(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+
+	example, err := os.ReadFile(filepath.Join("..", "..", "aegis.example.json"))
+	if err != nil {
+		t.Fatalf("read example config: %v", err)
+	}
+
+	const canary = "CANARY_CONFIG_MEMBER_VALUE_7e43"
+	tests := []struct {
+		name string
+		old  string
+		new  string
+	}{
+		{
+			name: "root duplicate",
+			old:  `"auth": {`,
+			new:  `"auth": {"issuer": "` + canary + `"}, "auth": {`,
+		},
+		{
+			name: "root ASCII case-fold collision",
+			old:  `"auth": {`,
+			new:  `"AUTH": {"issuer": "` + canary + `"}, "auth": {`,
+		},
+		{
+			name: "root sole case mismatch",
+			old:  `"auth": {`,
+			new:  `"AUTH": {`,
+		},
+		{
+			name: "auth duplicate",
+			old:  `"issuer": "aegis",`,
+			new:  `"issuer": "` + canary + `", "issuer": "aegis",`,
+		},
+		{
+			name: "auth ASCII case-fold collision",
+			old:  `"issuer": "aegis",`,
+			new:  `"ISSUER": "` + canary + `", "issuer": "aegis",`,
+		},
+		{
+			name: "auth sole case mismatch",
+			old:  `"issuer": "aegis",`,
+			new:  `"ISSUER": "aegis",`,
+		},
+		{
+			name: "provider duplicate",
+			old:  `"id": "openai-primary",`,
+			new:  `"id": "` + canary + `", "id": "openai-primary",`,
+		},
+		{
+			name: "provider ASCII case-fold collision",
+			old:  `"id": "openai-primary",`,
+			new:  `"ID": "` + canary + `", "id": "openai-primary",`,
+		},
+		{
+			name: "provider sole case mismatch",
+			old:  `"id": "openai-primary",`,
+			new:  `"ID": "openai-primary",`,
+		},
+		{
+			name: "egress duplicate",
+			old:  `"allowed_domains": [`,
+			new:  `"allowed_domains": ["` + canary + `"], "allowed_domains": [`,
+		},
+		{
+			name: "egress ASCII case-fold collision",
+			old:  `"allowed_domains": [`,
+			new:  `"ALLOWED_DOMAINS": ["` + canary + `"], "allowed_domains": [`,
+		},
+		{
+			name: "egress sole case mismatch",
+			old:  `"allowed_domains": [`,
+			new:  `"ALLOWED_DOMAINS": [`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := bytes.Replace(example, []byte(tt.old), []byte(tt.new), 1)
+			if bytes.Equal(data, example) {
+				t.Fatal("fixture mutation did not match canonical config")
+			}
+
+			_, err := Load(writeConfig(t, string(data)))
+			if err == nil {
+				t.Fatal("Load accepted ambiguous or non-canonical JSON member")
+			}
+			if strings.Contains(err.Error(), canary) {
+				t.Fatalf("Load error leaked config value: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadAcceptsCanonicalJSONMembers(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+
+	cfg, err := Load(filepath.Join("..", "..", "aegis.example.json"))
+	if err != nil {
+		t.Fatalf("Load canonical example config: %v", err)
+	}
+	if cfg.Auth.Issuer != "aegis" || len(cfg.Providers) != 2 || len(cfg.Egress.AllowedDomains) != 2 {
+		t.Fatalf("Load canonical example config returned unexpected fields")
+	}
+}
+
+func TestLoadRejectsExplicitNullForNonNullableConfigValues(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+
+	example, err := os.ReadFile(filepath.Join("..", "..", "aegis.example.json"))
+	if err != nil {
+		t.Fatalf("read example config: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		path []any
+	}{
+		{name: "root server", path: []any{"server"}},
+		{name: "root kms", path: []any{"kms"}},
+		{name: "root providers", path: []any{"providers"}},
+		{name: "root auth", path: []any{"auth"}},
+		{name: "root rate limit", path: []any{"rate_limit"}},
+		{name: "root quota", path: []any{"quota"}},
+		{name: "root store", path: []any{"store"}},
+		{name: "root egress", path: []any{"egress"}},
+
+		{name: "server address", path: []any{"server", "address"}},
+		{name: "server read timeout", path: []any{"server", "read_timeout"}},
+		{name: "server write timeout", path: []any{"server", "write_timeout"}},
+		{name: "server shutdown timeout", path: []any{"server", "shutdown_timeout"}},
+		{name: "server max request body size", path: []any{"server", "max_request_body_size"}},
+		{name: "server tls", path: []any{"server", "tls"}},
+		{name: "server tls enabled", path: []any{"server", "tls", "enabled"}},
+		{name: "server tls cert file", path: []any{"server", "tls", "cert_file"}},
+		{name: "server tls key file", path: []any{"server", "tls", "key_file"}},
+		{name: "server tls ca file", path: []any{"server", "tls", "ca_file"}},
+		{name: "server tls min version", path: []any{"server", "tls", "min_version"}},
+
+		{name: "kms mode", path: []any{"kms", "mode"}},
+		{name: "kms local", path: []any{"kms", "local"}},
+		{name: "kms local master key env", path: []any{"kms", "local", "master_key_env"}},
+		{name: "kms local key store path", path: []any{"kms", "local", "key_store_path"}},
+		{name: "kms local minimum envelope version", path: []any{"kms", "local", "minimum_envelope_version"}},
+		{name: "kms vault", path: []any{"kms", "vault"}},
+		{name: "kms vault address", path: []any{"kms", "vault", "address"}},
+		{name: "kms vault path", path: []any{"kms", "vault", "path"}},
+		{name: "kms vault token env", path: []any{"kms", "vault", "token_env"}},
+
+		{name: "provider element", path: []any{"providers", 0}},
+		{name: "provider id", path: []any{"providers", 0, "id"}},
+		{name: "provider name", path: []any{"providers", 0, "name"}},
+		{name: "provider type", path: []any{"providers", 0, "type"}},
+		{name: "provider base url", path: []any{"providers", 0, "base_url"}},
+		{name: "provider api key id", path: []any{"providers", 0, "api_key_id"}},
+		{name: "provider models", path: []any{"providers", 0, "models"}},
+		{name: "provider model element", path: []any{"providers", 0, "models", 0}},
+		{name: "provider weight", path: []any{"providers", 0, "weight"}},
+		{name: "provider max rpm", path: []any{"providers", 0, "max_rpm"}},
+		{name: "provider max tpm", path: []any{"providers", 0, "max_tpm"}},
+		{name: "provider enabled", path: []any{"providers", 0, "enabled"}},
+		{name: "provider priority", path: []any{"providers", 0, "priority"}},
+
+		{name: "auth jwt signing key env", path: []any{"auth", "jwt_signing_key_env"}},
+		{name: "auth token expiry", path: []any{"auth", "token_expiry"}},
+		{name: "auth issuer", path: []any{"auth", "issuer"}},
+		{name: "auth revocation", path: []any{"auth", "revocation"}},
+		{name: "auth revocation backend", path: []any{"auth", "revocation", "backend"}},
+		{name: "auth revocation file path", path: []any{"auth", "revocation", "file_path"}},
+		{name: "auth revocation refresh interval", path: []any{"auth", "revocation", "refresh_interval"}},
+
+		{name: "rate limit enabled", path: []any{"rate_limit", "enabled"}},
+		{name: "rate limit backend", path: []any{"rate_limit", "backend"}},
+		{name: "rate limit redis url", path: []any{"rate_limit", "redis_url"}},
+		{name: "rate limit default rpm", path: []any{"rate_limit", "default_rpm"}},
+		{name: "rate limit default tpm", path: []any{"rate_limit", "default_tpm"}},
+		{name: "rate limit default max concurrency", path: []any{"rate_limit", "default_max_concurrency"}},
+
+		{name: "quota enabled", path: []any{"quota", "enabled"}},
+		{name: "quota backend", path: []any{"quota", "backend"}},
+		{name: "quota dsn", path: []any{"quota", "dsn"}},
+		{name: "quota default budget", path: []any{"quota", "default_budget"}},
+
+		{name: "root admin", path: []any{"admin"}},
+		{name: "admin enabled", path: []any{"admin", "enabled"}},
+
+		{name: "store type", path: []any{"store", "type"}},
+		{name: "store dsn", path: []any{"store", "dsn"}},
+
+		{name: "egress allowed domains", path: []any{"egress", "allowed_domains"}},
+		{name: "egress allowed domain element", path: []any{"egress", "allowed_domains", 0}},
+	}
+
+	const wantErr = "parsing config file: json: null is not allowed in configuration"
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := configWithNullAtPath(t, example, tt.path)
+			_, err := Load(writeConfig(t, string(data)))
+			if err == nil {
+				t.Fatal("Load accepted explicit null for a non-nullable configuration value")
+			}
+			if err.Error() != wantErr {
+				t.Fatalf("Load error = %q, want generic null rejection %q", err, wantErr)
+			}
+			for _, canary := range []string{nullCanaryServerValue, nullCanaryProviderValue} {
+				if strings.Contains(err.Error(), canary) {
+					t.Fatalf("Load error leaked config canary: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadPreservesDefaultsForCanonicalOmittedFields(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+
+	cfg, err := Load(writeConfig(t, `{
+		"server": {},
+		"kms": {
+			"mode": "local",
+			"local": {
+				"master_key_env": "AEGIS_MASTER_KEY",
+				"key_store_path": "aegis.keys"
+			}
+		},
+		"providers": [{
+			"id": "openai-primary",
+			"api_key_id": "openai-key-1",
+			"models": ["gpt-4o-mini"],
+			"enabled": true
+		}],
+		"auth": {},
+		"rate_limit": {},
+		"egress": {"allowed_domains": ["api.openai.com"]}
+	}`))
+	if err != nil {
+		t.Fatalf("Load canonical omissions: %v", err)
+	}
+
+	want := defaultConfig()
+	if cfg.Server != want.Server {
+		t.Fatalf("server defaults = %+v, want %+v", cfg.Server, want.Server)
+	}
+	if cfg.Auth != want.Auth {
+		t.Fatalf("auth defaults = %+v, want %+v", cfg.Auth, want.Auth)
+	}
+	if cfg.RateLimit != want.RateLimit {
+		t.Fatalf("rate-limit defaults = %+v, want %+v", cfg.RateLimit, want.RateLimit)
+	}
+	if cfg.KMS.Local.MinimumEnvelopeVersion != want.KMS.Local.MinimumEnvelopeVersion {
+		t.Fatalf(
+			"minimum envelope version = %d, want omitted-field default %d",
+			cfg.KMS.Local.MinimumEnvelopeVersion,
+			want.KMS.Local.MinimumEnvelopeVersion,
+		)
+	}
+}
+
+func TestLoadDoesNotEchoUnknownFieldOrInvalidDurationValues(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+	example, err := os.ReadFile(filepath.Join("..", "..", "aegis.example.json"))
+	if err != nil {
+		t.Fatalf("read example config: %v", err)
+	}
+	tests := []struct {
+		name   string
+		data   []byte
+		canary string
+	}{
+		{
+			name:   "unknown field",
+			data:   bytes.Replace(example, []byte(`"issuer": "aegis"`), []byte(`"CANARY_SECRET_FIELD_72b3": true, "issuer": "aegis"`), 1),
+			canary: "CANARY_SECRET_FIELD_72b3",
+		},
+		{
+			name:   "invalid duration string",
+			data:   bytes.Replace(example, []byte(`"token_expiry": "24h"`), []byte(`"token_expiry": "CANARY_SECRET_DURATION_918a"`), 1),
+			canary: "CANARY_SECRET_DURATION_918a",
+		},
+		{
+			name:   "invalid duration type",
+			data:   bytes.Replace(example, []byte(`"token_expiry": "24h"`), []byte(`"token_expiry": {"CANARY_SECRET_OBJECT_4d1c":true}`), 1),
+			canary: "CANARY_SECRET_OBJECT_4d1c",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "aegis.json")
+			if err := os.WriteFile(path, tt.data, 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			_, err := Load(path)
+			if err == nil {
+				t.Fatal("Load accepted invalid config")
+			}
+			if strings.Contains(err.Error(), tt.canary) {
+				t.Fatalf("Load error leaked canary %q: %v", tt.canary, err)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsOversizedConfigBeforeDecode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oversized.json")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	if err := file.Truncate(maxConfigFileBytes + 1); err != nil {
+		_ = file.Close()
+		t.Fatalf("Truncate: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	_, err = Load(path)
+	if err == nil || !strings.Contains(err.Error(), "size limit") {
+		t.Fatalf("Load oversized config error = %v, want size-limit rejection", err)
+	}
+}
+
+func TestConfiguredRequestBodyLimitMatchesMandatorySemanticEnvelope(t *testing.T) {
+	const semanticEnvelope int64 = 4 << 20
+	if DefaultMaxRequestBodySize != semanticEnvelope || MaxRequestBodySizeLimit != semanticEnvelope {
+		t.Fatalf(
+			"request body defaults/max = %d/%d, want semantic envelope %d",
+			DefaultMaxRequestBodySize,
+			MaxRequestBodySizeLimit,
+			semanticEnvelope,
+		)
+	}
+}
+
+func TestReadBoundedConfigFileRejectsGroupOrOtherWritableInput(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "writable.json")
+	if err := os.WriteFile(path, []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.Chmod(path, 0o622); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+
+	if _, err := readBoundedConfigFile(path); err == nil || !strings.Contains(err.Error(), "permissions") {
+		t.Fatalf("readBoundedConfigFile error = %v, want unsafe-permissions rejection", err)
+	}
+}
+
 func TestLoadRejectsEmptyAuthIssuer(t *testing.T) {
 	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
 
@@ -77,6 +427,165 @@ func TestLoadRejectsEmptyAuthIssuer(t *testing.T) {
 	_, err = Load(path)
 	if err == nil || !strings.Contains(err.Error(), "auth.issuer must not be empty") {
 		t.Fatalf("Load error = %v, want empty issuer rejection", err)
+	}
+}
+
+func TestLoadRejectsAuthIssuerAboveRevocationBound(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+	example, err := os.ReadFile(filepath.Join("..", "..", "aegis.example.json"))
+	if err != nil {
+		t.Fatalf("read example config: %v", err)
+	}
+	example = bytes.Replace(
+		example,
+		[]byte(`"issuer": "aegis"`),
+		[]byte(`"issuer": "`+strings.Repeat("i", 1025)+`"`),
+		1,
+	)
+	path := filepath.Join(t.TempDir(), "aegis.json")
+	if err := os.WriteFile(path, example, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	_, err = Load(path)
+	if err == nil || !strings.Contains(err.Error(), "auth.issuer must not exceed 1024 bytes") {
+		t.Fatalf("Load error = %v, want revocable issuer bound", err)
+	}
+}
+
+func TestLoadRejectsMissingLocalKMSKeyStorePath(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+
+	example, err := os.ReadFile(filepath.Join("..", "..", "aegis.example.json"))
+	if err != nil {
+		t.Fatalf("read example config: %v", err)
+	}
+	example = bytes.Replace(example, []byte("      \"key_store_path\": \"aegis.keys\",\n"), nil, 1)
+
+	path := filepath.Join(t.TempDir(), "aegis.json")
+	if err := os.WriteFile(path, example, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err = Load(path)
+	if err == nil || !strings.Contains(err.Error(), "kms.local.key_store_path must not be empty") {
+		t.Fatalf("Load error = %v, want missing durable KMS path rejection", err)
+	}
+}
+
+func TestLoadRejectsDisabledRateLimit(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+
+	example, err := os.ReadFile(filepath.Join("..", "..", "aegis.example.json"))
+	if err != nil {
+		t.Fatalf("read example config: %v", err)
+	}
+	example = bytes.Replace(
+		example,
+		[]byte("\"rate_limit\": {\n    \"enabled\": true"),
+		[]byte("\"rate_limit\": {\n    \"enabled\": false"),
+		1,
+	)
+
+	path := filepath.Join(t.TempDir(), "aegis.json")
+	if err := os.WriteFile(path, example, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err = Load(path)
+	if err == nil || !strings.Contains(err.Error(), "rate_limit.enabled must be true") {
+		t.Fatalf("Load error = %v, want disabled rate-limit rejection", err)
+	}
+}
+
+func TestLoadRejectsZeroRateLimitBounds(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+	example, err := os.ReadFile(filepath.Join("..", "..", "aegis.example.json"))
+	if err != nil {
+		t.Fatalf("read example config: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		old     string
+		new     string
+		wantErr string
+	}{
+		{name: "default RPM", old: `"default_rpm": 60`, new: `"default_rpm": 0`, wantErr: "rate_limit.default_rpm must be positive"},
+		{name: "default concurrency", old: `"default_max_concurrency": 10`, new: `"default_max_concurrency": 0`, wantErr: "rate_limit.default_max_concurrency must be positive"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := bytes.Replace(example, []byte(tt.old), []byte(tt.new), 1)
+			path := filepath.Join(t.TempDir(), "aegis.json")
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Load error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsMalformedEgressAllowlistEntries(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+	const canary = "CANARY-config-egress-secret-2b8e41"
+
+	example, err := os.ReadFile(filepath.Join("..", "..", "aegis.example.json"))
+	if err != nil {
+		t.Fatalf("read example config: %v", err)
+	}
+	entries := []string{
+		"https://api.openai.com",
+		"https://user:" + canary + "@api.openai.com",
+		"user@api.openai.com",
+		"127.0.0.1",
+		"*.openai.com:8443",
+		"bad host",
+	}
+	for _, entry := range entries {
+		t.Run(entry, func(t *testing.T) {
+			data := bytes.Replace(example, []byte(`"api.openai.com"`), []byte(fmt.Sprintf("%q", entry)), 1)
+			path := filepath.Join(t.TempDir(), "aegis.json")
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), "egress.allowed_domains") {
+				t.Fatalf("Load error = %v, want malformed egress allowlist rejection", err)
+			}
+			if strings.Contains(err.Error(), canary) {
+				t.Fatalf("Load error leaked malformed allowlist secret: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadBindsLegacyLoopbackAllowlistToConfiguredProviderPorts(t *testing.T) {
+	example, err := os.ReadFile(filepath.Join("..", "..", "aegis.example.json"))
+	if err != nil {
+		t.Fatalf("read example config: %v", err)
+	}
+	var document any
+	if err := json.Unmarshal(example, &document); err != nil {
+		t.Fatalf("decode example config: %v", err)
+	}
+	setConfigJSONValue(t, document, []any{"providers", 0, "base_url"}, "https://127.0.0.1:18443")
+	setConfigJSONValue(t, document, []any{"providers", 1, "base_url"}, "https://127.0.0.1:28443")
+	setConfigJSONValue(t, document, []any{"egress", "allowed_domains"}, []string{"127.0.0.1"})
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		t.Fatalf("encode loopback config: %v", err)
+	}
+
+	cfg, err := LoadForOperator(writeConfig(t, string(encoded)))
+	if err != nil {
+		t.Fatalf("LoadForOperator loopback compatibility config: %v", err)
+	}
+	if got, want := strings.Join(cfg.Egress.AllowedDomains, ","), "127.0.0.1:18443,127.0.0.1:28443"; got != want {
+		t.Fatalf("bound loopback allowlist = %q, want %q", got, want)
 	}
 }
 
@@ -159,7 +668,7 @@ func TestLoadExampleConfig(t *testing.T) {
 		t.Fatalf("Load example config returned error: %v", err)
 	}
 	if cfg.RateLimit.DefaultTPM != 0 {
-		t.Fatalf("example default_tpm = %d, want 0 until TPM enforcement exists", cfg.RateLimit.DefaultTPM)
+		t.Fatalf("example default_tpm = %d, want 0 (unlimited) by default", cfg.RateLimit.DefaultTPM)
 	}
 	if cfg.Auth.TokenExpiry > 24*time.Hour {
 		t.Fatalf("example token expiry = %v, want no more than 24h for the standalone baseline", cfg.Auth.TokenExpiry)
@@ -179,10 +688,13 @@ func TestLoadExampleConfig(t *testing.T) {
 		}
 	}
 	if cfg.Quota.Enabled {
-		t.Fatal("example config enabled quota before runtime enforcement exists")
+		t.Fatal("example config must keep quota disabled by default")
 	}
 	if cfg.Quota.Backend != "" || cfg.Quota.DSN != "" || cfg.Quota.DefaultBudget != 0 {
-		t.Fatalf("example quota reserved fields = backend=%q dsn=%q budget=%f, want empty/zero until quota enforcement exists", cfg.Quota.Backend, cfg.Quota.DSN, cfg.Quota.DefaultBudget)
+		t.Fatalf("example quota optional fields = backend=%q dsn=%q budget=%f, want empty/zero while quota is disabled", cfg.Quota.Backend, cfg.Quota.DSN, cfg.Quota.DefaultBudget)
+	}
+	if cfg.Admin.Enabled {
+		t.Fatal("example config must keep admin disabled by default")
 	}
 	if cfg.Store.Type != "" || cfg.Store.DSN != "" {
 		t.Fatalf("example store reserved fields = type=%q dsn=%q, want empty until control-plane store exists", cfg.Store.Type, cfg.Store.DSN)
@@ -280,6 +792,100 @@ func TestValidateEnabledProviderIDsRejectsEmptyAndDuplicateIDs(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsUnroutableEnabledProviderModelsWithoutLeakingMetadata(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+
+	example, err := os.ReadFile(filepath.Join("..", "..", "aegis.example.json"))
+	if err != nil {
+		t.Fatalf("read example config: %v", err)
+	}
+
+	const (
+		providerCanary = "provider-model-contract-canary-5f81"
+		modelCanary    = "model-contract-canary-40c3"
+	)
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, any)
+	}{
+		{
+			name: "no enabled provider",
+			mutate: func(t *testing.T, document any) {
+				setConfigJSONValue(t, document, []any{"providers", 0, "enabled"}, false)
+				setConfigJSONValue(t, document, []any{"providers", 1, "id"}, providerCanary)
+				setConfigJSONValue(t, document, []any{"providers", 1, "enabled"}, false)
+			},
+		},
+		{
+			name: "enabled provider has no models",
+			mutate: func(t *testing.T, document any) {
+				setConfigJSONValue(t, document, []any{"providers", 1, "id"}, providerCanary)
+				setConfigJSONValue(t, document, []any{"providers", 1, "models"}, []string{})
+			},
+		},
+		{
+			name: "enabled provider has empty model",
+			mutate: func(t *testing.T, document any) {
+				setConfigJSONValue(t, document, []any{"providers", 1, "id"}, providerCanary)
+				setConfigJSONValue(t, document, []any{"providers", 1, "models"}, []string{""})
+			},
+		},
+		{
+			name: "enabled provider has whitespace-only model",
+			mutate: func(t *testing.T, document any) {
+				setConfigJSONValue(t, document, []any{"providers", 1, "id"}, providerCanary)
+				setConfigJSONValue(t, document, []any{"providers", 1, "models"}, []string{" \t "})
+			},
+		},
+		{
+			name: "enabled provider model is not trim-stable",
+			mutate: func(t *testing.T, document any) {
+				setConfigJSONValue(t, document, []any{"providers", 1, "id"}, providerCanary)
+				setConfigJSONValue(t, document, []any{"providers", 1, "models"}, []string{" " + modelCanary + " "})
+			},
+		},
+		{
+			name: "enabled provider has duplicate model",
+			mutate: func(t *testing.T, document any) {
+				setConfigJSONValue(t, document, []any{"providers", 1, "id"}, providerCanary)
+				setConfigJSONValue(t, document, []any{"providers", 1, "models"}, []string{modelCanary, modelCanary})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var document any
+			if err := json.Unmarshal(example, &document); err != nil {
+				t.Fatalf("decode canonical config fixture: %v", err)
+			}
+			tt.mutate(t, document)
+			data, err := json.Marshal(document)
+			if err != nil {
+				t.Fatalf("encode config fixture: %v", err)
+			}
+
+			_, err = Load(writeConfig(t, string(data)))
+			if err == nil {
+				t.Fatal("Load accepted an enabled-provider model contract violation")
+			}
+			if strings.Contains(err.Error(), providerCanary) || strings.Contains(err.Error(), modelCanary) {
+				t.Fatalf("Load error leaked provider or model metadata: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateEnabledProviderModelsAllowsWildcardAndIgnoresDisabledProviders(t *testing.T) {
+	providers := []Provider{
+		{Enabled: true, Models: []string{"*"}},
+		{Enabled: false, Models: []string{" ", "duplicate", "duplicate"}},
+	}
+	if err := ValidateEnabledProviderModels(providers); err != nil {
+		t.Fatalf("ValidateEnabledProviderModels rejected supported model metadata: %v", err)
+	}
+}
+
 func TestLoadRejectsInvalidMinimumEnvelopeVersion(t *testing.T) {
 	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
 	example, err := os.ReadFile(filepath.Join("..", "..", "aegis.example.json"))
@@ -312,13 +918,13 @@ func TestLoadRejectsProviderAPIKeyIDAboveKMSBound(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsQuotaUntilRuntimeEnforcementExists(t *testing.T) {
+func TestLoadAcceptsEnabledMemoryQuota(t *testing.T) {
 	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
 
 	path := writeConfig(t, `{
 		"kms": {
 			"mode": "local",
-			"local": {"master_key_env": "AEGIS_MASTER_KEY"}
+			"local": {"master_key_env": "AEGIS_MASTER_KEY", "key_store_path": "aegis.keys"}
 		},
 		"providers": [
 			{
@@ -331,13 +937,16 @@ func TestLoadRejectsQuotaUntilRuntimeEnforcementExists(t *testing.T) {
 				"enabled": true
 			}
 		],
-		"quota": {"enabled": true},
+		"quota": {"enabled": true, "backend": "memory", "default_budget": 10},
 		"egress": {"allowed_domains": ["api.openai.com"]}
 	}`)
 
-	_, err := Load(path)
-	if err == nil || !strings.Contains(err.Error(), "quota enforcement is not implemented") {
-		t.Fatalf("Load error = %v, want quota enforcement failure", err)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load enabled memory quota: %v", err)
+	}
+	if !cfg.Quota.Enabled || cfg.Quota.DefaultBudget != 10 {
+		t.Fatalf("quota = %+v, want enabled memory budget", cfg.Quota)
 	}
 }
 
@@ -369,15 +978,15 @@ func TestLoadRejectsReservedPersistenceConfig(t *testing.T) {
 				"enabled": false,
 				"default_budget": 100.0
 			}`,
-			wantErr: "quota.default_budget is reserved",
+			wantErr: "quota.default_budget requires quota.enabled=true",
 		},
 		{
-			name: "zero quota default budget field present",
+			name: "quota model prices require enabled",
 			config: `"quota": {
 				"enabled": false,
-				"default_budget": 0
+				"model_prices": [{"model": "gpt-4o-mini", "input_per_million": 1, "output_per_million": 2}]
 			}`,
-			wantErr: "quota.default_budget is reserved",
+			wantErr: "quota.model_prices requires quota.enabled=true",
 		},
 		{
 			name: "store type",
@@ -476,6 +1085,48 @@ func TestLoadRejectsNonPositiveAuthTokenExpiry(t *testing.T) {
 				t.Fatalf("Load error = %v, want auth.token_expiry failure", err)
 			}
 		})
+	}
+}
+
+func TestLoadRejectsAuthTokenExpiryThatCannotBeRetained(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+	path := writeConfig(t, `{
+		"kms": {"mode": "local", "local": {"master_key_env": "AEGIS_MASTER_KEY"}},
+		"auth": {
+			"jwt_signing_key_env": "AEGIS_JWT_KEY",
+			"token_expiry": "2562047h47m16.854775807s",
+			"issuer": "aegis"
+		},
+		"providers": [{
+			"id": "openai-primary", "name": "OpenAI Primary", "type": "openai",
+			"base_url": "https://api.openai.com", "api_key_id": "openai-key-1",
+			"models": ["gpt-4o-mini"], "enabled": true
+		}],
+		"quota": {"enabled": false},
+		"egress": {"allowed_domains": ["api.openai.com"]}
+	}`)
+
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "maximum supported") {
+		t.Fatalf("Load error = %v, want retained-lifetime bound", err)
+	}
+}
+
+func TestLoadRejectsNonCanonicalAuthIssuerWhitespace(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+	example, err := os.ReadFile(filepath.Join("..", "..", "aegis.example.json"))
+	if err != nil {
+		t.Fatalf("read example config: %v", err)
+	}
+	example = bytes.Replace(example, []byte(`"issuer": "aegis"`), []byte(`"issuer": " aegis "`), 1)
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, example, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err = Load(path)
+	if err == nil || !strings.Contains(err.Error(), "leading or trailing whitespace") {
+		t.Fatalf("Load error = %v, want issuer whitespace rejection", err)
 	}
 }
 
@@ -622,34 +1273,6 @@ func TestLoadRejectsReservedRateControls(t *testing.T) {
 			wantErr: "TPM enforcement is not implemented",
 		},
 		{
-			name: "default_tpm",
-			config: `{
-				"kms": {
-					"mode": "local",
-					"local": {"master_key_env": "AEGIS_MASTER_KEY"}
-				},
-				"providers": [
-					{
-						"id": "openai-primary",
-						"name": "OpenAI Primary",
-						"type": "openai",
-						"base_url": "https://api.openai.com",
-						"api_key_id": "openai-key-1",
-						"models": ["gpt-4o-mini"],
-						"enabled": true
-					}
-				],
-				"rate_limit": {
-					"enabled": true,
-					"backend": "memory",
-					"default_tpm": 1000
-				},
-				"quota": {"enabled": false},
-				"egress": {"allowed_domains": ["api.openai.com"]}
-			}`,
-			wantErr: "TPM enforcement is not implemented",
-		},
-		{
 			name: "redis url field present",
 			config: `{
 				"kms": {
@@ -712,6 +1335,71 @@ func TestLoadRejectsReservedRateControls(t *testing.T) {
 				t.Fatalf("Load error = %v, want %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestLoadAcceptsDefaultTPM(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+	path := writeConfig(t, `{
+		"kms": {
+			"mode": "local",
+			"local": {"master_key_env": "AEGIS_MASTER_KEY", "key_store_path": "aegis.keys"}
+		},
+		"providers": [
+			{
+				"id": "openai-primary",
+				"name": "OpenAI Primary",
+				"type": "openai",
+				"base_url": "https://api.openai.com",
+				"api_key_id": "openai-key-1",
+				"models": ["gpt-4o-mini"],
+				"enabled": true
+			}
+		],
+		"rate_limit": {
+			"enabled": true,
+			"backend": "memory",
+			"default_rpm": 60,
+			"default_tpm": 1000,
+			"default_max_concurrency": 10
+		},
+		"quota": {"enabled": false},
+		"egress": {"allowed_domains": ["api.openai.com"]}
+	}`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load default TPM: %v", err)
+	}
+	if cfg.RateLimit.DefaultTPM != 1000 {
+		t.Fatalf("default_tpm = %d, want 1000", cfg.RateLimit.DefaultTPM)
+	}
+}
+
+func TestLoadRejectsAdminNonLoopback(t *testing.T) {
+	t.Setenv("AEGIS_MASTER_KEY", hex.EncodeToString(make([]byte, 32)))
+	path := writeConfig(t, `{
+		"kms": {
+			"mode": "local",
+			"local": {"master_key_env": "AEGIS_MASTER_KEY", "key_store_path": "aegis.keys"}
+		},
+		"providers": [
+			{
+				"id": "openai-primary",
+				"name": "OpenAI Primary",
+				"type": "openai",
+				"base_url": "https://api.openai.com",
+				"api_key_id": "openai-key-1",
+				"models": ["gpt-4o-mini"],
+				"enabled": true
+			}
+		],
+		"quota": {"enabled": false},
+		"admin": {"enabled": true, "address": "0.0.0.0:9090", "token_env": "AEGIS_ADMIN_TOKEN"},
+		"egress": {"allowed_domains": ["api.openai.com"]}
+	}`)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Fatalf("Load error = %v, want loopback admin rejection", err)
 	}
 }
 
@@ -918,6 +1606,75 @@ func writeConfig(t *testing.T, data string) string {
 		t.Fatalf("write config: %v", err)
 	}
 	return path
+}
+
+const (
+	nullCanaryServerValue   = "CANARY_NULL_SERVER_VALUE_3f8d"
+	nullCanaryProviderValue = "CANARY_NULL_PROVIDER_VALUE_91c2"
+)
+
+func configWithNullAtPath(t *testing.T, data []byte, path []any) []byte {
+	t.Helper()
+
+	var document any
+	if err := json.Unmarshal(data, &document); err != nil {
+		t.Fatalf("decode canonical config fixture: %v", err)
+	}
+
+	setConfigJSONValue(t, document, []any{"server", "tls", "ca_file"}, nullCanaryServerValue)
+	setConfigJSONValue(t, document, []any{"providers", 1, "name"}, nullCanaryProviderValue)
+	setConfigJSONValue(t, document, path, nil)
+
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		t.Fatalf("encode null config fixture: %v", err)
+	}
+	return encoded
+}
+
+func setConfigJSONValue(t *testing.T, document any, path []any, value any) {
+	t.Helper()
+	if len(path) == 0 {
+		t.Fatal("config JSON path must not be empty")
+	}
+
+	current := document
+	for i, segment := range path {
+		last := i == len(path)-1
+		switch segment := segment.(type) {
+		case string:
+			object, ok := current.(map[string]any)
+			if !ok {
+				t.Fatalf("config JSON path segment %q does not address an object", segment)
+			}
+			if last {
+				object[segment] = value
+				return
+			}
+
+			next, exists := object[segment]
+			if !exists || next == nil {
+				if _, ok := path[i+1].(string); !ok {
+					t.Fatalf("config JSON path segment %q cannot create a missing array", segment)
+				}
+				next = map[string]any{}
+				object[segment] = next
+			}
+			current = next
+		case int:
+			array, ok := current.([]any)
+			if !ok || segment < 0 || segment >= len(array) {
+				t.Fatalf("config JSON path index %d is out of range", segment)
+			}
+			if last {
+				array[segment] = value
+				return
+			}
+			current = array[segment]
+		default:
+			t.Fatalf("unsupported config JSON path segment type %T", segment)
+		}
+	}
 }
 
 func serverBoundsConfig(readTimeout, writeTimeout, shutdownTimeout string, maxRequestBodySize int64) string {

@@ -4,9 +4,11 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 const keyFileSuffix = ".key"
@@ -50,27 +52,44 @@ func (f *FileBackend) Get(keyID string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	info, err := os.Lstat(path)
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0) // #nosec G304 -- keyPath confines the encoded filename; O_NOFOLLOW rejects symlinks atomically and O_NONBLOCK prevents special files from stalling before fstat.
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrBackendNotFound
 		}
-		return nil, err
+		return nil, fmt.Errorf("opening encrypted key blob: %w", err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+	file := os.NewFile(uintptr(fd), path)
+	defer func() { _ = file.Close() }()
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("checking encrypted key blob: %w", err)
+	}
+	if !info.Mode().IsRegular() {
 		return nil, errors.New("encrypted key blob must be a regular non-symlink file")
 	}
 	if info.Mode().Perm()&0077 != 0 {
 		return nil, fmt.Errorf("encrypted key blob permissions %o are not owner-only", info.Mode().Perm())
 	}
-	raw, err := os.ReadFile(path) // #nosec G304 -- keyPath restricts reads to encoded filenames under the configured key-store directory.
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, ErrBackendNotFound
+	if info.Size() < 0 || info.Size() > maxEncryptedKeyBlobBytes {
+		return nil, encryptedBlobSizeError(info.Size())
 	}
-	return raw, err
+
+	raw, err := io.ReadAll(io.LimitReader(file, maxEncryptedKeyBlobBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("reading encrypted key blob: %w", err)
+	}
+	if err := validateEncryptedBlobSize(raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
 }
 
 func (f *FileBackend) Put(keyID string, ciphertext []byte) error {
+	if err := validateEncryptedBlobSize(ciphertext); err != nil {
+		return err
+	}
 	path, err := f.keyPath(keyID)
 	if err != nil {
 		return err

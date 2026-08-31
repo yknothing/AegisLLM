@@ -25,13 +25,16 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
+
+	"github.com/yknothing/AegisLLM/internal/virtualkey"
 )
 
 const (
 	snapshotVersion     = 1
 	maxSnapshotBytes    = 4 << 20
 	maxSnapshotEntries  = 100_000
-	maxIdentifierBytes  = 1024
+	maxIdentifierBytes  = virtualkey.MaxRevocableIdentifierBytes
 	revocationClockSkew = 60 * time.Second
 )
 
@@ -122,11 +125,14 @@ func (w *Writer) Revoke(ctx context.Context, issuer, keyID string, now time.Time
 	if strings.TrimSpace(issuer) == "" || strings.TrimSpace(keyID) == "" {
 		return CommitResult{}, errors.New("revocation issuer and key id must not be empty")
 	}
-	if len(issuer) > maxIdentifierBytes || len(keyID) > maxIdentifierBytes {
-		return CommitResult{}, fmt.Errorf("revocation issuer and key id must not exceed %d bytes", maxIdentifierBytes)
+	if len(issuer) > virtualkey.MaxRevocableIdentifierBytes || len(keyID) > virtualkey.MaxRevocableIdentifierBytes {
+		return CommitResult{}, fmt.Errorf("revocation issuer and key id must not exceed %d bytes", virtualkey.MaxRevocableIdentifierBytes)
 	}
 	if maxTokenTTL <= 0 {
 		return CommitResult{}, errors.New("revocation token lifetime must be positive")
+	}
+	if maxTokenTTL > virtualkey.MaxTokenTTL {
+		return CommitResult{}, errors.New("revocation token lifetime exceeds the maximum supported lifetime")
 	}
 	if err := ensureSecureParent(w.path); err != nil {
 		return CommitResult{}, err
@@ -151,6 +157,10 @@ func (w *Writer) Revoke(ctx context.Context, issuer, keyID string, now time.Time
 			}
 			if item.Issuer == issuer && item.KeyID == keyID {
 				found = true
+				if item.RetainUntil < desiredRetention {
+					item.RetainUntil = desiredRetention
+					changed = true
+				}
 			}
 			kept = append(kept, item)
 		}
@@ -210,7 +220,7 @@ func commitResult(s snapshot, changed bool) CommitResult {
 type readerState struct {
 	generation uint64
 	digest     [sha256.Size]byte
-	revoked    map[string]struct{}
+	revoked    map[string]int64
 	err        error
 }
 
@@ -260,29 +270,46 @@ func (r *Reader) Refresh() error {
 			err = fmt.Errorf("%w: generation content changed", ErrRollback)
 		}
 	}
+
+	now := time.Now().Unix()
+	revoked := make(map[string]int64, len(s.Entries))
+	if err == nil {
+		for _, item := range s.Entries {
+			if item.RetainUntil > now {
+				revoked[revocationKey(item.Issuer, item.KeyID)] = item.RetainUntil
+			}
+		}
+		if current != nil {
+			for key, retainUntil := range current.revoked {
+				if retainUntil <= now {
+					continue
+				}
+				nextRetention, exists := revoked[key]
+				if !exists || nextRetention < retainUntil {
+					err = fmt.Errorf("%w: live tombstone removed or shortened", ErrRollback)
+					break
+				}
+			}
+		}
+	}
 	if err != nil {
 		generation := uint64(0)
 		var previousDigest [sha256.Size]byte
+		previousRevoked := map[string]int64{}
 		if current != nil {
 			generation = current.generation
 			previousDigest = current.digest
+			previousRevoked = current.revoked
 		}
 		r.state.Store(&readerState{
 			generation: generation,
 			digest:     previousDigest,
-			revoked:    map[string]struct{}{},
+			revoked:    previousRevoked,
 			err:        fmt.Errorf("%w: %v", ErrUnavailable, err),
 		})
 		return err
 	}
 
-	now := time.Now().Unix()
-	revoked := make(map[string]struct{}, len(s.Entries))
-	for _, item := range s.Entries {
-		if item.RetainUntil > now {
-			revoked[revocationKey(item.Issuer, item.KeyID)] = struct{}{}
-		}
-	}
 	r.state.Store(&readerState{
 		generation: s.Generation,
 		digest:     digest,
@@ -335,32 +362,255 @@ func revocationKey(issuer, keyID string) string {
 	return issuer + "\x00" + keyID
 }
 
+type snapshotJSONScope uint8
+
+const (
+	snapshotJSONAny snapshotJSONScope = iota
+	snapshotJSONRoot
+	snapshotJSONEntries
+	snapshotJSONEntry
+)
+
+func validateSnapshotJSON(raw []byte) error {
+	if !utf8.Valid(raw) {
+		return errors.New("invalid revocation snapshot JSON")
+	}
+	if err := validateSnapshotJSONStrings(raw); err != nil {
+		return err
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	return scanSnapshotJSONValue(decoder, snapshotJSONRoot)
+}
+
+func validateSnapshotJSONStrings(raw []byte) error {
+	for i := 0; i < len(raw); i++ {
+		if raw[i] != '"' {
+			continue
+		}
+
+		closed := false
+		for i++; i < len(raw); i++ {
+			switch raw[i] {
+			case '"':
+				closed = true
+			case '\\':
+				if i+1 >= len(raw) {
+					return errors.New("invalid revocation snapshot JSON")
+				}
+				switch raw[i+1] {
+				case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+					i++
+				case 'u':
+					unit, ok := parseSnapshotJSONHex16(raw, i+2)
+					if !ok {
+						return errors.New("invalid revocation snapshot JSON")
+					}
+					switch {
+					case unit >= 0xd800 && unit <= 0xdbff:
+						if i+11 >= len(raw) || raw[i+6] != '\\' || raw[i+7] != 'u' {
+							return errors.New("invalid revocation snapshot JSON")
+						}
+						low, validLow := parseSnapshotJSONHex16(raw, i+8)
+						if !validLow || low < 0xdc00 || low > 0xdfff {
+							return errors.New("invalid revocation snapshot JSON")
+						}
+						i += 11
+					case unit >= 0xdc00 && unit <= 0xdfff:
+						return errors.New("invalid revocation snapshot JSON")
+					default:
+						i += 5
+					}
+				default:
+					return errors.New("invalid revocation snapshot JSON")
+				}
+			default:
+				if raw[i] < 0x20 {
+					return errors.New("invalid revocation snapshot JSON")
+				}
+			}
+			if closed {
+				break
+			}
+		}
+		if !closed {
+			return errors.New("invalid revocation snapshot JSON")
+		}
+	}
+	return nil
+}
+
+func parseSnapshotJSONHex16(raw []byte, offset int) (uint16, bool) {
+	if offset < 0 || len(raw)-offset < 4 {
+		return 0, false
+	}
+	var value uint16
+	for _, char := range raw[offset : offset+4] {
+		value <<= 4
+		switch {
+		case char >= '0' && char <= '9':
+			value |= uint16(char - '0')
+		case char >= 'a' && char <= 'f':
+			value |= uint16(char-'a') + 10
+		case char >= 'A' && char <= 'F':
+			value |= uint16(char-'A') + 10
+		default:
+			return 0, false
+		}
+	}
+	return value, true
+}
+
+func scanSnapshotJSONValue(decoder *json.Decoder, scope snapshotJSONScope) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return errors.New("invalid revocation snapshot JSON")
+	}
+
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		return scanSnapshotJSONObject(decoder, scope)
+	case '[':
+		return scanSnapshotJSONArray(decoder, scope)
+	default:
+		return errors.New("invalid revocation snapshot JSON")
+	}
+}
+
+func scanSnapshotJSONObject(decoder *json.Decoder, scope snapshotJSONScope) error {
+	seenExact := make(map[string]struct{})
+	seenFolded := make(map[string]string)
+	hasUnknownMember := false
+
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return errors.New("invalid revocation snapshot JSON")
+		}
+		name, ok := token.(string)
+		if !ok {
+			return errors.New("invalid revocation snapshot JSON")
+		}
+
+		if _, exists := seenExact[name]; exists {
+			return errors.New("invalid revocation snapshot JSON: duplicate object member")
+		}
+		seenExact[name] = struct{}{}
+
+		folded := asciiFoldSnapshotJSONMember(name)
+		if previous, exists := seenFolded[folded]; exists && previous != name {
+			return errors.New("invalid revocation snapshot JSON: ambiguous object member")
+		}
+		seenFolded[folded] = name
+
+		childScope, known := snapshotJSONMemberScope(scope, name)
+		if !known {
+			hasUnknownMember = true
+			childScope = snapshotJSONAny
+		}
+		if err := scanSnapshotJSONValue(decoder, childScope); err != nil {
+			return err
+		}
+	}
+
+	closing, err := decoder.Token()
+	if err != nil || closing != json.Delim('}') {
+		return errors.New("invalid revocation snapshot JSON")
+	}
+	if hasUnknownMember {
+		return errors.New("invalid revocation snapshot JSON: unknown object member")
+	}
+	return nil
+}
+
+func scanSnapshotJSONArray(decoder *json.Decoder, scope snapshotJSONScope) error {
+	elementScope := snapshotJSONAny
+	if scope == snapshotJSONEntries {
+		elementScope = snapshotJSONEntry
+	}
+	for decoder.More() {
+		if err := scanSnapshotJSONValue(decoder, elementScope); err != nil {
+			return err
+		}
+	}
+
+	closing, err := decoder.Token()
+	if err != nil || closing != json.Delim(']') {
+		return errors.New("invalid revocation snapshot JSON")
+	}
+	return nil
+}
+
+func snapshotJSONMemberScope(scope snapshotJSONScope, name string) (snapshotJSONScope, bool) {
+	switch scope {
+	case snapshotJSONRoot:
+		switch name {
+		case "version", "generation", "updated_at":
+			return snapshotJSONAny, true
+		case "entries":
+			return snapshotJSONEntries, true
+		default:
+			return snapshotJSONAny, false
+		}
+	case snapshotJSONEntry:
+		switch name {
+		case "issuer", "kid", "revoked_at", "retain_until":
+			return snapshotJSONAny, true
+		default:
+			return snapshotJSONAny, false
+		}
+	default:
+		return snapshotJSONAny, true
+	}
+}
+
+func asciiFoldSnapshotJSONMember(name string) string {
+	folded := []byte(name)
+	for i, char := range folded {
+		if char >= 'A' && char <= 'Z' {
+			folded[i] = char + ('a' - 'A')
+		}
+	}
+	return string(folded)
+}
+
 func readSnapshot(path string) (snapshot, [sha256.Size]byte, error) {
 	var zeroDigest [sha256.Size]byte
 	if err := validateSecureParent(path); err != nil {
 		return snapshot{}, zeroDigest, err
 	}
-	info, err := os.Lstat(path)
+	file, err := openSnapshotNoFollow(path)
 	if err != nil {
 		return snapshot{}, zeroDigest, err
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return snapshot{}, zeroDigest, err
+	}
+	if !info.Mode().IsRegular() {
 		return snapshot{}, zeroDigest, errors.New("revocation snapshot must be a regular non-symlink file")
 	}
 	if info.Mode().Perm()&0077 != 0 {
 		return snapshot{}, zeroDigest, fmt.Errorf("revocation snapshot permissions %o are not owner-only", info.Mode().Perm())
 	}
-	file, err := os.Open(path) // #nosec G304 -- path is explicit operator configuration and is lstat-validated above.
-	if err != nil {
-		return snapshot{}, zeroDigest, err
+	if info.Size() < 0 || info.Size() > maxSnapshotBytes {
+		return snapshot{}, zeroDigest, errors.New("revocation snapshot exceeds size limit")
 	}
-	defer func() { _ = file.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(file, maxSnapshotBytes+1))
 	if err != nil {
 		return snapshot{}, zeroDigest, err
 	}
 	if len(raw) > maxSnapshotBytes {
 		return snapshot{}, zeroDigest, errors.New("revocation snapshot exceeds size limit")
+	}
+	if err := validateSnapshotJSON(raw); err != nil {
+		return snapshot{}, zeroDigest, err
 	}
 
 	decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -397,8 +647,8 @@ func validateSnapshot(s snapshot) error {
 		if strings.TrimSpace(item.Issuer) == "" || strings.TrimSpace(item.KeyID) == "" {
 			return errors.New("revocation entry issuer and kid must not be empty")
 		}
-		if len(item.Issuer) > maxIdentifierBytes || len(item.KeyID) > maxIdentifierBytes {
-			return fmt.Errorf("revocation entry issuer and kid must not exceed %d bytes", maxIdentifierBytes)
+		if len(item.Issuer) > virtualkey.MaxRevocableIdentifierBytes || len(item.KeyID) > virtualkey.MaxRevocableIdentifierBytes {
+			return fmt.Errorf("revocation entry issuer and kid must not exceed %d bytes", virtualkey.MaxRevocableIdentifierBytes)
 		}
 		if item.RevokedAt <= 0 || item.RetainUntil <= item.RevokedAt {
 			return errors.New("revocation entry timestamps are invalid")

@@ -9,10 +9,46 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/yknothing/AegisLLM/internal/kms"
 )
+
+func TestNewStoreFromMasterKeyZerosOwnedBytesOnFailure(t *testing.T) {
+	tests := []struct {
+		name      string
+		masterKey []byte
+		decodeErr error
+	}{
+		{
+			name:      "partial hex decode",
+			masterKey: bytes.Repeat([]byte{0xa5}, 16),
+			decodeErr: errors.New("invalid hex byte"),
+		},
+		{
+			name:      "wrong key length",
+			masterKey: bytes.Repeat([]byte{0xa5}, 31),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			owned := append([]byte(nil), tt.masterKey...)
+			store, err := newStoreFromMasterKey(owned, tt.decodeErr, NewMemoryBackend(), 1)
+			if err == nil {
+				t.Fatal("newStoreFromMasterKey returned nil error")
+			}
+			if store != nil {
+				t.Fatal("newStoreFromMasterKey returned a store on failure")
+			}
+			if !bytes.Equal(owned, make([]byte, len(owned))) {
+				t.Fatalf("owned master key was not zeroed: %x", owned)
+			}
+		})
+	}
+}
 
 func TestV2EnvelopeBindsCiphertextToKeyID(t *testing.T) {
 	const envVar = "TEST_AEGIS_V2_AAD_KEY"
@@ -215,6 +251,57 @@ func TestMigrateLegacyRejectsNonEmptyBackupBeforeSourceMutation(t *testing.T) {
 	after, _ := source.Get("legacy-key")
 	if !bytes.Equal(after, legacyBlob) {
 		t.Fatal("source changed after non-empty backup rejection")
+	}
+}
+
+func TestMigrateLegacyDoesNotRetainSourceBlobBuffers(t *testing.T) {
+	const envVar = "TEST_AEGIS_MIGRATION_STREAMING_KEY"
+	t.Setenv(envVar, hex.EncodeToString(make([]byte, 32)))
+
+	seed := NewMemoryBackend()
+	seedStore, err := New(envVar, seed)
+	if err != nil {
+		t.Fatalf("New seed store returned error: %v", err)
+	}
+	if err := seedStore.StoreKey(context.Background(), "key-a", []byte("secret-a")); err != nil {
+		t.Fatalf("StoreKey key-a returned error: %v", err)
+	}
+	if err := seedStore.StoreKey(context.Background(), "key-b", []byte("secret-b")); err != nil {
+		t.Fatalf("StoreKey key-b returned error: %v", err)
+	}
+	if err := seedStore.Close(); err != nil {
+		t.Fatalf("Close seed store returned error: %v", err)
+	}
+	a, err := seed.Get("key-a")
+	if err != nil {
+		t.Fatalf("Get seed key-a returned error: %v", err)
+	}
+	b, err := seed.Get("key-b")
+	if err != nil {
+		t.Fatalf("Get seed key-b returned error: %v", err)
+	}
+
+	source := &reusingBlobBackend{data: map[string][]byte{
+		"key-a": append([]byte(nil), a...),
+		"key-b": append([]byte(nil), b...),
+	}}
+	store, err := New(envVar, source)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	backup := NewMemoryBackend()
+	if _, err := store.MigrateLegacy(context.Background(), backup); err != nil {
+		t.Fatalf("MigrateLegacy returned error: %v", err)
+	}
+	backedUpA, _ := backup.Get("key-a")
+	backedUpB, _ := backup.Get("key-b")
+	if !bytes.Equal(backedUpA, a) {
+		t.Fatal("key-a backup changed because migration retained a reusable source buffer")
+	}
+	if !bytes.Equal(backedUpB, b) {
+		t.Fatal("key-b backup changed because migration retained a reusable source buffer")
 	}
 }
 
@@ -460,6 +547,95 @@ func TestFileBackendPersistsEncryptedKeys(t *testing.T) {
 	}
 }
 
+func TestFileBackendRejectsOversizedEncryptedBlob(t *testing.T) {
+	dir := t.TempDir()
+	backend, err := NewFileBackend(dir)
+	if err != nil {
+		t.Fatalf("NewFileBackend returned error: %v", err)
+	}
+	path, err := backend.keyPath("oversized")
+	if err != nil {
+		t.Fatalf("keyPath returned error: %v", err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatalf("OpenFile returned error: %v", err)
+	}
+	if err := file.Truncate((1 << 20) + 1); err != nil {
+		_ = file.Close()
+		t.Fatalf("Truncate returned error: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	if _, err := backend.Get("oversized"); err == nil || !strings.Contains(err.Error(), "size") {
+		t.Fatalf("Get oversized blob error = %v, want size-limit rejection", err)
+	}
+}
+
+func TestFileBackendRejectsFIFOWithoutBlocking(t *testing.T) {
+	backend, err := NewFileBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileBackend returned error: %v", err)
+	}
+	path, err := backend.keyPath("fifo")
+	if err != nil {
+		t.Fatalf("keyPath returned error: %v", err)
+	}
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatalf("Mkfifo returned error: %v", err)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, getErr := backend.Get("fifo")
+		result <- getErr
+	}()
+	select {
+	case getErr := <-result:
+		if getErr == nil || !strings.Contains(getErr.Error(), "regular") {
+			t.Fatalf("Get FIFO error = %v, want regular-file rejection", getErr)
+		}
+	case <-time.After(100 * time.Millisecond):
+		writer, openErr := os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+		if openErr != nil {
+			t.Fatalf("unblock FIFO reader: %v", openErr)
+		}
+		_ = writer.Close()
+		<-result
+		t.Fatal("Get blocked while opening a FIFO")
+	}
+}
+
+func TestFileBackendPutRejectsOversizedEncryptedBlob(t *testing.T) {
+	backend, err := NewFileBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileBackend returned error: %v", err)
+	}
+	if err := backend.Put("oversized", make([]byte, (1<<20)+1)); err == nil || !strings.Contains(err.Error(), "size") {
+		t.Fatalf("Put oversized blob error = %v, want size-limit rejection", err)
+	}
+}
+
+func TestFileBackendRoundTripsLargestAcceptedEncryptedBlob(t *testing.T) {
+	backend, err := NewFileBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileBackend returned error: %v", err)
+	}
+	want := bytes.Repeat([]byte{0xa5}, maxEncryptedKeyBlobBytes)
+	if err := backend.Put("largest-accepted", want); err != nil {
+		t.Fatalf("Put largest accepted blob returned error: %v", err)
+	}
+	got, err := backend.Get("largest-accepted")
+	if err != nil {
+		t.Fatalf("Get largest accepted blob returned error: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("largest accepted encrypted blob changed during round trip")
+	}
+}
+
 func TestFileBackendConfinesEncodedKeyIDs(t *testing.T) {
 	masterKeyHex := hex.EncodeToString(make([]byte, 32))
 	const envVar = "TEST_AEGIS_FILE_BACKEND_CONFINEMENT_KEY"
@@ -539,4 +715,36 @@ func TestFileBackendListRejectsMalformedKeyFilename(t *testing.T) {
 	if _, err := backend.List(); err == nil || !strings.Contains(err.Error(), "filename") {
 		t.Fatalf("List error = %v, want malformed filename rejection", err)
 	}
+}
+
+type reusingBlobBackend struct {
+	data  map[string][]byte
+	reuse []byte
+}
+
+func (b *reusingBlobBackend) Get(keyID string) ([]byte, error) {
+	blob, ok := b.data[keyID]
+	if !ok {
+		return nil, ErrBackendNotFound
+	}
+	b.reuse = append(b.reuse[:0], blob...)
+	return b.reuse, nil
+}
+
+func (b *reusingBlobBackend) Put(keyID string, ciphertext []byte) error {
+	b.data[keyID] = append([]byte(nil), ciphertext...)
+	return nil
+}
+
+func (b *reusingBlobBackend) Delete(keyID string) error {
+	delete(b.data, keyID)
+	return nil
+}
+
+func (b *reusingBlobBackend) List() ([]string, error) {
+	ids := make([]string, 0, len(b.data))
+	for keyID := range b.data {
+		ids = append(ids, keyID)
+	}
+	return ids, nil
 }

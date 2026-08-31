@@ -59,6 +59,57 @@ func TestImportProviderKeyResolvesConfiguredProviderAndProtectsReplace(t *testin
 	}
 }
 
+func TestImportProviderKeyRejectsUnsafeHeaderValuesBeforeStorage(t *testing.T) {
+	tests := []struct {
+		name       string
+		credential []byte
+	}{
+		{name: "embedded newline", credential: []byte("sk-first\nsk-second")},
+		{name: "embedded carriage return", credential: []byte("sk-first\rsk-second")},
+		{name: "NUL", credential: []byte{'s', 'k', 0, 'x'}},
+		{name: "control", credential: []byte{'s', 'k', 0x1f, 'x'}},
+		{name: "DEL", credential: []byte{'s', 'k', 0x7f, 'x'}},
+		{name: "non ASCII", credential: []byte("sk-密钥")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := operatorTestConfig(t)
+			service, err := New(cfg)
+			if err != nil {
+				t.Fatalf("New returned error: %v", err)
+			}
+			plaintext := append([]byte(nil), tt.credential...)
+			secret := string(plaintext)
+			err = service.ImportProviderKey(context.Background(), "openai-primary", plaintext, false)
+			if err == nil {
+				t.Fatal("ImportProviderKey accepted a credential unsafe for an Authorization header")
+			}
+			if secret != "" && strings.Contains(err.Error(), secret) {
+				t.Fatal("ImportProviderKey reflected the rejected credential")
+			}
+			for _, b := range plaintext {
+				if b != 0 {
+					t.Fatal("rejected provider credential was not zeroed")
+				}
+			}
+
+			store, openErr := factory.NewOperatorStore(cfg.KMS)
+			if openErr != nil {
+				t.Fatalf("open KMS: %v", openErr)
+			}
+			defer func() { _ = store.Close() }()
+			stored, getErr := store.GetKey(context.Background(), "openai-key-1")
+			if stored != nil {
+				stored.Close()
+			}
+			if !errors.Is(getErr, kms.ErrKeyNotFound) {
+				t.Fatalf("GetKey error = %v, want no stored credential", getErr)
+			}
+		})
+	}
+}
+
 func TestIssueVirtualKeyUsesSharedProductionContract(t *testing.T) {
 	cfg := operatorTestConfig(t)
 	service, _ := New(cfg)
@@ -82,6 +133,46 @@ func TestIssueVirtualKeyUsesSharedProductionContract(t *testing.T) {
 	}
 	if validated.KeyID != claims.KeyID || validated.Subject != "client-1" {
 		t.Fatalf("validated claims = %+v, issued = %+v", validated, claims)
+	}
+}
+
+func TestIssueVirtualKeyIncludesBudgetAndRejectsTPM(t *testing.T) {
+	cfg := operatorTestConfig(t)
+	service, _ := New(cfg)
+	now := time.Unix(1_800_000_000, 0).UTC()
+	service.now = func() time.Time { return now }
+
+	token, claims, err := service.IssueVirtualKey(IssueOptions{
+		Subject:        "client-1",
+		Models:         []string{"gpt-4o-mini"},
+		TTL:            time.Hour,
+		MaxRPM:         10,
+		MaxTPM:         virtualkey.UnlimitedPerKeyTPM,
+		MaxConcurrency: 2,
+		BudgetUSD:      12.5,
+	})
+	if err != nil {
+		t.Fatalf("IssueVirtualKey returned error: %v", err)
+	}
+	if claims.MaxTPM != virtualkey.UnlimitedPerKeyTPM || claims.BudgetUSD != 12.5 {
+		t.Fatalf("claims tpm=%d budget=%f, want 0/12.5", claims.MaxTPM, claims.BudgetUSD)
+	}
+	signingKey := []byte("0123456789abcdef0123456789abcdef")
+	validated, err := virtualkey.ValidateAt(token, signingKey, "aegis", 24*time.Hour, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("ValidateAt returned error: %v", err)
+	}
+	if validated.MaxTPM != virtualkey.UnlimitedPerKeyTPM || validated.BudgetUSD != 12.5 {
+		t.Fatalf("validated tpm=%d budget=%f", validated.MaxTPM, validated.BudgetUSD)
+	}
+
+	if _, _, err := service.IssueVirtualKey(IssueOptions{
+		Subject: "client-1",
+		Models:  []string{"gpt-4o-mini"},
+		TTL:     time.Hour,
+		MaxTPM:  virtualkey.UnlimitedPerKeyTPM + 1,
+	}); err != nil {
+		t.Fatalf("IssueVirtualKey rejected per-key TPM: %v", err)
 	}
 }
 

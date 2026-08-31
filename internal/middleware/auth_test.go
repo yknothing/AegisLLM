@@ -6,13 +6,17 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/yknothing/AegisLLM/internal/config"
 	"github.com/yknothing/AegisLLM/internal/server"
+	"github.com/yknothing/AegisLLM/internal/virtualkey"
 )
 
 var testSigningKey = []byte("0123456789abcdef0123456789abcdef")
@@ -125,41 +129,44 @@ func TestValidateTokenRejectsMissingIssuedAtWhenMaxTTLConfigured(t *testing.T) {
 	}
 }
 
-func TestValidateTokenRejectsReservedBudgetAndTPMClaims(t *testing.T) {
-	tests := []struct {
-		name   string
-		claims VirtualKeyClaims
-	}{
-		{
-			name: "budget",
-			claims: VirtualKeyClaims{
-				BudgetUSD: 10,
-			},
-		},
-		{
-			name: "tpm",
-			claims: VirtualKeyClaims{
-				MaxTPM: 1000,
-			},
-		},
-	}
-
+func TestValidateTokenAcceptsBudgetClaim(t *testing.T) {
 	key := testSigningKey
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			claims := tt.claims
-			claims.KeyID = "vk_test"
-			claims.KeySource = "pool"
-			claims.Models = []string{"gpt-4o-mini"}
-			claims.IssuedAt = time.Now().Add(-time.Minute).Unix()
-			claims.ExpiresAt = time.Now().Add(time.Hour).Unix()
-			claims.Issuer = "aegis"
+	claims := VirtualKeyClaims{
+		KeyID:     "vk_test",
+		KeySource: "pool",
+		Models:    []string{"gpt-4o-mini"},
+		BudgetUSD: 10,
+		IssuedAt:  time.Now().Add(-time.Minute).Unix(),
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		Issuer:    "aegis",
+	}
+	token := signTestToken(t, key, claims)
+	got, err := validateToken(token, key, "aegis", testTokenMaxTTL)
+	if err != nil {
+		t.Fatalf("validateToken rejected supported budget claim: %v", err)
+	}
+	if got.BudgetUSD != claims.BudgetUSD {
+		t.Fatalf("budget = %f, want %f", got.BudgetUSD, claims.BudgetUSD)
+	}
+}
 
-			token := signTestToken(t, key, claims)
-			if _, err := validateToken(token, key, "aegis", testTokenMaxTTL); err == nil {
-				t.Fatalf("validateToken accepted reserved %s claim", tt.name)
-			}
-		})
+func TestValidateTokenAcceptsPositiveTPMClaim(t *testing.T) {
+	key := testSigningKey
+	token := signTestToken(t, key, VirtualKeyClaims{
+		KeyID:     "vk_test",
+		KeySource: "pool",
+		Models:    []string{"gpt-4o-mini"},
+		MaxTPM:    virtualkey.UnlimitedPerKeyTPM + 1,
+		IssuedAt:  time.Now().Add(-time.Minute).Unix(),
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		Issuer:    "aegis",
+	})
+	got, err := validateToken(token, key, "aegis", testTokenMaxTTL)
+	if err != nil {
+		t.Fatalf("validateToken rejected per-key TPM: %v", err)
+	}
+	if got.MaxTPM != virtualkey.UnlimitedPerKeyTPM+1 {
+		t.Fatalf("MaxTPM = %d, want %d", got.MaxTPM, virtualkey.UnlimitedPerKeyTPM+1)
 	}
 }
 
@@ -397,10 +404,55 @@ func TestAuthRejectsRevokedToken(t *testing.T) {
 	}
 }
 
+func TestAuthRejectsOversizedTokenBeforeDownstreamWork(t *testing.T) {
+	checker := &countingRevocationChecker{}
+	pipeline, err := server.NewPipeline(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewPipeline returned error: %v", err)
+	}
+	pipeline.Use(Auth(AuthConfig{
+		SigningKey: testSigningKey,
+		Issuer:     "aegis",
+		Expiry:     testTokenMaxTTL,
+		Revocation: checker,
+	}))
+	downstreamCalls := 0
+	pipeline.Use(func(ctx *server.RequestContext, _ func()) {
+		downstreamCalls++
+		ctx.Writer.WriteHeader(http.StatusNoContent)
+	})
+
+	token := "eyJhbGciOiJIUzI1NiJ9." + strings.Repeat("A", virtualkey.MaxEncodedTokenBytes) + ".AA"
+	for range 3 {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		recorder := httptest.NewRecorder()
+		pipeline.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", recorder.Code)
+		}
+	}
+	if checker.calls != 0 {
+		t.Fatalf("revocation checks = %d, want 0", checker.calls)
+	}
+	if downstreamCalls != 0 {
+		t.Fatalf("downstream calls = %d, want 0", downstreamCalls)
+	}
+}
+
 type failingRevocationChecker struct{}
 
 func (failingRevocationChecker) Check(context.Context, string, string) (bool, error) {
 	return false, context.DeadlineExceeded
+}
+
+type countingRevocationChecker struct {
+	calls int
+}
+
+func (c *countingRevocationChecker) Check(context.Context, string, string) (bool, error) {
+	c.calls++
+	return false, nil
 }
 
 func validAuthClaims(keyID string) VirtualKeyClaims {

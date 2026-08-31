@@ -21,7 +21,7 @@ We will implement Aegis in **Go (1.22+)**.
 | **Developer pool** | Large | Growing | Very large | Very large |
 | **Compile time** | Fast | Slow | N/A | N/A |
 
-The critical factor is **supply chain attack surface**. The 2026 LiteLLM incident demonstrated that Python's PyPI ecosystem is vulnerable to dependency poisoning. Go's rich standard library means Aegis can be built with near-zero external dependencies, and `CGO_ENABLED=0` produces a fully static binary that runs in a Distroless container with no shell or package manager.
+The critical factor is **supply chain attack surface**. A 2026 PyPI dependency-poisoning incident against a widely used Python LLM proxy demonstrated that ecosystem. Go's rich standard library means Aegis can be built with near-zero external dependencies, and `CGO_ENABLED=0` produces a fully static binary that runs in a Distroless container with no shell or package manager.
 
 ## Consequences
 

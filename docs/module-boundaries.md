@@ -36,9 +36,10 @@ Responsibility: assemble a configured Aegis server from stable module interfaces
 Exports:
 - `NewServer(cfg *config.Config, logger *slog.Logger) (*server.Server, error)`
   - Purpose: build middleware in ADR-004 order and return a runnable server.
-  - Errors: missing signing key, invalid KMS config, invalid provider config.
+  - Errors: missing signing key, invalid KMS/provider config, or a missing/corrupt/empty enabled-provider credential.
   - Invariant: all provider egress hosts are allowlisted before proxy middleware is created.
-  - Invariant: egress host matching uses `internal/egress`; exact entries match only exact hosts and subdomains require explicit `*.` wildcard entries.
+  - Invariant: egress matching uses `internal/egress`; host-only and wildcard entries authorize HTTPS port 443, while non-default ports and IP literals require exact endpoint entries.
+  - Invariant: every distinct enabled-provider credential is decrypted once and immediately closed during startup preflight; no provider key value or key ID is included in the failure.
 
 ### `internal/server`
 
@@ -67,7 +68,7 @@ Invariants:
 - Auth runs before any body scanning or KMS access.
 - Router validates model permission before KMS key resolution.
 - KMS key resolution is pool-only in `v0.2.1` and fails closed for reserved BYOK key sources until owner/provider binding exists.
-- PII, router, and adapter share one bounded request-scoped body buffer; no middleware may independently re-read and retain a second body copy.
+- The pipeline owns one transport body. PII may create one bounded canonical JSON buffer under tighter semantic byte/shape budgets; router and adapter must reuse the resulting owned body rather than independently re-reading the socket.
 - Adapter may replace the owned request body and target path, but must not log body content; replaced and final buffers are zeroed.
 - Router circuit-breaker state may consume only outcome fields set by the proxy boundary.
 
@@ -80,8 +81,8 @@ Exports:
 - `ProxyRequest(...) (*ProxyResult, error)`
 
 Invariants:
-- Egress host must pass allowlist validation.
-- Exact egress entries match only exact hosts; wildcard entries such as `*.example.com` allow nested subdomains but not the apex host.
+- The HTTPS egress endpoint must pass strict allowlist validation before request construction and again at the dial boundary.
+- Exact host entries and wildcard entries such as `*.example.com` authorize port 443 only; wildcards allow nested subdomains but not the apex. Non-default ports and IP literals require exact endpoint rules. Every DNS answer must be public, and the transport dials the validated IP directly.
 - The bounded request body is forwarded from the pipeline-owned buffer; provider responses are streamed and neither body is logged.
 - Hop-by-hop and client credential headers are stripped before upstream forwarding.
 
@@ -113,5 +114,5 @@ both the offline operator path and runtime Auth middleware.
 | Add Anthropic request conversion | `internal/middleware/adapter.go`, adapter tests | Isolated |
 | Move local KMS file blobs to another durable backend | `internal/kms/local`, runtime backend wiring | Isolated |
 | Change middleware order | ADR, `internal/runtime`, order tests | Requires architecture review |
-| Add quota enforcement | `internal/quota`, new middleware, runtime config mapping, durable store | Requires architecture review because it changes request rejection semantics |
-| Mount Admin API | `internal/admin`, `cmd/aegis` or runtime listener wiring, auth/audit config | Requires architecture review because it adds a new trust boundary |
+| Add quota enforcement | `internal/quota`, middleware, runtime config mapping | Isolated for memory backend; durable store still reserved |
+| Mount Admin API | `internal/admin`, runtime second listener | Loopback-only (ADR-007); public bind still forbidden |
