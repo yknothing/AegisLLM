@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+env:
+  QUALITY_GO_VERSION: '1.26.6'
+  QUALITY_GO_RUNTIME: 'go1.26.6'
+
 jobs:
   go-compatibility:
     name: Go 1.22 compatibility
@@ -43,7 +47,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.26.6'
+          go-version: ${{ env.QUALITY_GO_VERSION }}
           cache: true
 
       - name: Technical iteration preflight (not release approval)
@@ -94,7 +98,7 @@ jobs:
       - name: Set up Go for binary inspection
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.26.6'
+          go-version: ${{ env.QUALITY_GO_VERSION }}
           cache: true
 
       - name: Build image
@@ -124,7 +128,7 @@ jobs:
           docker cp "${container_id}:/aegis" /tmp/aegis-ci-binary
           docker rm "${container_id}" >/dev/null
           go version -m /tmp/aegis-ci-binary | tee /tmp/aegis-ci-build-info
-          grep -F 'go1.26.6' /tmp/aegis-ci-build-info >/dev/null
+          grep -F "$QUALITY_GO_RUNTIME" /tmp/aegis-ci-build-info >/dev/null
           go run golang.org/x/vuln/cmd/govulncheck@v1.4.0 -mode=binary /tmp/aegis-ci-binary
 
       - name: Run read-only smoke

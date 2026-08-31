@@ -11,7 +11,8 @@
 # Stage 1: Build
 # ============================================================
 ARG BUILDPLATFORM=linux/amd64
-FROM --platform=$BUILDPLATFORM golang:1.26.6-alpine@sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83 AS builder
+ARG GO_BUILDER_IMAGE=golang:1.26.6-alpine@sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83
+FROM --platform=$BUILDPLATFORM ${GO_BUILDER_IMAGE} AS builder
 
 # Security: Base image digest is pinned; Alpine packages track repository
 # security patch levels at build time.

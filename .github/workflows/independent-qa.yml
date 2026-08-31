@@ -32,6 +32,7 @@ jobs:
       VERIFY_RC: '1'
       DIGEST_RC: '1'
       REPORT_RC: '1'
+      QUALITY_GO_VERSION: '1.26.6'
     steps:
       - name: Checkout candidate source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -42,7 +43,7 @@ jobs:
       - name: Set up pinned Go toolchain
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.26.6'
+          go-version: ${{ env.QUALITY_GO_VERSION }}
           cache: true
 
       - name: Validate source identity, QA lock, and change isolation

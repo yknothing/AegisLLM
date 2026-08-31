@@ -26,6 +26,7 @@ All notable changes to AegisLLM are documented here.
 - Removed third-party LLM proxy product names from public docs and changelog.
 
 ### Standalone operations and security
+- Pinned Quality gates, Independent QA, and the Docker builder to Go 1.26.6 so `govulncheck` tracks the current standard-library fixes.
 
 - Added a same-binary offline Operator CLI for revocation initialization,
   configured provider-key import, pool virtual-key issuance/revocation, and KMS
